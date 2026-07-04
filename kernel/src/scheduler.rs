@@ -73,7 +73,7 @@ impl TaskScheduler {
             .log_message(task_id, "INFO", &format!("Received goal: {}", goal))?;
 
         println!("\n╔══════════════════════════════════════════════════════════════╗");
-        println!("║  AgentOS Task Runner                                        ║");
+        println!("║  Kerna Task Runner                                          ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
         println!("║  Task ID: {}  ║", task_id);
         println!("║  Goal: {:<53} ║", truncate_str(goal, 53));
@@ -83,7 +83,7 @@ impl TaskScheduler {
         let context_str = self.memory.gather_context(goal).unwrap_or_default();
 
         let system_prompt = format!(
-            "You are AgentOS, an autonomous AI operating system agent. \
+            "You are Kerna, an autonomous AI agent runtime. \
             You help users accomplish goals by using available tools. \
             Execute the user's goal step by step. Use tools when needed. \
             When the goal is fully complete, respond with a final summary. \
@@ -239,7 +239,8 @@ impl TaskScheduler {
                     // HUGE OUTPUT SABOTAGE FIX: Truncate massively large tool outputs to prevent context window blowup
                     let max_tool_output_len = 50_000;
                     if result_str.len() > max_tool_output_len {
-                        result_str = format!("{}... [Output Truncated by Kerna ({} bytes exceeded)]", &result_str[..max_tool_output_len], max_tool_output_len);
+                        let truncated: String = result_str.chars().take(max_tool_output_len).collect();
+                        result_str = format!("{}... [Output Truncated by Kerna ({} chars exceeded)]", truncated, max_tool_output_len);
                     }
 
                     self.memory.log_message(
@@ -550,8 +551,9 @@ impl TaskScheduler {
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len])
+    if s.chars().count() > max_len {
+        let truncated: String = s.chars().take(max_len).collect();
+        format!("{}...", truncated)
     } else {
         s.to_string()
     }

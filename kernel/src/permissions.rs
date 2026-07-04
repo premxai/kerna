@@ -48,8 +48,9 @@ impl PermissionManager {
         println!("  │  ⚠️  PERMISSION REQUIRED                                 │");
         println!("  ├──────────────────────────────────────────────────────────┤");
         println!("  │  Tool:  {:<50} │", tool_name);
-        let args_short = if args_display.len() > 50 {
-            format!("{}...", &args_display[..47])
+        let args_short = if args_display.chars().count() > 50 {
+            let truncated: String = args_display.chars().take(47).collect();
+            format!("{}...", truncated)
         } else {
             args_display.to_string()
         };

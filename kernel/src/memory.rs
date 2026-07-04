@@ -483,7 +483,12 @@ impl MemoryEngine {
         if !memories.is_empty() {
             context.push_str("## Relevant past memories:\n");
             for m in &memories {
-                let display = if m.len() > 200 { &m[..200] } else { m };
+                let display = if m.chars().count() > 200 { 
+                    let truncated: String = m.chars().take(200).collect();
+                    format!("{}...", truncated)
+                } else { 
+                    m.to_string() 
+                };
                 context.push_str(&format!("- {}\n", display));
             }
             context.push('\n');

@@ -26,7 +26,7 @@ use watchdog::WatchdogEngine;
     about = "Kerna — The Developer Runtime for Autonomous AI Agents",
     long_about = "Kerna is the runtime for autonomous AI agents. Build them, run them, remember everything, and stay in control."
 )]
-#[command(version = "1.0.0")]
+#[command(version = "0.1.0")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -177,7 +177,7 @@ async fn main() -> Result<()> {
             }
 
             println!("╔══════════════════════════════════════════════════════════════╗");
-            println!("║                  Kerna Daemon v1.0.0                        ║");
+            println!("║                  Kerna Daemon v0.1.0                        ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
             println!("║  Database:    {:<45} ║", config.db_path);
             println!("║  LLM:        {:<45} ║", format!("{} / {}", config.llm_provider, config.llm_model));
@@ -295,7 +295,10 @@ async fn main() -> Result<()> {
                     println!("{:<36} | {:<20} | {:<10} | {:<10}", "No active agents", "", "", "");
                 } else {
                     for (id, goal, dur, tokens) in running {
-                        let g = if goal.len() > 17 { format!("{}...", &goal[..17]) } else { goal };
+                        let g = if goal.chars().count() > 17 { 
+                            let truncated: String = goal.chars().take(17).collect();
+                            format!("{}...", truncated) 
+                        } else { goal };
                         println!("{:<36} | {:<20} | {:<10} | {}s", id, g, tokens, dur);
                     }
                 }
@@ -459,7 +462,10 @@ approval_required = ["fs.write", "fs.delete"]
                         println!("  No tasks recorded.");
                     } else {
                         for (id, goal, status) in tasks.iter().take(15) {
-                            let g = if goal.len() > 37 { format!("{}...", &goal[..37]) } else { goal.clone() };
+                            let g = if goal.chars().count() > 37 { 
+                                let truncated: String = goal.chars().take(37).collect();
+                                format!("{}...", truncated) 
+                            } else { goal.clone() };
                             let icon = match status.as_str() {
                                 "completed" => "✅", "running" => "🔄", "failed" => "❌", _ => "⏳",
                             };
@@ -674,9 +680,12 @@ approval_required = ["fs.write", "fs.delete"]
                     let tasks = memory.get_tasks().unwrap_or_default();
                     println!("\n  Task Registry");
                     println!("  {:<36} │ {:<30} │ {:<10}", "Task ID", "Goal", "Status");
-                    println!("  {}┼{}┼{}", "─".repeat(37), "─".repeat(32), "─".repeat(12));
+                    println!("  {}┬{}┬{}", "─".repeat(37), "─".repeat(32), "─".repeat(12));
                     for (id, goal, status) in tasks.iter().take(5) {
-                        let g = if goal.len() > 27 { format!("{}...", &goal[..27]) } else { goal.clone() };
+                        let g = if goal.chars().count() > 27 { 
+                            let truncated: String = goal.chars().take(27).collect();
+                            format!("{}...", truncated) 
+                        } else { goal.clone() };
                         let icon = match status.as_str() {
                             "completed" => "✅", "running" => "🔄", "failed" => "❌", _ => "⏳",
                         };

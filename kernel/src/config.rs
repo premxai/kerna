@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-/// Configuration for a single MCP server that AgentOS can spawn and route tool calls to.
+/// Configuration for a single MCP server that Kerna can spawn and route tool calls to.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct McpServerConfig {
     pub name: String,
@@ -86,15 +86,15 @@ impl Config {
 
         // 2. Fall back to environment variables with sensible defaults
         let llm_provider =
-            env::var("AGENTOS_LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string());
+            env::var("KERNA_LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string());
 
-        let llm_api_key = env::var("AGENTOS_LLM_API_KEY")
+        let llm_api_key = env::var("KERNA_LLM_API_KEY")
             .or_else(|_| env::var("OPENAI_API_KEY"))
             .or_else(|_| env::var("ANTHROPIC_API_KEY"))
             .unwrap_or_default();
 
         let llm_model =
-            env::var("AGENTOS_LLM_MODEL").unwrap_or_else(|_| match llm_provider.as_str() {
+            env::var("KERNA_LLM_MODEL").unwrap_or_else(|_| match llm_provider.as_str() {
                 "anthropic" => "claude-sonnet-4-20250514".to_string(),
                 _ => "gpt-4o-mini".to_string(),
             });
