@@ -1,6 +1,6 @@
 # Kerna
 
-**Observable Runtime for Autonomous AI Agents**
+**You build the agent. Kerna runs it. Safely. Observably. Repeatably.**
 
 AI agents today can think, but they lack a robust runtime. Without persistent memory, hard permissions, execution observability, and reproducible chains of thought, agents are simply brittle toys. 
 
@@ -49,6 +49,11 @@ Kerna is designed to be extremely lightweight infrastructure, not a bloated Elec
 | Inspect / Export task | ~12 ms |
 | Idle Memory Consumption | ~14 MB |
 
+### Workflow Latency
+Developers care about workflow. Kerna's overhead inside the autonomous loop is near zero:
+
+`Planning (<1ms) → Tool Execution (Sub-process bound) → Permission Check (<0.1ms) → Retry (0ms) → Memory Log (0.2ms) → Export (12ms)`
+
 ## Getting Started
 
 1. Initialize Kerna to configure your preferred LLM provider:
@@ -70,26 +75,23 @@ See the `docs/` folder for Architecture, Permissions, and Plugin Development gui
 
 ## Roadmap
 
-**v1.0 (Current)**
+**v0.1.0 (Current)**
 - Core Agent Runtime
 - SQLite Memory Engine
 - MCP Plugin Support
 - Observability (Inspect, Explain, Export)
 
-**v1.1**
+**v0.2.0**
 - Event Bus Architecture 
 - `kerna trace` timeline renderer
 - Metrics API
 
-**v1.2**
+**v0.3.0**
 - Stable Plugin SDK
 - Plugin Registry
 - Deterministic Mode (`--deterministic`)
 
-**v1.3**
+**v1.0.0**
 - Cloud Sync
 - Team Workspaces & Shared Memory
-
-**v2.0**
 - Distributed Runtime
-- Remote Workers

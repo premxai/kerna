@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      
+    - name: Check formatting
+      run: cargo fmt -- --check
+      working-directory: ./kernel
+      
+    - name: Run clippy
+      run: cargo clippy
+      working-directory: ./kernel
+      
+    - name: Run tests
+      run: cargo test --verbose
+      working-directory: ./kernel
