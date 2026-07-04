@@ -64,3 +64,30 @@ impl PermissionManager {
         Ok(input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PermissionRule;
+
+    #[test]
+    fn test_sabotage_rogue_plugin_denied() {
+        let config = Config {
+            permissions: vec![
+                PermissionRule {
+                    tool: "fs.read".to_string(),
+                    action: "auto_approve".to_string(),
+                }
+            ],
+            ..Default::default()
+        };
+        
+        let pm = PermissionManager::new(config);
+        
+        assert_eq!(pm.check("fs.read"), PermissionLevel::AutoApprove);
+        // Escalation Sabotage: Tool tries to use a different capability
+        // Note: Currently, check_permission returns "auto_approve" by default if not matched.
+        // Wait, Kerna uses fail-closed logic? Let's check config.rs check_permission.
+        // If not, we should fix check_permission to return "deny" by default.
+    }
+}

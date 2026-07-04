@@ -566,4 +566,30 @@ mod tests {
         let logs = mem.get_task_logs(&task_id.to_string()).unwrap();
         assert_eq!(logs.len(), 100);
     }
+
+    #[test]
+    fn test_sabotage_db_concurrency() {
+        use std::sync::Arc;
+        let mem = Arc::new(setup_test_db("sabotage_concurrency"));
+        let task_id = Uuid::new_v4();
+        mem.create_task(task_id, None, "Concurrency Test").unwrap();
+        
+        let mut handles = vec![];
+        
+        for i in 0..50 {
+            let mem_clone = mem.clone();
+            handles.push(std::thread::spawn(move || {
+                for j in 0..100 {
+                    let _ = mem_clone.log_message(task_id, "INFO", &format!("Thread {} Msg {}", i, j));
+                }
+            }));
+        }
+        
+        for h in handles {
+            let _ = h.join();
+        }
+        
+        let logs = mem.get_task_logs(&task_id.to_string()).unwrap();
+        assert_eq!(logs.len(), 5000, "Database must survive extreme concurrency without locking");
+    }
 }

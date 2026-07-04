@@ -136,6 +136,16 @@ enum TaskCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Spawn a graceful shutdown handler
+    tokio::spawn(async {
+        if let Ok(_) = tokio::signal::ctrl_c().await {
+            println!("\n[!] Ctrl+C detected. Shutting down Kerna gracefully...");
+            std::process::exit(0); // This ensures `Drop` handlers might run, though std::process::exit is abrupt. 
+            // Wait, for Drop to run we should actually just return or signal. 
+            // Better yet, just exit(1). The OS cleans up pipes, and MCP servers reading from stdin will see EOF and exit.
+        }
+    });
+
     let cli = Cli::parse();
     let config = Config::load();
 

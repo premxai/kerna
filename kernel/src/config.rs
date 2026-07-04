@@ -38,7 +38,7 @@ pub struct PermissionRule {
 }
 
 /// Root application configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     pub llm_provider: String,
     pub llm_api_key: String,
@@ -126,7 +126,7 @@ impl Config {
                 return &rule.action;
             }
         }
-        "auto_approve" // Default: allow
+        "deny" // Default: fail-closed security
     }
 }
 

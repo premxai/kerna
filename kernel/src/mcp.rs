@@ -38,6 +38,8 @@ impl McpClient {
     pub fn spawn(cmd: &str, args: &[&str]) -> Result<Self> {
         let mut child = Command::new(cmd)
             .args(args)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -98,7 +100,11 @@ impl McpClient {
         self.stdin_writer.flush().await?;
 
         let mut line = String::new();
-        self.stdout_reader.read_line(&mut line).await?;
+        match tokio::time::timeout(std::time::Duration::from_secs(30), self.stdout_reader.read_line(&mut line)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(anyhow!("Failed to read from MCP server: {}", e)),
+            Err(_) => return Err(anyhow!("MCP server request timed out after 30 seconds")),
+        }
 
         if line.is_empty() {
             return Err(anyhow!("MCP server disconnected or returned empty response"));

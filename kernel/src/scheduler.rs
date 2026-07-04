@@ -149,19 +149,29 @@ impl TaskScheduler {
 
             println!("[*] Round {}/{} — Calling LLM...", round, max_rounds);
 
-            // Call the LLM
-            let response = match self.call_llm(&messages, &all_tools).await {
-                Ok(r) => r,
-                Err(e) => {
-                    // If LLM call fails, use fallback
-                    let err_msg = format!("LLM call failed: {}", e);
-                    self.memory.log_message(task_id, "WARN", &err_msg)?;
-                    println!("[!] {}", err_msg);
-
-                    if self.config.llm_api_key.is_empty() {
-                        println!("[!] No API key configured. Running fallback demo plan...");
-                        self.run_fallback_demo(task_id, goal).await?;
+            // Call the LLM with retry logic for bad responses
+            let mut attempt = 0;
+            let response = loop {
+                attempt += 1;
+                match self.call_llm(&messages, &all_tools).await {
+                    Ok(r) => break Ok(r),
+                    Err(e) => {
+                        let err_msg = format!("LLM call failed (Attempt {}/3): {}", attempt, e);
+                        self.memory.log_message(task_id, "WARN", &err_msg)?;
+                        println!("[!] {}", err_msg);
+                        
+                        if attempt >= 3 {
+                            break Err(e);
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     }
+                }
+            };
+
+            let response = match response {
+                Ok(r) => r,
+                Err(_) => {
+                    println!("[!] LLM failed after 3 attempts. Aborting task.");
                     break;
                 }
             };
@@ -215,7 +225,7 @@ impl TaskScheduler {
                     let tool_args: serde_json::Value = serde_json::from_str(tool_args_str).unwrap_or(json!({}));
                     let result = self.execute_tool(tool_name, &tool_args).await;
 
-                    let result_str = match &result {
+                    let mut result_str = match &result {
                         Ok(val) => {
                             println!("✓ {}", display_name);
                             val.to_string()
@@ -225,6 +235,12 @@ impl TaskScheduler {
                             format!("Error: {}", e)
                         }
                     };
+
+                    // HUGE OUTPUT SABOTAGE FIX: Truncate massively large tool outputs to prevent context window blowup
+                    let max_tool_output_len = 50_000;
+                    if result_str.len() > max_tool_output_len {
+                        result_str = format!("{}... [Output Truncated by Kerna ({} bytes exceeded)]", &result_str[..max_tool_output_len], max_tool_output_len);
+                    }
 
                     self.memory.log_message(
                         task_id,
