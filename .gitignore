@@ -1,0 +1,7 @@
+/target
+/kernel/target
+*.db
+*.db-journal
+kerna.toml
+/sandbox
+/reports

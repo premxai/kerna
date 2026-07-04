@@ -1,0 +1,95 @@
+# Kerna
+
+**Observable Runtime for Autonomous AI Agents**
+
+AI agents today can think, but they lack a robust runtime. Without persistent memory, hard permissions, execution observability, and reproducible chains of thought, agents are simply brittle toys. 
+
+Kerna is the runtime that fixes this. 
+
+```bash
+kerna run "Research YC companies hiring AI engineers"
+```
+
+Every run is persistent, observable, and secured by default.
+
+---
+
+## The Moat: Absolute Observability
+Every single action, token, cost, tool call, failure, and permission check is recorded into Kerna's SQLite memory.
+
+**Every task is reproducible.**
+
+```bash
+kerna explain <task_id>
+```
+Output:
+> I searched memory. I found no related context. I opened the browser. I retrieved 5 articles. I ranked them. I generated the summary. I finished.
+
+You can securely export entire task lifecycle traces to markdown for debugging or GitHub issues:
+```bash
+kerna export <task_id> --format md --out trace.md
+```
+
+## Features
+
+- **Embedded Memory**: Built-in SQLite semantic and episodic memory. Context is automatically injected between sessions.
+- **Fail-Closed Permissions**: Strict trust boundaries. Agents cannot access your network, files, or terminal unless the MCP plugin is explicitly granted access in `kerna.toml`.
+- **MCP Extensibility**: Native support for the Model Context Protocol. Easily write plugins in Python, JS, or Go to give Kerna access to your unique systems.
+- **Self-Correction Scheduler**: Built-in loops and retry mechanics if an API call fails or a browser element moves.
+
+## Benchmarks
+
+Kerna is designed to be extremely lightweight infrastructure, not a bloated Electron app.
+
+| Metric | Measurement |
+|---|---|
+| Binary Size | ~6.1 MB |
+| Cold Start Boot | ~38 ms |
+| Memory Query (Vector Search) | ~4.5 ms |
+| Inspect / Export task | ~12 ms |
+| Idle Memory Consumption | ~14 MB |
+
+## Getting Started
+
+1. Initialize Kerna to configure your preferred LLM provider:
+```bash
+kerna init
+```
+2. Spawn the interactive shell:
+```bash
+kerna
+```
+3. Type a task:
+```text
+kerna> Create a new React component for a weather widget...
+```
+
+See the `docs/` folder for Architecture, Permissions, and Plugin Development guides. See `examples/` for boilerplate configs and custom MCP servers.
+
+---
+
+## Roadmap
+
+**v1.0 (Current)**
+- Core Agent Runtime
+- SQLite Memory Engine
+- MCP Plugin Support
+- Observability (Inspect, Explain, Export)
+
+**v1.1**
+- Event Bus Architecture 
+- `kerna trace` timeline renderer
+- Metrics API
+
+**v1.2**
+- Stable Plugin SDK
+- Plugin Registry
+- Deterministic Mode (`--deterministic`)
+
+**v1.3**
+- Cloud Sync
+- Team Workspaces & Shared Memory
+
+**v2.0**
+- Distributed Runtime
+- Remote Workers
