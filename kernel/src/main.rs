@@ -338,9 +338,42 @@ approval_required = []
 
         Some(Commands::Doctor) => {
             println!("Kerna Doctor:\n");
-            println!("Database: OK ({})", config.db_path);
+            
+            match rusqlite::Connection::open(&config.db_path) {
+                Ok(conn) => {
+                    if conn.execute("SELECT 1", []).is_ok() {
+                        println!("Database: OK ({})", config.db_path);
+                    } else {
+                        println!("Database: ERROR (Cannot query database)");
+                    }
+                }
+                Err(e) => println!("Database: ERROR ({})", e),
+            }
+
             println!("LLM Key: {}", if config.llm_api_key.is_empty() { "MISSING" } else { "OK" });
-            println!("Plugins: {} loaded", config.mcp_servers.len());
+            
+            let mut valid_plugins = 0;
+            for server in &config.mcp_servers {
+                let cmd_exists = if std::path::Path::new(&server.command).exists() {
+                    true
+                } else {
+                    let checker = if cfg!(target_os = "windows") { "where" } else { "which" };
+                    std::process::Command::new(checker)
+                        .arg(&server.command)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false)
+                };
+                
+                if cmd_exists {
+                    valid_plugins += 1;
+                } else {
+                    println!("Plugin Warning: Command '{}' for '{}' not found in PATH", server.command, server.name);
+                }
+            }
+            println!("Plugins: {}/{} loaded and executable", valid_plugins, config.mcp_servers.len());
         }
 
         Some(Commands::Memory { query }) => {

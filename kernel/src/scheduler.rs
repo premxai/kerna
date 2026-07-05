@@ -72,6 +72,9 @@ impl TaskScheduler {
         self.memory
             .log_message(task_id, "INFO", &format!("Received goal: {}", goal))?;
 
+        let mut tool_failures: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut total_tool_failures = 0;
+
         println!("\n╔══════════════════════════════════════════════════════════════╗");
         println!("║  Kerna Task Runner                                          ║");
         println!("╠══════════════════════════════════════════════════════════════╣");
@@ -227,12 +230,29 @@ impl TaskScheduler {
 
                     let mut result_str = match &result {
                         Ok(val) => {
-                            println!("✓ {}", display_name);
+                            println!("✔️ {}", display_name);
                             val.to_string()
                         }
                         Err(e) => {
-                            println!("✓ Retry ({})", display_name);
-                            format!("Error: {}", e)
+                            println!("❌ Retry ({})", display_name);
+                            let e_str = e.to_string();
+                            let count = tool_failures.entry(tool_name.to_string()).or_insert(0);
+                            *count += 1;
+                            total_tool_failures += 1;
+                            
+                            if e_str.contains("timeout") || e_str.contains("Timeout") {
+                                if *count >= 2 {
+                                    let _ = self.memory.update_task_status(task_id, "failed");
+                                    return Err(anyhow!("Task failed: Tool '{}' timed out {} times.", tool_name, count));
+                                }
+                            }
+                            
+                            if total_tool_failures >= 5 {
+                                let _ = self.memory.update_task_status(task_id, "failed");
+                                return Err(anyhow!("Task failed: Max total tool failures (5) reached."));
+                            }
+                            
+                            format!("Error: {}", e_str)
                         }
                     };
 
@@ -362,6 +382,17 @@ impl TaskScheduler {
                     .send()
                     .await?;
 
+                let status = response.status();
+                if !status.is_success() {
+                    let err_text = response.text().await.unwrap_or_default();
+                    if status == reqwest::StatusCode::UNAUTHORIZED {
+                        return Err(anyhow!("401 Unauthorized: Check your LLM API key."));
+                    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        return Err(anyhow!("429 Rate Limited: Please slow down."));
+                    } else {
+                        return Err(anyhow!("HTTP Error {}: {}", status, err_text));
+                    }
+                }
                 let res_json: serde_json::Value = response.json().await?;
 
                 if let Some(err) = res_json.get("error") {
@@ -449,6 +480,17 @@ impl TaskScheduler {
                     .send()
                     .await?;
 
+                let status = response.status();
+                if !status.is_success() {
+                    let err_text = response.text().await.unwrap_or_default();
+                    if status == reqwest::StatusCode::UNAUTHORIZED {
+                        return Err(anyhow!("401 Unauthorized: Check your LLM API key."));
+                    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        return Err(anyhow!("429 Rate Limited: Please slow down."));
+                    } else {
+                        return Err(anyhow!("HTTP Error {}: {}", status, err_text));
+                    }
+                }
                 let res_json: serde_json::Value = response.json().await?;
 
                 if let Some(err) = res_json.get("error") {
@@ -514,7 +556,7 @@ impl TaskScheduler {
         println!("[!] Running offline demonstration mode...");
 
         let echo_cmd = format!(
-            "echo AgentOS executed goal: '{}' successfully. > workspace_v2\\report.txt",
+            "echo Kerna executed goal: '{}' successfully. > workspace_v2\\report.txt",
             goal
         );
 

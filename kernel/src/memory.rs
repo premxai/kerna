@@ -10,18 +10,34 @@ pub struct MemoryEngine {
 
 impl MemoryEngine {
     pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
-        let conn = Connection::open(db_path).context("Failed to open SQLite database")?;
+        let conn = match Connection::open(&db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Kerna database appears corrupted or inaccessible ({}).\nRun: kerna db repair\nor move kerna.db to kerna.db.bak and re-run kerna init.",
+                    e
+                ));
+            }
+        };
 
-        // Enable foreign keys
+        // Enable foreign keys and WAL mode for concurrency
         conn.execute("PRAGMA foreign_keys = ON;", [])?;
+        conn.execute("PRAGMA journal_mode = WAL;", [])?;
 
         let engine = MemoryEngine { conn: Mutex::new(conn) };
         engine.bootstrap()?;
         Ok(engine)
     }
 
+    fn get_conn(&self) -> std::sync::MutexGuard<Connection> {
+        match self.conn.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     fn bootstrap(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         // Create sessions table
         conn.execute(
                 "CREATE TABLE IF NOT EXISTS sessions (
@@ -126,7 +142,7 @@ impl MemoryEngine {
 
     pub fn create_session(&self, name: &str) -> Result<String> {
         let id = Uuid::new_v4().to_string();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         // Ignore if exists, or insert new
         conn.execute(
             "INSERT INTO sessions (id, name) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET last_active_at = CURRENT_TIMESTAMP",
@@ -141,7 +157,7 @@ impl MemoryEngine {
     }
 
     pub fn get_recent_sessions(&self) -> Result<Vec<(String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         let mut stmt = conn.prepare("SELECT id, name FROM sessions ORDER BY last_active_at DESC LIMIT 5")?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
@@ -159,7 +175,7 @@ impl MemoryEngine {
     // ─── Task Management ─────────────────────────────────────────
 
     pub fn create_task(&self, id: Uuid, session_id: Option<&str>, goal: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         conn.execute(
             "INSERT INTO tasks (id, session_id, goal, status) VALUES (?1, ?2, ?3, ?4)",
             params![id.to_string(), session_id, goal, "pending"],
@@ -168,7 +184,7 @@ impl MemoryEngine {
     }
 
     pub fn update_task_status(&self, id: Uuid, status: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         if status == "completed" || status == "failed" {
             conn.execute(
                 "UPDATE tasks SET status = ?1, completed_at = CURRENT_TIMESTAMP WHERE id = ?2",
@@ -184,7 +200,7 @@ impl MemoryEngine {
     }
 
     pub fn update_task_observability(&self, id: Uuid, duration_secs: i64, llm: &str, cost: f64, tokens: i64, retries: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         conn.execute(
             "UPDATE tasks SET duration_secs = ?1, llm_used = ?2, cost_estimate = ?3, tokens_used = ?4, retries = ?5 WHERE id = ?6",
             params![duration_secs, llm, cost, tokens, retries, id.to_string()],
@@ -194,7 +210,7 @@ impl MemoryEngine {
 
     pub fn log_message(&self, task_id: Uuid, level: &str, message: &str) -> Result<()> {
         let log_id = Uuid::new_v4().to_string();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         conn.execute(
             "INSERT INTO agent_logs (id, task_id, log_level, message) VALUES (?1, ?2, ?3, ?4)",
             params![log_id, task_id.to_string(), level, message],
@@ -203,7 +219,7 @@ impl MemoryEngine {
     }
 
     pub fn get_tasks(&self) -> Result<Vec<(String, String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         let mut stmt = conn.prepare("SELECT id, goal, status FROM tasks ORDER BY created_at DESC")?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
@@ -220,7 +236,7 @@ impl MemoryEngine {
     }
 
     pub fn get_running_tasks(&self) -> Result<Vec<(String, String, i64, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         let mut stmt = conn.prepare("SELECT id, goal, duration_secs, tokens_used FROM tasks WHERE status = 'running' ORDER BY created_at DESC")?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
@@ -238,7 +254,7 @@ impl MemoryEngine {
     }
 
     pub fn get_task_observability(&self, task_id: &str) -> Result<(String, String, String, i64, String, f64, i64, i64)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         let mut stmt = conn.prepare("SELECT goal, status, created_at, duration_secs, llm_used, cost_estimate, tokens_used, retries FROM tasks WHERE id = ?1")?;
         let result = stmt.query_row(params![task_id], |row| {
             let goal: String = row.get(0)?;
@@ -255,7 +271,7 @@ impl MemoryEngine {
     }
 
     pub fn get_task_logs(&self, task_id: &str) -> Result<Vec<(String, String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         let mut stmt = conn.prepare(
             "SELECT timestamp, log_level, message FROM agent_logs WHERE task_id = ?1 ORDER BY timestamp ASC",
         )?;
@@ -278,7 +294,7 @@ impl MemoryEngine {
     pub fn add_episodic_memory(&self, content: &str, embedding: &[f32]) -> Result<()> {
         let id = Uuid::new_v4().to_string();
         let embedding_json = serde_json::to_string(embedding)?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         conn.execute(
             "INSERT INTO episodic_memory (id, content, embedding_json) VALUES (?1, ?2, ?3)",
             params![id, content, embedding_json],
@@ -294,7 +310,7 @@ impl MemoryEngine {
     ) -> Result<()> {
         let id = Uuid::new_v4().to_string();
         let embedding_json = serde_json::to_string(embedding)?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         conn.execute(
             "INSERT INTO episodic_memory (id, content, embedding_json, tags) VALUES (?1, ?2, ?3, ?4)",
             params![id, content, embedding_json, tags],
@@ -307,7 +323,7 @@ impl MemoryEngine {
         query_embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<(String, f32)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         let mut stmt = conn.prepare("SELECT content, embedding_json FROM episodic_memory")?;
         let rows = stmt.query_map([], |row| {
             let content: String = row.get(0)?;
@@ -334,7 +350,7 @@ impl MemoryEngine {
 
     pub fn search_memory_by_text(&self, query: &str, limit: usize) -> Result<Vec<String>> {
         let pattern = format!("%{}%", query);
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         let mut stmt = conn.prepare(
             "SELECT content FROM episodic_memory WHERE content LIKE ?1 ORDER BY created_at DESC LIMIT ?2",
         )?;
@@ -351,7 +367,7 @@ impl MemoryEngine {
     }
 
     pub fn get_episodic_memories_by_time(&self) -> Result<Vec<(String, String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         let mut stmt = conn.prepare("SELECT content, created_at, date(created_at) as d FROM episodic_memory ORDER BY created_at DESC LIMIT 50")?;
         let rows = stmt.query_map([], |row| {
             let content: String = row.get(0)?;
@@ -370,7 +386,7 @@ impl MemoryEngine {
     // ─── User Preferences (Key-Value Memory) ────────────────────
 
     pub fn set_preference(&self, key: &str, value: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         conn.execute(
             "INSERT INTO user_preferences (key, value, updated_at) VALUES (?1, ?2, CURRENT_TIMESTAMP)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
@@ -380,7 +396,7 @@ impl MemoryEngine {
     }
 
     pub fn get_preference(&self, key: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         let mut stmt = conn.prepare("SELECT value FROM user_preferences WHERE key = ?1")?;
         let result = stmt.query_row(params![key], |row| {
             let value: String = row.get(0)?;
@@ -395,7 +411,7 @@ impl MemoryEngine {
     }
 
     pub fn get_all_preferences(&self) -> Result<Vec<(String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         let mut stmt = conn.prepare("SELECT key, value FROM user_preferences ORDER BY key ASC")?;
         let rows = stmt.query_map([], |row| {
             let key: String = row.get(0)?;
@@ -417,25 +433,30 @@ impl MemoryEngine {
         subject: &str,
         predicate: &str,
         object: &str,
-        source_task_id: Option<&str>,
+        confidence: f32,
     ) -> Result<()> {
-        let id = Uuid::new_v4().to_string();
-        let conn = self.conn.lock().unwrap();
-        // Invalidate any existing facts with the same subject+predicate
-        conn.execute(
-            "UPDATE facts SET valid_until = CURRENT_TIMESTAMP WHERE subject = ?1 AND predicate = ?2 AND valid_until IS NULL",
+        let mut conn = self.get_conn();
+        let tx = conn.transaction()?;
+
+        // Delete any existing fact for this subject/predicate that is currently valid
+        tx.execute(
+            "UPDATE facts SET valid_until = CURRENT_TIMESTAMP 
+             WHERE subject = ?1 AND predicate = ?2 AND valid_until IS NULL",
             params![subject, predicate],
         )?;
 
-        conn.execute(
-            "INSERT INTO facts (id, subject, predicate, object, source_task_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, subject, predicate, object, source_task_id],
+        tx.execute(
+            "INSERT INTO facts (subject, predicate, object, confidence)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![subject, predicate, object, confidence],
         )?;
+
+        tx.commit()?;
         Ok(())
     }
 
     pub fn query_facts(&self, subject: &str) -> Result<Vec<(String, String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         let mut stmt = conn.prepare(
             "SELECT subject, predicate, object FROM facts WHERE subject = ?1 AND valid_until IS NULL ORDER BY created_at DESC",
         )?;
@@ -455,7 +476,7 @@ impl MemoryEngine {
 
     pub fn search_facts(&self, query: &str) -> Result<Vec<(String, String, String)>> {
         let pattern = format!("%{}%", query);
-        let conn = self.conn.lock().unwrap();
+        let conn = self.get_conn();
         let mut stmt = conn.prepare(
             "SELECT subject, predicate, object FROM facts WHERE valid_until IS NULL AND (subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1) ORDER BY created_at DESC LIMIT 20",
         )?;

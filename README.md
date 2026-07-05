@@ -10,7 +10,7 @@ Kerna is the runtime that fixes this.
 kerna run "Research YC companies hiring AI engineers"
 ```
 
-Every run is persistent, observable, and secured by default.
+Every run is persistent, observable, and uses fail-closed permissions by default.
 
 ---
 
@@ -25,19 +25,19 @@ kerna explain <task_id>
 Output:
 > I searched memory. I found no related context. I opened the browser. I retrieved 5 articles. I ranked them. I generated the summary. I finished.
 
-You can securely export entire task lifecycle traces to markdown for debugging or GitHub issues:
+You can easily export entire task lifecycle traces to markdown for debugging or GitHub issues:
 ```bash
 kerna export <task_id> --format md --out trace.md
 ```
 
 ## Features
 
-- **Embedded Memory**: Built-in SQLite semantic and episodic memory. Context is automatically injected between sessions.
+- **Embedded Memory**: Built-in SQLite persistent task and episodic memory. Context is automatically injected between sessions.
 - **Fail-Closed Permissions**: Strict trust boundaries. Agents cannot access your network, files, or terminal unless the MCP plugin is explicitly granted access in `kerna.toml`.
 - **MCP Extensibility**: Native support for the Model Context Protocol. Easily write plugins in Python, JS, or Go to give Kerna access to your unique systems.
 - **Self-Correction Scheduler**: Built-in loops and retry mechanics if an API call fails or a browser element moves.
 
-## Benchmarks
+## Performance Tests
 
 Kerna is designed to be extremely lightweight infrastructure, not a bloated Electron app.
 

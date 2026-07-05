@@ -36,8 +36,11 @@ pub struct McpClient {
 
 impl McpClient {
     pub fn spawn(cmd: &str, args: &[&str]) -> Result<Self> {
+        // Create an isolated working directory (not an OS sandbox)
+        let _ = std::fs::create_dir_all("sandbox");
+        
         let mut command = Command::new(cmd);
-        command.args(args).env_clear();
+        command.args(args).env_clear().current_dir("sandbox");
         
         let retain_vars = ["PATH", "SystemRoot", "SystemDrive", "USERPROFILE", "APPDATA", "TEMP", "TMP", "PATHEXT"];
         for var in retain_vars {
@@ -110,7 +113,10 @@ impl McpClient {
         match tokio::time::timeout(std::time::Duration::from_secs(30), self.stdout_reader.read_line(&mut line)).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => return Err(anyhow!("Failed to read from MCP server: {}", e)),
-            Err(_) => return Err(anyhow!("MCP server request timed out after 30 seconds")),
+            Err(_) => {
+                let _ = self.child.start_kill();
+                return Err(anyhow!("MCP server request timed out after 30 seconds"));
+            }
         }
 
         if line.is_empty() {
@@ -131,5 +137,6 @@ impl McpClient {
 impl Drop for McpClient {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
+        let _ = self.child.try_wait(); // Attempt to reap process handle
     }
 }

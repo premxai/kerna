@@ -45,7 +45,14 @@ impl McpRegistry {
                                 tools.len()
                             );
                             for tool in &tools {
-                                println!("  → {}", tool.name);
+                                if self.tool_to_server.contains_key(&tool.name) {
+                                    eprintln!(
+                                        "[MCP] Warning: Tool '{}' from server '{}' conflicts with an existing tool. Skipping duplicate registration.",
+                                        tool.name, config.name
+                                    );
+                                    continue;
+                                }
+                                println!("  ✔️ {}", tool.name);
                                 self.tool_to_server
                                     .insert(tool.name.clone(), config.name.clone());
                                 self.all_tools.push(tool.clone());

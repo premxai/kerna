@@ -19,6 +19,6 @@ Kerna is transitioning from a proof-of-concept into hardened developer infrastru
 - **Deterministic Mode**: `--deterministic` flag to force seed matching and temperature 0 across all tools.
 
 ## v1.0.0 (The Cloud Update)
-- **Cloud Sync**: Securely sync your SQLite memory databases across machines.
+- **Cloud Sync**: Sync your SQLite memory databases across machines.
 - **Team Workspaces & Shared Memory**: Organizations can inject group context into agent loops.
-- **Distributed Runtime**: Offload tasks to remote Kerna worker nodes securely.
+- **Distributed Runtime**: Offload tasks to remote Kerna worker nodes.
