@@ -36,10 +36,17 @@ pub struct McpClient {
 
 impl McpClient {
     pub fn spawn(cmd: &str, args: &[&str]) -> Result<Self> {
-        let mut child = Command::new(cmd)
-            .args(args)
-            .env_clear()
-            .env("PATH", std::env::var("PATH").unwrap_or_default())
+        let mut command = Command::new(cmd);
+        command.args(args).env_clear();
+        
+        let retain_vars = ["PATH", "SystemRoot", "SystemDrive", "USERPROFILE", "APPDATA", "TEMP", "TMP", "PATHEXT"];
+        for var in retain_vars {
+            if let Ok(val) = std::env::var(var) {
+                command.env(var, val);
+            }
+        }
+        
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

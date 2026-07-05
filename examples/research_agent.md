@@ -17,18 +17,20 @@ name = "browser"
 command = "npx"
 args = ["-y", "@anthropic/mcp-playwright"]
 enabled = true
-capabilities = ["browser.navigate", "browser.read", "browser.click"]
-allowed_paths = []
-approval_required = ["browser.click"]
 
 [[mcp_servers]]
 name = "filesystem"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "./reports"]
 enabled = true
-capabilities = ["fs.write"]
-allowed_paths = ["./reports"]
-approval_required = []
+
+[[permissions]]
+tool = "browser.*"
+action = "auto_approve"
+
+[[permissions]]
+tool = "fs.write"
+action = "require_confirmation"
 ```
 
 ## Running the Agent

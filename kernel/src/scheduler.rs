@@ -157,7 +157,7 @@ impl TaskScheduler {
                     Ok(r) => break Ok(r),
                     Err(e) => {
                         let err_msg = format!("LLM call failed (Attempt {}/3): {}", attempt, e);
-                        self.memory.log_message(task_id, "WARN", &err_msg)?;
+                        let _ = self.memory.log_message(task_id, "WARN", &err_msg);
                         println!("[!] {}", err_msg);
                         
                         if attempt >= 3 {
@@ -238,7 +238,7 @@ impl TaskScheduler {
 
                     // HUGE OUTPUT SABOTAGE FIX: Truncate massively large tool outputs to prevent context window blowup
                     let max_tool_output_len = 50_000;
-                    if result_str.len() > max_tool_output_len {
+                    if result_str.chars().count() > max_tool_output_len {
                         let truncated: String = result_str.chars().take(max_tool_output_len).collect();
                         result_str = format!("{}... [Output Truncated by Kerna ({} chars exceeded)]", truncated, max_tool_output_len);
                     }
@@ -364,6 +364,10 @@ impl TaskScheduler {
 
                 let res_json: serde_json::Value = response.json().await?;
 
+                if let Some(err) = res_json.get("error") {
+                    return Err(anyhow!("OpenAI/Venice API Error: {}", err));
+                }
+
                 let choice = &res_json["choices"][0]["message"];
                 let content = choice["content"].as_str().map(|s| s.to_string());
 
@@ -446,6 +450,10 @@ impl TaskScheduler {
                     .await?;
 
                 let res_json: serde_json::Value = response.json().await?;
+
+                if let Some(err) = res_json.get("error") {
+                    return Err(anyhow!("Anthropic API Error: {}", err));
+                }
 
                 // Parse Anthropic response
                 let content_blocks = res_json["content"]

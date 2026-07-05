@@ -136,15 +136,7 @@ enum TaskCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Spawn a graceful shutdown handler
-    tokio::spawn(async {
-        if let Ok(_) = tokio::signal::ctrl_c().await {
-            println!("\n[!] Ctrl+C detected. Shutting down Kerna gracefully...");
-            std::process::exit(0); // This ensures `Drop` handlers might run, though std::process::exit is abrupt. 
-            // Wait, for Drop to run we should actually just return or signal. 
-            // Better yet, just exit(1). The OS cleans up pipes, and MCP servers reading from stdin will see EOF and exit.
-        }
-    });
+    // We rely on the local ctrl_c wait in Daemon instead of global exit(0)
 
     let cli = Cli::parse();
     let config = Config::load();
@@ -319,7 +311,12 @@ capabilities = []
 allowed_paths = []
 approval_required = []
 "#, name);
-                    let mut file = std::fs::OpenOptions::new().append(true).open("kerna.toml")?;
+                    let path = "kerna.toml";
+                    if !std::path::Path::new(path).exists() {
+                        eprintln!("[-] kerna.toml not found in current directory. Run `kerna init` first.");
+                        std::process::exit(1);
+                    }
+                    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
                     file.write_all(template.as_bytes())?;
                     println!("[+] Appended {} plugin boilerplate to kerna.toml", name);
                 }
@@ -569,8 +566,11 @@ approval_required = ["fs.write", "fs.delete"]
                         }
                         
                         if let Some(path) = out {
-                            std::fs::write(&path, &output).unwrap();
-                            println!("[+] Exported task to {}", path);
+                            if let Err(e) = std::fs::write(&path, &output) {
+                                eprintln!("[-] Failed to export task: {}", e);
+                            } else {
+                                println!("[+] Exported task to {}", path);
+                            }
                         } else {
                             println!("{}", output);
                         }
@@ -714,7 +714,13 @@ approval_required = ["fs.write", "fs.delete"]
                 }
                 
                 // Execute goal
-                let scheduler = TaskScheduler::new(config.clone(), memory.clone(), mcp_registry.clone(), Some(active_session_id.clone()))?;
+                let scheduler = match TaskScheduler::new(config.clone(), memory.clone(), mcp_registry.clone(), Some(active_session_id.clone())) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[-] Failed to initialize scheduler: {}", e);
+                    continue;
+                }
+            };
                 match scheduler.run_goal(input).await {
                     Ok(task_id) => println!("\n[+] Goal achieved! Task ID: {}", task_id),
                     Err(e) => eprintln!("\n[-] Goal failed: {}", e),

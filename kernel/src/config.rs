@@ -12,12 +12,16 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub args: Vec<String>,
     
+    #[serde(default = "default_true")]
     pub enabled: bool,
     
+    #[serde(default)]
     pub capabilities: Vec<String>,
     
+    #[serde(default)]
     pub allowed_paths: Vec<String>,
     
+    #[serde(default)]
     pub approval_required: Vec<String>,
 }
 
@@ -77,9 +81,19 @@ impl Config {
         // 1. Try to load from kerna.toml if it exists
         let toml_path = "kerna.toml";
         if Path::new(toml_path).exists() {
-            if let Ok(content) = fs::read_to_string(toml_path) {
-                if let Ok(config) = toml::from_str::<Config>(&content) {
-                    return config;
+            match fs::read_to_string(toml_path) {
+                Ok(content) => {
+                    match toml::from_str::<Config>(&content) {
+                        Ok(config) => return config,
+                        Err(e) => {
+                            eprintln!("[-] Fatal: Failed to parse kerna.toml: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[-] Fatal: Failed to read kerna.toml: {}", e);
+                    std::process::exit(1);
                 }
             }
         }
@@ -133,18 +147,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_mcp_config_fails_without_capabilities() {
-        let toml_str = r#"
-        name = "test"
-        command = "echo"
-        enabled = true
-        "#;
-        
-        let result: Result<McpServerConfig, _> = toml::from_str(toml_str);
-        assert!(result.is_err(), "Config should fail parsing if capabilities are missing to enforce fail-closed security");
-    }
 
     #[test]
     fn test_mcp_config_parses_with_boundaries() {

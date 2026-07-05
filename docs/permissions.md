@@ -6,25 +6,27 @@ By default, an agent cannot do anything. It cannot read your files, access the n
 
 ## Declaring Capabilities
 
-When you add a plugin to `kerna.toml`, you must explicitly declare its capabilities:
+Permissions are configured globally in your `kerna.toml` using the `[[permissions]]` table. You map specific tool names (or a wildcard `*`) to an action policy: `auto_approve`, `require_confirmation`, or `deny`.
 
 ```toml
-[[plugins]]
-name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "./"]
-enabled = true
+# Grant read access automatically
+[[permissions]]
+tool = "fs.read"
+action = "auto_approve"
 
-# The permissions this plugin is allowed to request
-capabilities = ["fs.read", "fs.write"]
+# Require user confirmation for writing
+[[permissions]]
+tool = "fs.write"
+action = "require_confirmation"
 
-# The paths it is restricted to
-allowed_paths = ["./"]
-
-# Actions that will hard-pause execution and prompt the user for 'Y/N' approval
-approval_required = ["fs.write", "fs.delete"]
+# Deny all other tools
+[[permissions]]
+tool = "*"
+action = "deny"
 ```
+
+> **Note:** Rule order dictates precedence. Kerna evaluates rules sequentially from top to bottom.
 
 ## The Interceptor
 
-The Kerna scheduler intercepts every tool call *before* it reaches the plugin. It validates the request against the `kerna.toml` policy. If an agent attempts an action that requires approval, the runtime pauses and waits for manual user confirmation. If it attempts an undeclared action, it is instantly blocked.
+The Kerna scheduler intercepts every tool call *before* it reaches the plugin. It validates the request against the `kerna.toml` policy. If an agent attempts an action that requires approval, the runtime pauses and waits for manual user confirmation. If it attempts an undeclared action (or hits a `deny`), it is instantly blocked. Kerna also enforces built-in safety overrides for dangerous tools (e.g., `delete_file`), forcing them to `require_confirmation` regardless of the configuration.

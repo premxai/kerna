@@ -15,7 +15,7 @@ kerna plugins add weather
 This appends the following to your `kerna.toml`:
 
 ```toml
-[[plugins]]
+[[mcp_servers]]
 name = "weather"
 command = ""
 args = []

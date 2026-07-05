@@ -26,8 +26,8 @@ impl PermissionManager {
         match action {
             "require_confirmation" => PermissionLevel::RequireConfirmation,
             "deny" => PermissionLevel::Deny,
-            _ => {
-                // Apply built-in safety defaults for dangerous operations
+            "auto_approve" => {
+                // Apply built-in safety defaults for dangerous operations even if auto-approved
                 match tool_name {
                     "delete_file" | "remove_directory" | "format_disk" => {
                         PermissionLevel::RequireConfirmation
@@ -38,6 +38,7 @@ impl PermissionManager {
                     _ => PermissionLevel::AutoApprove,
                 }
             }
+            _ => PermissionLevel::Deny, // Fail-closed on typos
         }
     }
 
@@ -87,8 +88,7 @@ mod tests {
         
         assert_eq!(pm.check("fs.read"), PermissionLevel::AutoApprove);
         // Escalation Sabotage: Tool tries to use a different capability
-        // Note: Currently, check_permission returns "auto_approve" by default if not matched.
-        // Wait, Kerna uses fail-closed logic? Let's check config.rs check_permission.
-        // If not, we should fix check_permission to return "deny" by default.
+        assert_eq!(pm.check("fs.write"), PermissionLevel::Deny);
+        assert_eq!(pm.check("run_command"), PermissionLevel::Deny);
     }
 }

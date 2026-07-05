@@ -3,14 +3,11 @@ Weather Plugin (MCP Server)
 
 To run this, first add it to your kerna.toml:
 
-[[plugins]]
+[[mcp_servers]]
 name = "weather"
 command = "python"
 args = ["examples/plugins/weather_plugin.py"]
 enabled = true
-capabilities = ["weather.get"]
-allowed_paths = []
-approval_required = []
 """
 
 from mcp.server.fastmcp import FastMCP
