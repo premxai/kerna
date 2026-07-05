@@ -48,11 +48,13 @@ impl WatchdogEngine {
                                             if let Some(lh) = last_hash {
                                                 if lh != current_hash {
                                                     println!("\n[Watchdog] 🔔 Alert! Content changed for URL: {}", url);
-                                                    let _ = memory.log_message(
-                                                        uuid::Uuid::parse_str(&id).unwrap(), 
-                                                        "INFO", 
-                                                        &format!("Content changed for URL: {}", url)
-                                                    );
+                                                    if let Ok(parsed_id) = uuid::Uuid::parse_str(&id) {
+                                                        let _ = memory.log_message(
+                                                            parsed_id, 
+                                                            "INFO", 
+                                                            &format!("Content changed for URL: {}", url)
+                                                        );
+                                                    }
                                                     let _ = memory.set_preference(&pref_key, &current_hash);
                                                 }
                                             } else {

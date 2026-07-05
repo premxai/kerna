@@ -448,9 +448,9 @@ impl MemoryEngine {
         )?;
 
         tx.execute(
-            "INSERT INTO facts (subject, predicate, object, confidence)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![subject, predicate, object, confidence],
+            "INSERT INTO facts (id, subject, predicate, object, confidence)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![uuid::Uuid::new_v4().to_string(), subject, predicate, object, confidence],
         )?;
 
         tx.commit()?;
@@ -559,7 +559,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::PathBuf;
+
     use uuid::Uuid;
 
     fn setup_test_db(name: &str) -> MemoryEngine {

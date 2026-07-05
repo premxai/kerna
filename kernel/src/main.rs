@@ -302,7 +302,7 @@ async fn main() -> Result<()> {
                 Some(PluginCommands::Add { name }) => {
                     use std::io::Write;
                     let template = format!(r#"
-[[plugins]]
+[[mcp_servers]]
 name = "{}"
 command = ""
 args = []

@@ -147,7 +147,8 @@ impl TaskScheduler {
                 println!("[!] Max tool rounds ({}) reached. Finishing.", max_rounds);
                 self.memory
                     .log_message(task_id, "WARN", "Max tool rounds reached")?;
-                break;
+                let _ = self.memory.update_task_status(task_id, "failed");
+                return Err(anyhow::anyhow!("Task failed: Max tool rounds reached"));
             }
 
             println!("[*] Round {}/{} — Calling LLM...", round, max_rounds);
@@ -173,9 +174,10 @@ impl TaskScheduler {
 
             let response = match response {
                 Ok(r) => r,
-                Err(_) => {
+                Err(e) => {
                     println!("[!] LLM failed after 3 attempts. Aborting task.");
-                    break;
+                    let _ = self.memory.update_task_status(task_id, "failed");
+                    return Err(e);
                 }
             };
 
@@ -355,7 +357,7 @@ impl TaskScheduler {
             return Err(anyhow!("No LLM API key configured"));
         }
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).build()?;
 
         match self.config.llm_provider.as_str() {
             "openai" | "venice" => {
