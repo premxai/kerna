@@ -29,7 +29,7 @@ impl MemoryEngine {
         Ok(engine)
     }
 
-    fn get_conn(&self) -> std::sync::MutexGuard<Connection> {
+    fn get_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         match self.conn.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -302,6 +302,7 @@ impl MemoryEngine {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn add_tagged_memory(
         &self,
         content: &str,
@@ -428,6 +429,7 @@ impl MemoryEngine {
 
     // ─── Facts / Knowledge Graph ─────────────────────────────────
 
+    #[allow(dead_code)]
     pub fn add_fact(
         &self,
         subject: &str,
@@ -455,6 +457,7 @@ impl MemoryEngine {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn query_facts(&self, subject: &str) -> Result<Vec<(String, String, String)>> {
         let conn = self.get_conn();
         let mut stmt = conn.prepare(

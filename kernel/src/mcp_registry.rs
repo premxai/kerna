@@ -123,6 +123,7 @@ impl McpRegistry {
     }
 
     /// Get all tool names.
+    #[allow(dead_code)]
     pub fn tool_names(&self) -> Vec<String> {
         self.tool_to_server.keys().cloned().collect()
     }

@@ -552,6 +552,7 @@ impl TaskScheduler {
     }
 
     /// Fallback demo when no LLM API key is configured.
+    #[allow(dead_code)]
     async fn run_fallback_demo(&self, task_id: Uuid, goal: &str) -> Result<()> {
         println!("[!] Running offline demonstration mode...");
 

@@ -196,7 +196,7 @@ async fn main() -> Result<()> {
 
         Some(Commands::Inspect { task_id }) => {
             match memory.get_task_observability(&task_id) {
-                Ok((goal, status, created, dur, llm, cost, tokens, retries)) => {
+                Ok((goal, status, _created, dur, llm, cost, _tokens, retries)) => {
                     println!("Goal:\n{}\n", goal);
                     println!("Status:\n{}\n", status);
                     

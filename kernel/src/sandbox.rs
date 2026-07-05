@@ -58,16 +58,19 @@ impl ProcessSandbox {
     }
 }
 
+#[allow(dead_code)]
 pub struct WasmSandbox {
     engine: Engine,
 }
 
 impl WasmSandbox {
+    #[allow(dead_code)]
     pub fn new() -> Result<Self> {
         let engine = Engine::default();
         Ok(WasmSandbox { engine })
     }
 
+    #[allow(dead_code)]
     pub fn run_wasm_module(&self, wasm_path: &Path) -> Result<String> {
         let wasm_bytes = fs::read(wasm_path)?;
         let module = Module::new(&self.engine, &wasm_bytes)?;
