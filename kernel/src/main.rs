@@ -341,7 +341,7 @@ approval_required = []
             
             match rusqlite::Connection::open(&config.db_path) {
                 Ok(conn) => {
-                    if conn.execute("SELECT 1", []).is_ok() {
+                    if conn.query_row("SELECT 1", [], |_| Ok(())).is_ok() {
                         println!("Database: OK ({})", config.db_path);
                     } else {
                         println!("Database: ERROR (Cannot query database)");

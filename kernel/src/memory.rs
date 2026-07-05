@@ -22,7 +22,7 @@ impl MemoryEngine {
 
         // Enable foreign keys and WAL mode for concurrency
         conn.execute("PRAGMA foreign_keys = ON;", [])?;
-        conn.execute("PRAGMA journal_mode = WAL;", [])?;
+        let _ = conn.query_row("PRAGMA journal_mode = WAL;", [], |_row| Ok(()));
 
         let engine = MemoryEngine { conn: Mutex::new(conn) };
         engine.bootstrap()?;
