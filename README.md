@@ -14,6 +14,16 @@ Every run is persistent, strictly sandboxed, and transparent.
 
 ---
 
+## Why Kerna is different
+
+Most agent frameworks help you build agents.
+
+Kerna helps you run agents safely.
+
+It adds budgets, plugin risk cards, structured traces, persistent task memory, and fail-closed permissions around any model or MCP tool.
+
+---
+
 ## The Moat: Absolute Observability
 Every single action, token, cost, tool call, failure, and permission check is recorded into Kerna's SQLite memory.
 

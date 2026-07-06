@@ -134,7 +134,9 @@ pub struct WasmSandbox {
 impl WasmSandbox {
     #[allow(dead_code)]
     pub fn new() -> Result<Self> {
-        let engine = Engine::default();
+        let mut config = wasmtime::Config::new();
+        config.consume_fuel(true);
+        let engine = Engine::new(&config)?;
         Ok(WasmSandbox { engine })
     }
 
@@ -144,6 +146,7 @@ impl WasmSandbox {
         let module = Module::new(&self.engine, &wasm_bytes)?;
         
         let mut store = Store::new(&self.engine, ());
+        store.set_fuel(10_000_000)?; // 10 million instructions budget
         let linker = Linker::new(&self.engine);
         
         // Instantiate the module (empty imports for core calculation modules)

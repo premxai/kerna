@@ -174,6 +174,21 @@ impl TaskScheduler {
             }
         }));
 
+        all_tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "execute_wasm",
+                "description": "Execute a WASM module. The path should point to a valid .wasm file in the workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "wasm_path": { "type": "string", "description": "Path to the .wasm file" }
+                    },
+                    "required": ["wasm_path"]
+                }
+            }
+        }));
+
         self.memory
             .update_task_status(task_id, "running")?;
 
@@ -442,7 +457,37 @@ impl TaskScheduler {
                     });
 
                     let tool_args: serde_json::Value = serde_json::from_str(tool_args_str).unwrap_or(json!({}));
+                    
+                    let is_mutating = tool_name == "run_command" || tool_name == "execute_code" || tool_name == "execute_wasm";
+                    if is_mutating {
+                        let _ = self.sandbox.snapshot();
+                    }
+
                     let result = self.execute_tool(tool_name, &tool_args).await;
+
+                    if is_mutating && result.is_err() {
+                        let _ = self.sandbox.rollback();
+                        event_seq += 1;
+                        let _ = self.memory.record(Event {
+                            event_id: uuid::Uuid::new_v4().to_string(),
+                            task_id: task_id.to_string(),
+                            session_id: self.session_id.clone(),
+                            sequence: event_seq,
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            event_type: "sandbox.rollback".to_string(),
+                            actor: "kerna".to_string(),
+                            severity: "warning".to_string(),
+                            model: None,
+                            tool: Some(tool_name.clone()),
+                            policy_decision: None,
+                            risk_score: None,
+                            parent_event_id: Some(parent_evt_id.clone()),
+                            correlation_id: Some(tc.id.clone()),
+                            redaction_status: None,
+                            budget_snapshot_json: Some(budget.get_snapshot_json()),
+                            payload_json: json!({"reason": "tool_execution_failed"}),
+                        });
+                    }
 
                     let mut result_str = match &result {
                         Ok(val) => {
@@ -678,14 +723,18 @@ impl TaskScheduler {
                     .as_str()
                     .ok_or_else(|| anyhow!("Missing 'goal' argument"))?;
                 
+                let mut sub_config = self.config.clone();
+                // Isolate the subagent's budget to a strict bound
+                sub_config.max_tool_calls = std::cmp::min(self.config.max_tool_calls, 10);
+                sub_config.max_llm_calls = std::cmp::min(self.config.max_llm_calls, 10);
+                
                 // Spawn a new TaskScheduler for the subagent
-                // For a true sandbox, we could create a new ProcessSandbox with restricted network
-                // We pass a new session_id (which might just be inherited or unique).
+                // We pass a new session_id to isolate its working memory
                 let sub_scheduler = TaskScheduler::new(
-                    self.config.clone(),
+                    sub_config,
                     self.memory.clone(),
                     self.mcp_registry.clone(),
-                    self.session_id.clone(),
+                    Some(uuid::Uuid::new_v4().to_string()),
                 )?;
                 
                 // Run the sub-goal
@@ -707,6 +756,24 @@ impl TaskScheduler {
                 match output {
                     Ok(out) => Ok(json!({ "output": out })),
                     Err(e) => Err(anyhow!("Python execution failed: {}", e))
+                }
+            }
+            "execute_wasm" => {
+                let wasm_path_str = args["wasm_path"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("Missing 'wasm_path' argument"))?;
+                
+                let wasm_path = std::path::Path::new(&self.config.sandbox_dir).join(wasm_path_str);
+                if !wasm_path.exists() {
+                    return Err(anyhow!("WASM file not found at path: {}", wasm_path.display()));
+                }
+                
+                let wasm_sandbox = crate::sandbox::WasmSandbox::new()?;
+                let output = wasm_sandbox.run_wasm_module(&wasm_path);
+                
+                match output {
+                    Ok(out) => Ok(json!({ "output": out })),
+                    Err(e) => Err(anyhow!("WASM execution failed: {}", e))
                 }
             }
             _ => Err(anyhow!("Unknown tool: {}", tool_name)),
@@ -782,18 +849,22 @@ impl TaskScheduler {
 
                 // Determine mock behavior based on goal (last user message)
                 let last_user_msg = messages.iter().rev().find(|m| m.role == "user").and_then(|m| m.content.as_deref()).unwrap_or("");
-                let cmd = if last_user_msg.contains("echo") {
-                    "echo"
+                let (cmd, args) = if last_user_msg.contains("echo") {
+                    ("echo".to_string(), "{}".to_string())
                 } else if last_user_msg.contains("hang") {
-                    "hang"
+                    ("hang".to_string(), "{}".to_string())
                 } else if last_user_msg.contains("huge_output") {
-                    "huge_output"
+                    ("huge_output".to_string(), "{}".to_string())
                 } else if last_user_msg.contains("invalid_json") {
-                    "invalid_json"
+                    ("invalid_json".to_string(), "{}".to_string())
                 } else if last_user_msg.contains("fail_once_then_pass") {
-                    "fail_once_then_pass"
+                    ("fail_once_then_pass".to_string(), "{}".to_string())
                 } else if last_user_msg.contains("malicious") {
-                    "malicious"
+                    ("malicious".to_string(), "{}".to_string())
+                } else if last_user_msg.contains("Please fail") { // For rollback test
+                    ("run_command".to_string(), "{\"command\": \"exit\", \"args\": [\"1\"]}".to_string())
+                } else if last_user_msg.contains("Please delegate") { // For subagent test
+                    ("delegate_task".to_string(), "{\"goal\": \"subtask\"}".to_string())
                 } else if last_user_msg.contains("memory_writes") {
                     return Ok((ChatMessage {
                         role: "assistant".to_string(),
@@ -815,8 +886,8 @@ impl TaskScheduler {
                     id: "call_mock".to_string(),
                     call_type: "function".to_string(),
                     function: FunctionCall {
-                        name: cmd.to_string(),
-                        arguments: "{}".to_string(),
+                        name: cmd,
+                        arguments: args,
                     }
                 };
 

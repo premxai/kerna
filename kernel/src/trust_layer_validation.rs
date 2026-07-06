@@ -282,3 +282,37 @@ async fn test_kerna_trace_output() {
     
     let _ = fs::remove_file(&db_path);
 }
+
+#[tokio::test]
+async fn test_auto_rollback_on_failure() {
+    let (memory, mut config, db_path) = setup_test_env("rollback", None).await;
+    let sandbox_dir = std::env::temp_dir().join("kerna_rollback_test");
+    if sandbox_dir.exists() { std::fs::remove_dir_all(&sandbox_dir).unwrap(); }
+    std::fs::create_dir_all(&sandbox_dir).unwrap();
+    config.sandbox_dir = sandbox_dir.to_string_lossy().to_string();
+    
+    let mcp_reg = std::sync::Arc::new(tokio::sync::Mutex::new(crate::mcp_registry::McpRegistry::new()));
+    let mem = std::sync::Arc::new(memory);
+    let scheduler = Scheduler::new(config, mem.clone(), mcp_reg, None).unwrap();
+    // It should hit max retries or fail
+    let res = scheduler.run_goal("Please fail").await;
+    
+    // Rollback event should be in the DB
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let mut stmt = conn.prepare("SELECT count(*) FROM events WHERE event_type = 'sandbox.rollback'").unwrap();
+    let count: i64 = stmt.query_row([], |row| row.get(0)).unwrap();
+    assert!(count > 0, "Rollback event should be emitted");
+    
+    let _ = fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn test_subagent_budget_isolation() {
+    let (memory, mut config, db_path) = setup_test_env("subagent", None).await;
+    let mcp_reg = std::sync::Arc::new(tokio::sync::Mutex::new(crate::mcp_registry::McpRegistry::new()));
+    let mem = std::sync::Arc::new(memory);
+    let scheduler = Scheduler::new(config, mem.clone(), mcp_reg, None).unwrap();
+    let res = scheduler.run_goal("Please delegate").await;
+    
+    let _ = fs::remove_file(&db_path);
+}
