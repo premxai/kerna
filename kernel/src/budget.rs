@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use std::time::{Instant, Duration};
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct BudgetConfig {

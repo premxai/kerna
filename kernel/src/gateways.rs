@@ -7,10 +7,12 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 #[async_trait]
+#[allow(dead_code)]
 pub trait Gateway {
     async fn start(&self, config: Config, memory: Arc<MemoryEngine>, mcp_registry: Arc<Mutex<McpRegistry>>) -> Result<()>;
 }
 
+#[allow(dead_code)]
 pub struct TelegramGateway;
 
 #[async_trait]

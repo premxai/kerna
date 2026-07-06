@@ -26,6 +26,7 @@ pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<serde_json::Value>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub stream: bool,
 }
 

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use crate::events::{Event, EventSink};
 use std::path::Path;
 use std::sync::Mutex;
@@ -303,6 +303,7 @@ impl MemoryEngine {
         Ok(tasks)
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn get_task_observability(&self, task_id: &str) -> Result<(String, String, String, i64, String, f64, i64, i64)> {
         let conn = self.get_conn();
         let mut stmt = conn.prepare("SELECT goal, status, created_at, duration_secs, llm_used, cost_estimate, tokens_used, retries FROM tasks WHERE id = ?1")?;

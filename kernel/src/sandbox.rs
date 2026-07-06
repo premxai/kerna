@@ -153,10 +153,10 @@ impl WasmSandbox {
         let instance = linker.instantiate(&mut store, &module)?;
         
         // Try calling default run or start functions if exported
-        if let Some(func) = instance.get_typed_func::<(), ()>(&mut store, "run").ok() {
+        if let Ok(func) = instance.get_typed_func::<(), ()>(&mut store, "run") {
             func.call(&mut store, ())?;
             Ok("Wasm module execution completed successfully via run().".to_string())
-        } else if let Some(func) = instance.get_typed_func::<(), ()>(&mut store, "_start").ok() {
+        } else if let Ok(func) = instance.get_typed_func::<(), ()>(&mut store, "_start") {
             // Emulate WASI start call
             func.call(&mut store, ())?;
             Ok("Wasm module execution completed successfully via _start().".to_string())

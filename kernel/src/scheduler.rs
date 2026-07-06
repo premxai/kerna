@@ -237,7 +237,7 @@ impl TaskScheduler {
                         }
                         
                         // Exponential backoff
-                        let backoff_secs = 2u64.pow(attempt as u32);
+                        let backoff_secs = 2u64.pow(attempt);
                         println!("[*] Retrying in {} seconds...", backoff_secs);
                         tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                     }
@@ -365,7 +365,7 @@ impl TaskScheduler {
                         println!("❌ {} (Denied by policy)", display_name);
                         messages.push(ChatMessage {
                             role: "tool".to_string(),
-                            content: Some(format!("Permission denied.")),
+                            content: Some("Permission denied.".to_string()),
                             tool_calls: None,
                             tool_call_id: Some(tc.id.clone()),
                         });
@@ -501,11 +501,10 @@ impl TaskScheduler {
                             *count += 1;
                             total_tool_failures += 1;
                             
-                            if e_str.contains("timeout") || e_str.contains("Timeout") {
-                                if *count >= 2 {
+                            if (e_str.contains("timeout") || e_str.contains("Timeout"))
+                                && *count >= 2 {
                                     return Err(anyhow!("Task failed: Tool '{}' timed out {} times.", tool_name, count));
                                 }
-                            }
                             
                             if total_tool_failures >= 5 {
                                 return Err(anyhow!("Task failed: Max total tool failures (5) reached."));
@@ -943,15 +942,9 @@ impl TaskScheduler {
                 let content = choice["content"].as_str().map(|s| s.to_string());
 
                 let tool_calls: Option<Vec<ToolCallRequest>> =
-                    if let Some(tcs) = choice["tool_calls"].as_array() {
-                        Some(
-                            tcs.iter()
+                    choice["tool_calls"].as_array().map(|tcs| tcs.iter()
                                 .filter_map(|tc| serde_json::from_value(tc.clone()).ok())
-                                .collect(),
-                        )
-                    } else {
-                        None
-                    };
+                                .collect());
 
                 let total_tokens = res_json["usage"]["total_tokens"].as_u64().unwrap_or(0);
 

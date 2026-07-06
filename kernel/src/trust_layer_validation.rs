@@ -3,9 +3,6 @@ use crate::config::{Config, McpServerConfig, PermissionRule};
 use crate::memory::MemoryEngine;
 use crate::scheduler::TaskScheduler as Scheduler;
 use std::fs;
-use std::path::Path;
-use uuid::Uuid;
-use anyhow::Result;
 
 // Utility to set up a clean DB and Config
 async fn setup_test_env(test_name: &str, override_budget: Option<BudgetConfig>) -> (MemoryEngine, Config, String) {
@@ -14,8 +11,10 @@ async fn setup_test_env(test_name: &str, override_budget: Option<BudgetConfig>) 
     
     let memory = MemoryEngine::new(&db_path).expect("Failed to create memory engine");
     
-    let mut config = Config::default();
-    config.db_path = db_path.clone();
+    let mut config = Config {
+        db_path: db_path.clone(),
+        ..Config::default()
+    };
     
     let test_exe = std::env::current_exe().unwrap();
     let kerna_bin = test_exe.parent().unwrap().parent().unwrap().join("kerna.exe").to_string_lossy().to_string();
@@ -93,8 +92,8 @@ async fn test_mockmcp_hang_times_out_cleanly() {
     assert!(res.is_err()); // Failed due to timeout/max failures
     
     // Check trace for failed events
-    let mut task_id_str = String::new();
-    let all_running = mem.get_running_tasks().unwrap_or_default();
+    let _task_id_str = String::new();
+    let _all_running = mem.get_running_tasks().unwrap_or_default();
     // Well, it failed so it might not be in running. We'd have to find it from events.
     // Instead, let's grab the first task id from events table directly using raw sql if we don't know it,
     // or just let it be. `run_goal` error doesn't return task id. 
@@ -295,7 +294,7 @@ async fn test_auto_rollback_on_failure() {
     let mem = std::sync::Arc::new(memory);
     let scheduler = Scheduler::new(config, mem.clone(), mcp_reg, None).unwrap();
     // It should hit max retries or fail
-    let res = scheduler.run_goal("Please fail").await;
+    let _res = scheduler.run_goal("Please fail").await;
     
     // Rollback event should be in the DB
     let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -308,11 +307,11 @@ async fn test_auto_rollback_on_failure() {
 
 #[tokio::test]
 async fn test_subagent_budget_isolation() {
-    let (memory, mut config, db_path) = setup_test_env("subagent", None).await;
+    let (memory, config, db_path) = setup_test_env("subagent", None).await;
     let mcp_reg = std::sync::Arc::new(tokio::sync::Mutex::new(crate::mcp_registry::McpRegistry::new()));
     let mem = std::sync::Arc::new(memory);
     let scheduler = Scheduler::new(config, mem.clone(), mcp_reg, None).unwrap();
-    let res = scheduler.run_goal("Please delegate").await;
+    let _res = scheduler.run_goal("Please delegate").await;
     
     let _ = fs::remove_file(&db_path);
 }

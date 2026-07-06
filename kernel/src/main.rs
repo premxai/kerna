@@ -247,8 +247,7 @@ async fn main() -> Result<()> {
             // Basic @ injection parsing
             let words: Vec<String> = final_goal.split_whitespace().map(|s| s.to_string()).collect();
             for word in &words {
-                if word.starts_with("@") {
-                    let path_or_url = &word[1..];
+                if let Some(path_or_url) = word.strip_prefix("@") {
                     if path_or_url.starts_with("http") {
                         if let Ok(content) = reqwest::get(path_or_url).await.and_then(|r| r.error_for_status()) {
                             if let Ok(text) = content.text().await {
@@ -298,7 +297,7 @@ async fn main() -> Result<()> {
                             }
                         }
                         // Simple timeline extraction (hh:mm:ss)
-                        let time_only = ts.split(' ').last().unwrap_or("").split('.').next().unwrap_or("");
+                        let time_only = ts.split(' ').next_back().unwrap_or("").split('.').next().unwrap_or("");
                         let action = if msg.starts_with("Tool") { "Action" } else if lvl == "ERROR" { "Retry" } else { "Planning" };
                         timeline.push_str(&format!("{} {}\n", time_only, action));
                     }
@@ -364,7 +363,7 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
                 
-                println!("{:<4} | {:<24} | {:<22} | {:<10} | {:<7} | {}", "Seq", "Timestamp", "Event Type", "Actor", "Level", "Details");
+                println!("{:<4} | {:<24} | {:<22} | {:<10} | {:<7} | Details", "Seq", "Timestamp", "Event Type", "Actor", "Level");
                 println!("{:-<4}-+-{:-<24}-+-{:-<22}-+-{:-<10}-+-{:-<7}-+-{:-<40}", "", "", "", "", "", "");
                 
                 for ev in events {
@@ -698,7 +697,7 @@ approval_required = ["fs.write", "fs.delete"]
                             
                             output.push_str("## Timeline\n");
                             for (ts, lvl, msg) in &logs {
-                                let time = ts.split(' ').last().unwrap_or("").split('.').next().unwrap_or("");
+                                let time = ts.split(' ').next_back().unwrap_or("").split('.').next().unwrap_or("");
                                 let act = if msg.starts_with("Tool") { "Action" } else if lvl == "ERROR" { "Retry" } else { "Planning" };
                                 output.push_str(&format!("- {} {}\n", time, act));
                             }

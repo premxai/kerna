@@ -42,7 +42,7 @@ impl McpRegistry {
             let manifest_path = Path::new(&manifest_path_str);
             if manifest_path.exists() {
                 match PluginManifest::load(manifest_path) {
-                    Ok(m) => {
+                    Ok(_m) => {
                         println!("[MCP] Loaded verified manifest for plugin: {}", config.name);
                         // TODO: Merge capabilities from manifest into config
                     }

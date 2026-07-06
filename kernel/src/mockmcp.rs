@@ -5,6 +5,7 @@ use std::io::{self, BufRead};
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
+    #[allow(dead_code)]
     jsonrpc: String,
     id: Option<serde_json::Value>,
     method: String,
@@ -86,7 +87,7 @@ impl MockMcpServer {
                     }
                 };
 
-                if let Some(mut res) = result {
+                if let Some(res) = result {
                     if res.get("error").is_some() {
                         let resp = JsonRpcResponse {
                             jsonrpc: "2.0".to_string(),
