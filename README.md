@@ -1,16 +1,16 @@
 # Kerna
 
-**You build the agent. Kerna runs it. Safely. Observably. Repeatably.**
+**The Runtime Trust Layer for Agents**
 
-AI agents today can think, but they lack a robust runtime. Without persistent memory, hard permissions, execution observability, and reproducible chains of thought, agents are simply brittle toys. 
+AI agents today can think, but they lack a secure, observable runtime. Kerna provides the environment where memory, policy, permissions, observability, replay, and execution boundaries live, regardless of which model or tool stack sits on top.
 
-Kerna is the runtime that fixes this. 
+**Kerna now constrains, observes, and audits agent execution through budgets, plugin manifests, event traces, and fail-closed runtime checks.**
 
 ```bash
 kerna run "Research YC companies hiring AI engineers"
 ```
 
-Every run is persistent, observable, and uses fail-closed permissions by default.
+Every run is persistent, strictly sandboxed, and transparent.
 
 ---
 
@@ -33,7 +33,8 @@ kerna export <task_id> --format md --out trace.md
 ## Features
 
 - **Embedded Memory**: Built-in SQLite persistent task and episodic memory. Context is automatically injected between sessions.
-- **Fail-Closed Permissions**: Strict trust boundaries. Agents cannot access your network, files, or terminal unless the MCP plugin is explicitly granted access in `kerna.toml`.
+- **Fail-Closed Runtime Checks**: Strict trust boundaries. Agents cannot access your network, files, or terminal unless the MCP plugin is explicitly granted access in its `manifest.toml`.
+- **Execution Guardrails**: Hard execution budgets (`max_tool_calls`, `max_runtime_seconds`, `max_llm_calls`, `max_cost_usd`) prevent runaway loops.
 - **MCP Extensibility**: Native support for the Model Context Protocol. Easily write plugins in Python, JS, or Go to give Kerna access to your unique systems.
 - **Self-Correction Scheduler**: Built-in loops and retry mechanics if an API call fails or a browser element moves.
 

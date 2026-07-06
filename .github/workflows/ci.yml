@@ -13,22 +13,33 @@ jobs:
   build:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
+      
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: ./kernel
       
     - name: Check formatting
       run: cargo fmt -- --check
       working-directory: ./kernel
       
     - name: Run clippy
-      run: cargo clippy
+      run: cargo clippy -- -D warnings
       working-directory: ./kernel
+      
+    - name: Security audit
+      uses: rustsec/audit-check@v1.4.1
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
       
     - name: Run tests
       run: cargo test --verbose

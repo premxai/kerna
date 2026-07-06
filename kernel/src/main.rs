@@ -7,6 +7,13 @@ mod permissions;
 mod sandbox;
 mod scheduler;
 mod watchdog;
+mod security;
+mod server;
+mod gateways;
+mod mockmcp;
+pub mod budget;
+pub mod plugin_manifest;
+pub mod events;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -36,12 +43,28 @@ struct Cli {
 enum Commands {
     /// Start the Kerna background daemon (Cron, Watchdog)
     Daemon,
+    
+    /// Start the OpenAI-compatible API Server
+    Serve {
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
+    },
+    
+    /// Run the MockMCP deterministic integration test server
+    Mockmcp {
+        #[arg(long, default_value = "normal")]
+        mode: String,
+    },
 
     /// Execute a goal using the agentic tool-call loop and exit
     Run {
         /// The objective or goal to fulfill
         #[arg(index = 1)]
         goal: String,
+
+        /// Enable Converse Mode to pause for user confirmation before executing tools
+        #[arg(long)]
+        converse: bool,
     },
 
     /// Inspect a specific task's execution trace and observability metrics
@@ -58,6 +81,13 @@ enum Commands {
         task_id: String,
     },
 
+    /// View structured events for a specific task execution
+    Trace {
+        /// Task ID
+        #[arg(index = 1)]
+        task_id: String,
+    },
+
     /// Task management (list, show, replay)
     Task {
         #[command(subcommand)]
@@ -68,7 +98,7 @@ enum Commands {
     Memory {
         /// Search term
         #[arg(index = 1)]
-        query: String,
+        query: Option<String>,
     },
 
     /// List or manage MCP plugins
@@ -108,6 +138,12 @@ pub enum PluginCommands {
     List,
     /// Add a new plugin boilerplate to config
     Add { name: String },
+    /// Inspect a plugin manifest and show its Risk Card
+    Inspect {
+        /// Path to the plugin manifest file
+        #[arg(index = 1)]
+        path: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -139,7 +175,7 @@ async fn main() -> Result<()> {
     // We rely on the local ctrl_c wait in Daemon instead of global exit(0)
 
     let cli = Cli::parse();
-    let config = Config::load();
+    let mut config = Config::load();
 
     // Initialize Memory Engine
     let memory = Arc::new(MemoryEngine::new(&config.db_path)?);
@@ -182,10 +218,53 @@ async fn main() -> Result<()> {
             tokio::signal::ctrl_c().await?;
             println!("\n[+] Daemon stopped cleanly.");
         }
+        
+        Some(Commands::Serve { port }) => {
+            let state = server::AppState {
+                config: config.clone(),
+                memory: memory.clone(),
+                mcp_registry: mcp_registry.clone(),
+            };
+            if let Err(e) = server::start_server(state, port).await {
+                eprintln!("[-] Server failed: {}", e);
+            }
+        }
 
-        Some(Commands::Run { goal }) => {
+        Some(Commands::Mockmcp { mode }) => {
+            let mut server = mockmcp::MockMcpServer::new(&mode);
+            if let Err(e) = server.run().await {
+                eprintln!("[-] MockMCP failed: {}", e);
+            }
+        }
+
+        Some(Commands::Run { goal, converse }) => {
+            if converse {
+                config.converse = true;
+            }
+            
+            let mut final_goal = goal.clone();
+            
+            // Basic @ injection parsing
+            let words: Vec<String> = final_goal.split_whitespace().map(|s| s.to_string()).collect();
+            for word in &words {
+                if word.starts_with("@") {
+                    let path_or_url = &word[1..];
+                    if path_or_url.starts_with("http") {
+                        if let Ok(content) = reqwest::get(path_or_url).await.and_then(|r| r.error_for_status()) {
+                            if let Ok(text) = content.text().await {
+                                final_goal = final_goal.replace(word, &format!("\n\n--- Content from {} ---\n{}\n--- End ---\n\n", path_or_url, text));
+                            }
+                        }
+                    } else if std::path::Path::new(path_or_url).exists() {
+                        if let Ok(text) = std::fs::read_to_string(path_or_url) {
+                            final_goal = final_goal.replace(word, &format!("\n\n--- Content from {} ---\n{}\n--- End ---\n\n", path_or_url, text));
+                        }
+                    }
+                }
+            }
+
             let scheduler = TaskScheduler::new(config, memory.clone(), mcp_registry.clone(), None)?;
-            match scheduler.run_goal(&goal).await {
+            match scheduler.run_goal(&final_goal).await {
                 Ok(task_id) => println!("[+] Task completed: {}", task_id),
                 Err(e) => {
                     eprintln!("[-] Task failed: {}", e);
@@ -277,6 +356,34 @@ async fn main() -> Result<()> {
             }
         }
 
+        Some(Commands::Trace { task_id }) => {
+            println!("Event Trace for Task {}:\n", task_id);
+            if let Ok(events) = memory.get_events(&task_id) {
+                if events.is_empty() {
+                    println!("No events found for this task.");
+                    return Ok(());
+                }
+                
+                println!("{:<4} | {:<24} | {:<22} | {:<10} | {:<7} | {}", "Seq", "Timestamp", "Event Type", "Actor", "Level", "Details");
+                println!("{:-<4}-+-{:-<24}-+-{:-<22}-+-{:-<10}-+-{:-<7}-+-{:-<40}", "", "", "", "", "", "");
+                
+                for ev in events {
+                    let ts: String = ev.timestamp.chars().take(24).collect();
+                    let payload = serde_json::to_string(&ev.payload_json).unwrap_or_default();
+                    let display_payload = if payload.chars().count() > 40 {
+                        let truncated: String = payload.chars().take(37).collect();
+                        format!("{}...", truncated)
+                    } else {
+                        payload
+                    };
+                    
+                    println!("{:<4} | {:<24} | {:<22} | {:<10} | {:<7} | {}", ev.sequence, ts, ev.event_type, ev.actor, ev.severity, display_payload);
+                }
+            } else {
+                eprintln!("[-] Task ID not found or error loading events for: {}", task_id);
+            }
+        }
+
         Some(Commands::Top) => {
             println!("Kerna Top (Agent Observability)\n");
             println!("{:<36} | {:<20} | {:<10} | {:<10}", "Task ID", "Goal", "Tokens", "Duration");
@@ -319,6 +426,16 @@ approval_required = []
                     let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
                     file.write_all(template.as_bytes())?;
                     println!("[+] Appended {} plugin boilerplate to kerna.toml", name);
+                }
+                Some(PluginCommands::Inspect { path }) => {
+                    match plugin_manifest::PluginManifest::load(std::path::Path::new(&path)) {
+                        Ok(manifest) => {
+                            manifest.print_risk_card();
+                        }
+                        Err(e) => {
+                            eprintln!("[-] Failed to load plugin manifest from {}: {}", path, e);
+                        }
+                    }
                 }
                 _ => {
                     println!("Kerna Plugins\n");
@@ -377,9 +494,10 @@ approval_required = []
         }
 
         Some(Commands::Memory { query }) => {
-            println!("Memory Search: {}\n", query);
+            let q = query.unwrap_or_default();
+            println!("Memory Search: {}\n", q);
             
-            if query.is_empty() {
+            if q.is_empty() {
                 if let Ok(memories) = memory.get_episodic_memories_by_time() {
                     let mut current_date = String::new();
                     for (content, _ts, date) in memories {
@@ -397,7 +515,7 @@ approval_required = []
                     }
                 }
             } else {
-                if let Ok(results) = memory.search_memory_by_text(&query, 10) {
+                if let Ok(results) = memory.search_memory_by_text(&q, 10) {
                     if results.is_empty() {
                         println!("No memories found.");
                     } else {
@@ -474,7 +592,7 @@ approval_required = ["fs.write", "fs.delete"]
 "#, 
                 provider, 
                 api_key,
-                if provider == "anthropic" { "claude-3-5-sonnet-20240620" } else { "gpt-4o-mini" }
+                if provider == "anthropic" { "claude-sonnet-4-20250514" } else { "gpt-4o-mini" }
             );
             
             std::fs::write("kerna.toml", toml_content)?;
@@ -523,7 +641,7 @@ approval_required = ["fs.write", "fs.delete"]
                             "Reasoning..."
                         };
                         println!("{}", display);
-                        std::thread::sleep(std::time::Duration::from_millis(800));
+                        tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
                         println!("↓");
                     }
                     println!("Done");
@@ -765,3 +883,6 @@ approval_required = ["fs.write", "fs.delete"]
 
     Ok(())
 }
+
+#[cfg(test)]
+mod trust_layer_validation;

@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -36,12 +36,41 @@ pub struct McpClient {
 }
 
 impl McpClient {
-    pub fn spawn(cmd: &str, args: &[&str]) -> Result<Self> {
+    pub fn spawn(cmd: &str, args: &[&str], runtime_mode: &str, docker_image: &str, network_mode: &str, egress_proxy: Option<&str>) -> Result<Self> {
         // Create an isolated working directory (not an OS sandbox)
         let _ = std::fs::create_dir_all("sandbox");
         
-        let mut command = Command::new(cmd);
-        command.args(args).env_clear().current_dir("sandbox");
+        let mut actual_cmd = cmd.to_string();
+        let mut actual_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+
+        if runtime_mode == "docker" {
+            let absolute_sandbox = std::env::current_dir()?.join("sandbox");
+            let mut docker_args = vec![
+                "run".to_string(),
+                "-i".to_string(),
+                "--rm".to_string(),
+                "-v".to_string(), format!("{}:/workspace", absolute_sandbox.display()),
+                "-w".to_string(), "/workspace".to_string(),
+                "--cap-drop=ALL".to_string(),
+                format!("--network={}", network_mode),
+            ];
+            
+            if let Some(proxy) = egress_proxy {
+                docker_args.push("-e".to_string());
+                docker_args.push(format!("http_proxy={}", proxy));
+                docker_args.push("-e".to_string());
+                docker_args.push(format!("https_proxy={}", proxy));
+            }
+            
+            docker_args.push(docker_image.to_string());
+            docker_args.push(actual_cmd);
+            docker_args.append(&mut actual_args);
+            actual_cmd = "docker".to_string();
+            actual_args = docker_args;
+        }
+
+        let mut command = Command::new(actual_cmd);
+        command.args(&actual_args).env_clear().current_dir("sandbox");
         
         let retain_vars = ["PATH", "SystemRoot", "SystemDrive", "USERPROFILE", "APPDATA", "TEMP", "TMP", "PATHEXT"];
         for var in retain_vars {
@@ -66,6 +95,40 @@ impl McpClient {
             stdin_writer: stdin,
             request_id: 1,
         })
+    }
+
+    pub async fn initialize(&mut self) -> Result<()> {
+        let id = self.next_id();
+        let request = json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "Kerna",
+                    "version": "0.1.0"
+                }
+            },
+            "id": id
+        });
+        
+        // Some servers might not return a result for initialize, or might return capabilities.
+        // We just ensure it doesn't fail.
+        let _ = self.send_request(request).await?;
+        
+        // Also send initialized notification
+        let notify = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        });
+        let mut req_str = notify.to_string();
+        req_str.push('\n');
+        self.stdin_writer.write_all(req_str.as_bytes()).await?;
+        self.stdin_writer.flush().await?;
+        
+        Ok(())
     }
 
     pub async fn list_tools(&mut self) -> Result<Vec<McpTool>> {
@@ -111,7 +174,9 @@ impl McpClient {
         self.stdin_writer.flush().await?;
 
         let mut line = String::new();
-        match tokio::time::timeout(std::time::Duration::from_secs(30), self.stdout_reader.read_line(&mut line)).await {
+        // Item 17: Limit response size to 5MB to prevent OOM
+        let mut handle = (&mut self.stdout_reader).take(5 * 1024 * 1024);
+        match tokio::time::timeout(std::time::Duration::from_secs(30), handle.read_line(&mut line)).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => return Err(anyhow!("Failed to read from MCP server: {}", e)),
             Err(_) => {

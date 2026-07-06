@@ -5,8 +5,8 @@ import time
 def send_response(response):
     print(json.dumps(response), flush=True)
 
-def send_error(message):
-    print(json.dumps({"jsonrpc": "2.0", "error": {"code": -32603, "message": message}}), flush=True)
+def send_error(message, req_id=None):
+    print(json.dumps({"jsonrpc": "2.0", "id": req_id, "error": {"code": -32603, "message": message}}), flush=True)
 
 def handle_request(req):
     req_id = req.get("id")
@@ -55,7 +55,7 @@ def handle_request(req):
         if action == "echo":
             send_response({"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": "hello"}]}})
         elif action == "sleep":
-            time.sleep(10)
+            time.sleep(60)
             send_response({"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": "woke up"}]}})
         elif action == "large_output":
             # 20MB of text
@@ -69,12 +69,12 @@ def handle_request(req):
             sys.exit(1)
         elif action == "permission_denied":
             # This is technically handled by Kerna's config, but if it reaches here we simulate a failure
-            send_error("Permission denied to execute this action.")
+            send_error("Permission denied to execute this action.", req_id)
         else:
-            send_error(f"Unknown action: {action}")
+            send_error(f"Unknown action: {action}", req_id)
         return
         
-    send_error(f"Method not found: {method}")
+    send_error(f"Method not found: {method}", req_id)
 
 def main():
     for line in sys.stdin:

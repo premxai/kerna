@@ -14,10 +14,11 @@ Kerna exists to provide a secure, observable, and persistent "operating system" 
 
 Kerna is strictly responsible for the orchestration and safety of the agent loop. It owns:
 
-*   **The Scheduler:** The retry loop, backoff logic, and LLM HTTP requests.
-*   **The Memory Engine:** The embedded SQLite database storing episodic and semantic traces.
-*   **Permissions:** The fail-closed security boundary dictating what an agent can and cannot do.
-*   **Observability:** The recording of exact JSON payloads, tool traces, and thought processes for human debugging.
+*   **The Scheduler:** The orchestrator that executes the agent loop, enforces timeouts, and issues commands.
+*   **The Memory Engine:** The embedded SQLite database storing the full event trace schema.
+*   **Budgets:** The strict constraints (`max_tool_calls`, `max_runtime_seconds`, etc.) that prevent runaway execution.
+*   **Permissions & Manifests:** The fail-closed security boundary evaluating `manifest.toml` requirements against actual calls.
+*   **Observability:** The recording of exact JSON payloads, tool traces, and thought processes into structured tables for human debugging.
 *   **Process Isolation:** Spawning and safely reaping external tool processes (MCP plugins).
 
 ## 3. What Kerna Explicitly Does NOT Own

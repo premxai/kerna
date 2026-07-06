@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
+use crate::events::{Event, EventSink};
 use std::path::Path;
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -108,6 +109,35 @@ impl MemoryEngine {
             )
             .context("Failed to create user_preferences table")?;
 
+        // Create events table (Phase 4)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS events (
+                event_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                session_id TEXT,
+                sequence INTEGER NOT NULL,
+                timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                model TEXT,
+                tool TEXT,
+                policy_decision TEXT,
+                risk_score REAL,
+                parent_event_id TEXT,
+                correlation_id TEXT,
+                redaction_status TEXT,
+                budget_snapshot_json TEXT,
+                payload_json TEXT
+            );",
+            [],
+        )
+        .context("Failed to create events table")?;
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id);", [])?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);", [])?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);", [])?;
+
         // Create facts table (knowledge graph nodes)
         conn.execute(
                 "CREATE TABLE IF NOT EXISTS facts (
@@ -132,6 +162,26 @@ impl MemoryEngine {
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_facts_predicate ON facts(predicate);",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_logs_task_id ON agent_logs(task_id);",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_episodic_memory_created_at ON episodic_memory(created_at);",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_last_active_at ON sessions(last_active_at);",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_facts_valid_until ON facts(valid_until);",
             [],
         )?;
 
@@ -539,6 +589,90 @@ impl MemoryEngine {
         }
 
         Ok(context)
+    }
+}
+
+impl EventSink for MemoryEngine {
+    fn record(&self, event: Event) -> Result<()> {
+        let conn = self.get_conn();
+        
+        let budget_snapshot_str = event.budget_snapshot_json
+            .map(|v| v.to_string());
+            
+        let payload_str = event.payload_json.to_string();
+        
+        conn.execute(
+            "INSERT INTO events (
+                event_id, task_id, session_id, sequence, timestamp, event_type, actor, severity,
+                model, tool, policy_decision, risk_score, parent_event_id, correlation_id, redaction_status, budget_snapshot_json, payload_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                event.event_id,
+                event.task_id,
+                event.session_id,
+                event.sequence,
+                event.timestamp,
+                event.event_type,
+                event.actor,
+                event.severity,
+                event.model,
+                event.tool,
+                event.policy_decision,
+                event.risk_score,
+                event.parent_event_id,
+                event.correlation_id,
+                event.redaction_status,
+                budget_snapshot_str,
+                payload_str
+            ],
+        ).context("Failed to insert event")?;
+        
+        Ok(())
+    }
+}
+
+impl MemoryEngine {
+    pub fn get_events(&self, task_id: &str) -> Result<Vec<Event>> {
+        let conn = self.get_conn();
+        let mut stmt = conn.prepare(
+            "SELECT event_id, task_id, session_id, sequence, timestamp, event_type, actor, severity, 
+                    model, tool, policy_decision, risk_score, parent_event_id, correlation_id, redaction_status, budget_snapshot_json, payload_json
+             FROM events WHERE task_id = ?1 ORDER BY sequence ASC"
+        )?;
+        
+        let rows = stmt.query_map(params![task_id], |row| {
+            let budget_str: Option<String> = row.get(15)?;
+            let budget_json = budget_str.and_then(|s| serde_json::from_str(&s).ok());
+            
+            let payload_str: String = row.get(16)?;
+            let payload_json = serde_json::from_str(&payload_str).unwrap_or(serde_json::json!({}));
+            
+            Ok(Event {
+                event_id: row.get(0)?,
+                task_id: row.get(1)?,
+                session_id: row.get(2)?,
+                sequence: row.get(3)?,
+                timestamp: row.get(4)?,
+                event_type: row.get(5)?,
+                actor: row.get(6)?,
+                severity: row.get(7)?,
+                model: row.get(8)?,
+                tool: row.get(9)?,
+                policy_decision: row.get(10)?,
+                risk_score: row.get(11)?,
+                parent_event_id: row.get(12)?,
+                correlation_id: row.get(13)?,
+                redaction_status: row.get(14)?,
+                budget_snapshot_json: budget_json,
+                payload_json,
+            })
+        })?;
+        
+        let mut events = Vec::new();
+        for r in rows {
+            events.push(r?);
+        }
+        Ok(events)
     }
 }
 

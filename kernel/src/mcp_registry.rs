@@ -1,7 +1,9 @@
 use crate::config::McpServerConfig;
 use crate::mcp::{McpClient, McpTool};
+use crate::plugin_manifest::PluginManifest;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Manages the lifecycle and routing of all registered MCP servers.
 pub struct McpRegistry {
@@ -9,6 +11,8 @@ pub struct McpRegistry {
     tool_to_server: HashMap<String, String>,
     /// Map from server name → active client connection
     clients: HashMap<String, McpClient>,
+    /// Server configs for capability enforcement
+    server_configs: HashMap<String, McpServerConfig>,
     /// Full list of all discovered tools across all servers
     all_tools: Vec<McpTool>,
 }
@@ -18,6 +22,7 @@ impl McpRegistry {
         McpRegistry {
             tool_to_server: HashMap::new(),
             clients: HashMap::new(),
+            server_configs: HashMap::new(),
             all_tools: Vec::new(),
         }
     }
@@ -30,12 +35,39 @@ impl McpRegistry {
                 continue;
             }
 
-            println!("[MCP] Spawning server: {} ({})", config.name, config.command);
-
             let args_ref: Vec<&str> = config.args.iter().map(|s| s.as_str()).collect();
 
-            match McpClient::spawn(&config.command, &args_ref) {
+            // Load manifest (Phase 3)
+            let manifest_path_str = format!("plugins/{}/manifest.toml", config.name);
+            let manifest_path = Path::new(&manifest_path_str);
+            if manifest_path.exists() {
+                match PluginManifest::load(manifest_path) {
+                    Ok(m) => {
+                        println!("[MCP] Loaded verified manifest for plugin: {}", config.name);
+                        // TODO: Merge capabilities from manifest into config
+                    }
+                    Err(e) => {
+                        eprintln!("[MCP] Error loading manifest for {}: {}", config.name, e);
+                    }
+                }
+            } else {
+                println!("[MCP] Legacy Warning: Plugin '{}' lacks a manifest.toml. Running with full config trust.", config.name);
+            }
+
+            match McpClient::spawn(
+                &config.command, 
+                &args_ref, 
+                &config.runtime_mode, 
+                &config.docker_image,
+                "bridge",
+                None
+            ) {
                 Ok(mut client) => {
+                    // Initialize the client
+                    if let Err(e) = client.initialize().await {
+                        eprintln!("[MCP] Warning: Failed to initialize server '{}': {}", config.name, e);
+                    }
+
                     // Discover tools from this server
                     match client.list_tools().await {
                         Ok(tools) => {
@@ -58,6 +90,7 @@ impl McpRegistry {
                                 self.all_tools.push(tool.clone());
                             }
                             self.clients.insert(config.name.clone(), client);
+                            self.server_configs.insert(config.name.clone(), config.clone());
                         }
                         Err(e) => {
                             eprintln!(
@@ -109,6 +142,14 @@ impl McpRegistry {
             .ok_or_else(|| anyhow!("No MCP server registered for tool '{}'", tool_name))?
             .clone();
 
+        if let Some(config) = self.server_configs.get(&server_name) {
+            if !config.capabilities.is_empty() 
+                && !config.capabilities.contains(&tool_name.to_string()) 
+                && !config.capabilities.contains(&"*".to_string()) {
+                return Err(anyhow!("Server '{}' does not have capability to run tool '{}'", server_name, tool_name));
+            }
+        }
+
         let client = self
             .clients
             .get_mut(&server_name)
@@ -120,6 +161,10 @@ impl McpRegistry {
     /// Check if a tool is available.
     pub fn has_tool(&self, tool_name: &str) -> bool {
         self.tool_to_server.contains_key(tool_name)
+    }
+
+    pub fn get_server_for_tool(&self, tool_name: &str) -> Option<String> {
+        self.tool_to_server.get(tool_name).cloned()
     }
 
     /// Get all tool names.

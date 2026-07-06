@@ -2,6 +2,11 @@
 name = "kerna"
 version = "0.1.0"
 edition = "2021"
+description = "A reliable agentic runtime"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/premxai/kerna"
+authors = ["Premxai <hello@premxai.com>"]
+rust-version = "1.74"
 
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
@@ -16,3 +21,7 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 toml = "0.8"
 tokio-cron-scheduler = "0.13"
 chrono = "0.4"
+sha2 = "0.10"
+fs_extra = "1.3.0"
+axum = "0.7"
+async-trait = "0.1"

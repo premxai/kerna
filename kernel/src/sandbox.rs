@@ -1,59 +1,127 @@
 use anyhow::{anyhow, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 use tokio::time::timeout;
 use wasmtime::{Engine, Module, Store, Linker};
 
 pub struct ProcessSandbox {
     sandbox_dir: PathBuf,
+    runtime_mode: String,
+    allow_dynamic_installs: bool,
+    network_mode: String,
+    egress_proxy: Option<String>,
 }
 
 impl ProcessSandbox {
-    pub fn new<P: AsRef<Path>>(dir: P) -> Result<Self> {
+    pub fn new<P: AsRef<Path>>(dir: P, runtime_mode: String, allow_dynamic_installs: bool, network_mode: String, egress_proxy: Option<String>) -> Result<Self> {
         let sandbox_dir = dir.as_ref().to_path_buf();
         if !sandbox_dir.exists() {
             fs::create_dir_all(&sandbox_dir)?;
         }
-        Ok(ProcessSandbox { sandbox_dir })
+        Ok(ProcessSandbox { sandbox_dir, runtime_mode, allow_dynamic_installs, network_mode, egress_proxy })
+    }
+
+    pub fn snapshot(&self) -> Result<()> {
+        let snapshot_dir = self.sandbox_dir.parent().unwrap().join(format!("{}_snapshot", self.sandbox_dir.file_name().unwrap().to_string_lossy()));
+        if snapshot_dir.exists() {
+            fs::remove_dir_all(&snapshot_dir)?;
+        }
+        let mut options = fs_extra::dir::CopyOptions::new();
+        options.copy_inside = true;
+        fs_extra::dir::copy(&self.sandbox_dir, &snapshot_dir, &options)?;
+        Ok(())
+    }
+
+    pub fn rollback(&self) -> Result<()> {
+        let snapshot_dir = self.sandbox_dir.parent().unwrap().join(format!("{}_snapshot", self.sandbox_dir.file_name().unwrap().to_string_lossy()));
+        if !snapshot_dir.exists() {
+            return Err(anyhow!("No snapshot available for rollback."));
+        }
+        if self.sandbox_dir.exists() {
+            fs::remove_dir_all(&self.sandbox_dir)?;
+        }
+        let mut options = fs_extra::dir::CopyOptions::new();
+        options.copy_inside = true;
+        let original_name_dir = snapshot_dir.join(self.sandbox_dir.file_name().unwrap());
+        if original_name_dir.exists() {
+            fs_extra::dir::copy(&original_name_dir, self.sandbox_dir.parent().unwrap(), &options)?;
+        } else {
+             // Fallback if structure differs slightly based on fs_extra version
+             fs::create_dir_all(&self.sandbox_dir)?;
+             fs_extra::dir::copy(&snapshot_dir, self.sandbox_dir.parent().unwrap(), &options)?;
+        }
+        Ok(())
     }
 
     pub async fn run_command(&self, cmd: &str, args: &[&str], timeout_sec: u64) -> Result<String> {
+        if !self.allow_dynamic_installs {
+            let is_install = (cmd == "npm" && args.contains(&"install")) ||
+                             (cmd == "pip" && args.contains(&"install")) ||
+                             (cmd == "cargo" && args.contains(&"install")) ||
+                             cmd == "apt-get";
+            if is_install {
+                return Err(anyhow!("Security policy violation: dynamic package installations are disabled via config."));
+            }
+        }
+
         let sandbox_dir = self.sandbox_dir.clone();
-        let cmd_str = cmd.to_string();
-        let args_vec: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let mut actual_cmd = cmd.to_string();
+        let mut actual_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
 
-        // Run the process in a background blocking task
-        let handle = tokio::task::spawn_blocking(move || -> Result<(i32, String, String)> {
-            let child = Command::new(cmd_str)
-                .args(&args_vec)
-                .current_dir(&sandbox_dir)
-                .env_clear() // Strip all sensitive parent env variables
-                .env("PATH", std::env::var("PATH").unwrap_or_default()) // Only pass system PATH for basic execution
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()?;
-
-            let output = child.wait_with_output()?;
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if self.runtime_mode == "docker" {
+            let absolute_sandbox = std::env::current_dir()?.join(&sandbox_dir);
+            let mut docker_args = vec![
+                "run".to_string(),
+                "-i".to_string(),
+                "--rm".to_string(),
+                "-v".to_string(), format!("{}:/workspace", absolute_sandbox.display()),
+                "-w".to_string(), "/workspace".to_string(),
+                "--cap-drop=ALL".to_string(),
+                format!("--network={}", self.network_mode),
+            ];
             
-            let code = output.status.code().unwrap_or(-1);
-            Ok((code, stdout, stderr))
-        });
+            if let Some(proxy) = &self.egress_proxy {
+                docker_args.push("-e".to_string());
+                docker_args.push(format!("http_proxy={}", proxy));
+                docker_args.push("-e".to_string());
+                docker_args.push(format!("https_proxy={}", proxy));
+            }
+            
+            docker_args.push("ubuntu:latest".to_string()); // Default image for sandbox commands
+            docker_args.push(actual_cmd);
+            docker_args.append(&mut actual_args);
+            actual_cmd = "docker".to_string();
+            actual_args = docker_args;
+        }
 
-        match timeout(Duration::from_secs(timeout_sec), handle).await {
-            Ok(Ok(Ok((code, stdout, stderr)))) => {
+        let child = tokio::process::Command::new(actual_cmd)
+            .args(&actual_args)
+            .current_dir(&sandbox_dir)
+            .env_clear() // Strip all sensitive parent env variables
+            .env("PATH", std::env::var("PATH").unwrap_or_default()) // Only pass system PATH for basic execution
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+
+        match timeout(Duration::from_secs(timeout_sec), child.wait_with_output()).await {
+            Ok(Ok(output)) => {
+                let code = output.status.code().unwrap_or(-1);
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
                 if code == 0 {
                     Ok(stdout)
                 } else {
                     Err(anyhow!("Process exited with code {}: {}", code, stderr))
                 }
             }
-            Ok(Ok(Err(e))) => Err(e),
-            Ok(Err(join_err)) => Err(anyhow!("Sandbox task joined with error: {}", join_err)),
-            Err(_) => Err(anyhow!("Process execution timed out after {} seconds", timeout_sec)),
+            Ok(Err(e)) => Err(anyhow!("Failed to wait for process: {}", e)),
+            Err(_) => {
+                Err(anyhow!("Process execution timed out after {} seconds", timeout_sec))
+            }
         }
     }
 }
@@ -94,3 +162,25 @@ impl WasmSandbox {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    #[tokio::test]
+    async fn test_package_manager_blocking() {
+        let dir = env::temp_dir().join("kerna_test_sandbox");
+        let sandbox = ProcessSandbox::new(&dir, "native".to_string(), false, "none".to_string(), None).unwrap();
+        
+        let res = sandbox.run_command("npm", &["install", "evil-package"], 5).await;
+        assert!(res.is_err());
+        let err_str = res.unwrap_err().to_string();
+        assert!(err_str.contains("dynamic package installations are disabled"));
+        
+        let res2 = sandbox.run_command("whoami", &[], 5).await;
+        // whoami should be allowed
+        assert!(res2.is_ok(), "whoami failed: {:?}", res2.err());
+    }
+}
+

@@ -23,6 +23,12 @@ pub struct McpServerConfig {
     
     #[serde(default)]
     pub approval_required: Vec<String>,
+    
+    #[serde(default = "default_runtime_mode")]
+    pub runtime_mode: String,
+    
+    #[serde(default = "default_docker_image")]
+    pub docker_image: String,
 }
 
 /// Configuration for a scheduled recurring goal.
@@ -62,6 +68,48 @@ pub struct Config {
     pub max_retries: u32,
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: u32,
+    
+    #[serde(default = "default_runtime_mode")]
+    pub runtime_mode: String,
+    
+    #[serde(default = "default_false")]
+    pub allow_dynamic_installs: bool,
+    
+    // Budget Envelope (Phase 1)
+    #[serde(default = "default_max_runtime_seconds")]
+    pub max_runtime_seconds: u64,
+    #[serde(default = "default_max_tool_calls")]
+    pub max_tool_calls: u64,
+    #[serde(default = "default_max_llm_calls")]
+    pub max_llm_calls: u64,
+    #[serde(default = "default_max_cost_usd")]
+    pub max_cost_usd: f64,
+    #[serde(default = "default_max_output_bytes")]
+    pub max_output_bytes: u64,
+    #[serde(default = "default_max_memory_writes")]
+    pub max_memory_writes: u64,
+    
+    #[serde(default = "default_network_mode")]
+    pub network_mode: String,
+    
+    #[serde(default)]
+    pub egress_proxy: Option<String>,
+    
+    #[serde(default = "default_false")]
+    pub enable_supervisor: bool,
+    
+    // v1.1 Hermes Parity Features
+    #[serde(default)]
+    pub converse: bool,
+    
+    #[serde(default)]
+    pub llm_fallback_provider: Option<String>,
+    
+    #[serde(default)]
+    pub llm_fallback_api_key: Option<String>,
+    
+    #[serde(default)]
+    pub credential_pool: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -75,6 +123,29 @@ fn default_max_retries() -> u32 {
 fn default_max_tool_rounds() -> u32 {
     15
 }
+
+fn default_runtime_mode() -> String {
+    "native".to_string()
+}
+
+fn default_docker_image() -> String {
+    "ubuntu:latest".to_string()
+}
+
+fn default_false() -> bool {
+    false
+}
+
+fn default_network_mode() -> String {
+    "none".to_string()
+}
+
+fn default_max_runtime_seconds() -> u64 { 300 }
+fn default_max_tool_calls() -> u64 { 25 }
+fn default_max_llm_calls() -> u64 { 10 }
+fn default_max_cost_usd() -> f64 { 0.25 }
+fn default_max_output_bytes() -> u64 { 50000 }
+fn default_max_memory_writes() -> u64 { 20 }
 
 impl Config {
     pub fn load() -> Self {
@@ -130,15 +201,36 @@ impl Config {
             permissions: vec![],
             max_retries: 3,
             max_tool_rounds: 15,
+            runtime_mode: "native".to_string(),
+            allow_dynamic_installs: false,
+            max_runtime_seconds: 300,
+            max_tool_calls: 25,
+            max_llm_calls: 10,
+            max_cost_usd: 0.25,
+            max_output_bytes: 50000,
+            max_memory_writes: 20,
+            network_mode: "none".to_string(),
+            egress_proxy: None,
+            enable_supervisor: false,
+            converse: false,
+            credential_pool: vec![],
+            llm_fallback_provider: None,
+            llm_fallback_api_key: None,
         }
     }
 
     /// Check if a tool action is allowed, requires confirmation, or is denied.
     pub fn check_permission(&self, tool_name: &str) -> &str {
+        let mut wildcard_action = None;
         for rule in &self.permissions {
-            if rule.tool == tool_name || rule.tool == "*" {
+            if rule.tool == tool_name {
                 return &rule.action;
+            } else if rule.tool == "*" {
+                wildcard_action = Some(&rule.action);
             }
+        }
+        if let Some(action) = wildcard_action {
+            return action;
         }
         "deny" // Default: fail-closed security
     }

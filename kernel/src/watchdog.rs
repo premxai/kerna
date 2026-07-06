@@ -2,8 +2,7 @@ use crate::config::Config;
 use crate::memory::MemoryEngine;
 use anyhow::Result;
 use reqwest::Client;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use sha2::{Sha256, Digest};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,9 +37,9 @@ impl WatchdogEngine {
                                 match client.get(url).send().await {
                                     Ok(resp) => {
                                         if let Ok(text) = resp.text().await {
-                                            let mut hasher = DefaultHasher::new();
-                                            text.hash(&mut hasher);
-                                            let current_hash = hasher.finish().to_string();
+                                            let mut hasher = Sha256::new();
+                                            hasher.update(text.as_bytes());
+                                            let current_hash = format!("{:x}", hasher.finalize());
                                             
                                             let pref_key = format!("watchdog_{}", id);
                                             let last_hash = memory.get_preference(&pref_key).unwrap_or(None);
