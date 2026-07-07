@@ -36,11 +36,11 @@ jobs:
       run: cargo clippy -- -D warnings
       working-directory: ./kernel
       
+    - name: Install cargo-audit
+      uses: taiki-e/install-action@cargo-audit
+
     - name: Security audit
-      uses: rustsec/audit-check@v1.4.1
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-      
+      run: cargo audit      
     - name: Run tests
       run: cargo test --verbose
       working-directory: ./kernel
