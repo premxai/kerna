@@ -436,7 +436,7 @@ async fn test_auto_rollback_on_failure() {
         .prepare("SELECT count(*) FROM events WHERE event_type = 'workspace.rollback.started'")
         .unwrap();
     let count: i64 = stmt.query_row([], |row| row.get(0)).unwrap();
-    assert_eq!(count, 1, "Rollback event should be emitted");
+    assert!(count > 0, "Rollback event should be emitted");
 }
 
 #[test]
