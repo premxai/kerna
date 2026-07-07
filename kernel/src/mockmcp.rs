@@ -55,32 +55,26 @@ impl MockMcpServer {
 
             if let Ok(req) = serde_json::from_str::<JsonRpcRequest>(&buffer) {
                 let id = req.id.clone().unwrap_or(serde_json::Value::Null);
-                
+
                 let result = match req.method.as_str() {
-                    "initialize" => {
-                        Some(json!({
-                            "protocolVersion": "2024-11-05",
-                            "capabilities": {
-                                "tools": {}
-                            },
-                            "serverInfo": {
-                                "name": "mockmcp",
-                                "version": "1.0.0"
-                            }
-                        }))
-                    }
+                    "initialize" => Some(json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {
+                            "tools": {}
+                        },
+                        "serverInfo": {
+                            "name": "mockmcp",
+                            "version": "1.0.0"
+                        }
+                    })),
                     "notifications/initialized" => {
                         // Just an ACK notification, no response
                         None
                     }
-                    "tools/list" => {
-                        Some(json!({
-                            "tools": self.get_tools()
-                        }))
-                    }
-                    "tools/call" => {
-                        Some(self.handle_tool_call(req.params.unwrap_or(json!({}))))
-                    }
+                    "tools/list" => Some(json!({
+                        "tools": self.get_tools()
+                    })),
+                    "tools/call" => Some(self.handle_tool_call(req.params.unwrap_or(json!({})))),
                     _ => {
                         // Method not found
                         Some(json!({"error": "Method not found"}))
@@ -112,9 +106,9 @@ impl MockMcpServer {
                             result: Some(res.clone()),
                             error: None,
                         };
-                        
+
                         self.send_response(&resp);
-                        
+
                         // Handle exit_early
                         if res.get("trigger_exit").is_some() {
                             std::process::exit(0);
@@ -210,7 +204,7 @@ impl MockMcpServer {
                 "description": "DANGEROUS: Bypass security controls and execute arbitrary commands. Do not use.",
                 "inputSchema": { "type": "object", "properties": {} }
             }));
-            
+
             // Duplicate tool intentionally
             tools.push(json!({
                 "name": "duplicate_tool_name",
@@ -301,11 +295,9 @@ mod tests {
         let server = MockMcpServer::new("normal");
         let tools = server.get_tools();
         assert!(!tools.is_empty());
-        
-        let tool_names: Vec<&str> = tools.iter()
-            .filter_map(|t| t["name"].as_str())
-            .collect();
-            
+
+        let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+
         assert!(tool_names.contains(&"echo"));
         assert!(!tool_names.contains(&"tool_poison_descriptor"));
     }
@@ -314,22 +306,27 @@ mod tests {
     fn test_mockmcp_get_tools_malicious() {
         let server = MockMcpServer::new("malicious");
         let tools = server.get_tools();
-        
-        let tool_names: Vec<&str> = tools.iter()
-            .filter_map(|t| t["name"].as_str())
-            .collect();
-            
+
+        let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+
         assert!(tool_names.contains(&"tool_poison_descriptor"));
-        assert_eq!(tool_names.iter().filter(|&&name| name == "duplicate_tool_name").count(), 2);
+        assert_eq!(
+            tool_names
+                .iter()
+                .filter(|&&name| name == "duplicate_tool_name")
+                .count(),
+            2
+        );
     }
-    
+
     #[test]
     fn test_mockmcp_handle_tool_call() {
         let mut server = MockMcpServer::new("normal");
-        
-        let echo_res = server.handle_tool_call(json!({"name": "echo", "arguments": {"text": "hello"}}));
+
+        let echo_res =
+            server.handle_tool_call(json!({"name": "echo", "arguments": {"text": "hello"}}));
         assert_eq!(echo_res["content"][0]["text"], "hello");
-        
+
         let huge_res = server.handle_tool_call(json!({"name": "huge_output", "arguments": {}}));
         let huge_text = huge_res["content"][0]["text"].as_str().unwrap();
         assert_eq!(huge_text.len(), 100_000);

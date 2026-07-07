@@ -23,7 +23,7 @@ impl PermissionManager {
     /// Determine the permission level for a given tool.
     pub fn check(&self, tool_name: &str, server_name: Option<&str>) -> PermissionLevel {
         let action = self.config.check_permission(tool_name);
-        
+
         let mut level = match action {
             "require_confirmation" => PermissionLevel::RequireConfirmation,
             "deny" => PermissionLevel::Deny,
@@ -45,13 +45,15 @@ impl PermissionManager {
         if level == PermissionLevel::AutoApprove {
             if let Some(s_name) = server_name {
                 if let Some(s_cfg) = self.config.mcp_servers.iter().find(|s| s.name == s_name) {
-                    if s_cfg.approval_required.contains(&tool_name.to_string()) || s_cfg.approval_required.contains(&"*".to_string()) {
+                    if s_cfg.approval_required.contains(&tool_name.to_string())
+                        || s_cfg.approval_required.contains(&"*".to_string())
+                    {
                         level = PermissionLevel::RequireConfirmation;
                     }
                 }
             }
         }
-        
+
         level
     }
 
@@ -88,17 +90,15 @@ mod tests {
     #[test]
     fn test_sabotage_rogue_plugin_denied() {
         let config = Config {
-            permissions: vec![
-                PermissionRule {
-                    tool: "fs.read".to_string(),
-                    action: "auto_approve".to_string(),
-                }
-            ],
+            permissions: vec![PermissionRule {
+                tool: "fs.read".to_string(),
+                action: "auto_approve".to_string(),
+            }],
             ..Default::default()
         };
-        
+
         let pm = PermissionManager::new(config);
-        
+
         assert_eq!(pm.check("fs.read", None), PermissionLevel::AutoApprove);
         // Escalation Sabotage: Tool tries to use a different capability
         assert_eq!(pm.check("fs.write", None), PermissionLevel::Deny);

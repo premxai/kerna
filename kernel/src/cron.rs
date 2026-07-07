@@ -39,7 +39,7 @@ impl CronEngine {
 
             let cron_expr = schedule.cron.clone();
             let goal = schedule.goal.clone();
-            
+
             let config_clone = self.config.clone();
             let memory_clone = self.memory.clone();
             let mcp_registry_clone = self.mcp_registry.clone();
@@ -58,7 +58,10 @@ impl CronEngine {
                     {
                         let mut running = running_c.lock().await;
                         if running.contains(&goal_clone) {
-                            println!("[Cron] Skipping scheduled goal (already running): {}", goal_clone);
+                            println!(
+                                "[Cron] Skipping scheduled goal (already running): {}",
+                                goal_clone
+                            );
                             return;
                         }
                         running.insert(goal_clone.clone());

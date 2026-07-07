@@ -1,6 +1,6 @@
+use crate::events::{Event, EventSink};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
-use crate::events::{Event, EventSink};
 use std::path::Path;
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -25,7 +25,9 @@ impl MemoryEngine {
         conn.execute("PRAGMA foreign_keys = ON;", [])?;
         let _ = conn.query_row("PRAGMA journal_mode = WAL;", [], |_row| Ok(()));
 
-        let engine = MemoryEngine { conn: Mutex::new(conn) };
+        let engine = MemoryEngine {
+            conn: Mutex::new(conn),
+        };
         engine.bootstrap()?;
         Ok(engine)
     }
@@ -41,19 +43,19 @@ impl MemoryEngine {
         let conn = self.get_conn();
         // Create sessions table
         conn.execute(
-                "CREATE TABLE IF NOT EXISTS sessions (
+            "CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 last_active_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );",
-                [],
-            )
-            .context("Failed to create sessions table")?;
+            [],
+        )
+        .context("Failed to create sessions table")?;
 
         // Create tasks table
         conn.execute(
-                "CREATE TABLE IF NOT EXISTS tasks (
+            "CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
                 session_id TEXT,
                 goal TEXT NOT NULL,
@@ -67,13 +69,13 @@ impl MemoryEngine {
                 completed_at DATETIME,
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE SET NULL
             );",
-                [],
-            )
-            .context("Failed to create tasks table")?;
+            [],
+        )
+        .context("Failed to create tasks table")?;
 
         // Create agent_logs table
         conn.execute(
-                "CREATE TABLE IF NOT EXISTS agent_logs (
+            "CREATE TABLE IF NOT EXISTS agent_logs (
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -81,33 +83,33 @@ impl MemoryEngine {
                 message TEXT NOT NULL,
                 FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
             );",
-                [],
-            )
-            .context("Failed to create agent_logs table")?;
+            [],
+        )
+        .context("Failed to create agent_logs table")?;
 
         // Create episodic_memory table (semantic memory for past goals/results)
         conn.execute(
-                "CREATE TABLE IF NOT EXISTS episodic_memory (
+            "CREATE TABLE IF NOT EXISTS episodic_memory (
                 id TEXT PRIMARY KEY,
                 content TEXT NOT NULL,
                 embedding_json TEXT NOT NULL,
                 tags TEXT DEFAULT '',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );",
-                [],
-            )
-            .context("Failed to create episodic_memory table")?;
+            [],
+        )
+        .context("Failed to create episodic_memory table")?;
 
         // Create user_preferences table (key-value store for user memory)
         conn.execute(
-                "CREATE TABLE IF NOT EXISTS user_preferences (
+            "CREATE TABLE IF NOT EXISTS user_preferences (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );",
-                [],
-            )
-            .context("Failed to create user_preferences table")?;
+            [],
+        )
+        .context("Failed to create user_preferences table")?;
 
         // Create events table (Phase 4)
         conn.execute(
@@ -134,13 +136,22 @@ impl MemoryEngine {
         )
         .context("Failed to create events table")?;
 
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id);", [])?;
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);", [])?;
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);", [])?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_id);",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);",
+            [],
+        )?;
 
         // Create facts table (knowledge graph nodes)
         conn.execute(
-                "CREATE TABLE IF NOT EXISTS facts (
+            "CREATE TABLE IF NOT EXISTS facts (
                 id TEXT PRIMARY KEY,
                 subject TEXT NOT NULL,
                 predicate TEXT NOT NULL,
@@ -151,9 +162,9 @@ impl MemoryEngine {
                 valid_until DATETIME,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );",
-                [],
-            )
-            .context("Failed to create facts table")?;
+            [],
+        )
+        .context("Failed to create facts table")?;
 
         // Create index for fact lookups
         conn.execute(
@@ -198,17 +209,18 @@ impl MemoryEngine {
             "INSERT INTO sessions (id, name) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET last_active_at = CURRENT_TIMESTAMP",
             params![id, name],
         )?;
-        
+
         // Fetch the ID (in case it already existed and we just updated last_active_at)
         let mut stmt = conn.prepare("SELECT id FROM sessions WHERE name = ?1")?;
         let actual_id: String = stmt.query_row(params![name], |row| row.get(0))?;
-        
+
         Ok(actual_id)
     }
 
     pub fn get_recent_sessions(&self) -> Result<Vec<(String, String)>> {
         let conn = self.get_conn();
-        let mut stmt = conn.prepare("SELECT id, name FROM sessions ORDER BY last_active_at DESC LIMIT 5")?;
+        let mut stmt =
+            conn.prepare("SELECT id, name FROM sessions ORDER BY last_active_at DESC LIMIT 5")?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
             let name: String = row.get(1)?;
@@ -249,7 +261,15 @@ impl MemoryEngine {
         Ok(())
     }
 
-    pub fn update_task_observability(&self, id: Uuid, duration_secs: i64, llm: &str, cost: f64, tokens: i64, retries: i64) -> Result<()> {
+    pub fn update_task_observability(
+        &self,
+        id: Uuid,
+        duration_secs: i64,
+        llm: &str,
+        cost: f64,
+        tokens: i64,
+        retries: i64,
+    ) -> Result<()> {
         let conn = self.get_conn();
         conn.execute(
             "UPDATE tasks SET duration_secs = ?1, llm_used = ?2, cost_estimate = ?3, tokens_used = ?4, retries = ?5 WHERE id = ?6",
@@ -270,7 +290,8 @@ impl MemoryEngine {
 
     pub fn get_tasks(&self) -> Result<Vec<(String, String, String)>> {
         let conn = self.get_conn();
-        let mut stmt = conn.prepare("SELECT id, goal, status FROM tasks ORDER BY created_at DESC")?;
+        let mut stmt =
+            conn.prepare("SELECT id, goal, status FROM tasks ORDER BY created_at DESC")?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
             let goal: String = row.get(1)?;
@@ -304,7 +325,10 @@ impl MemoryEngine {
     }
 
     #[allow(clippy::type_complexity)]
-    pub fn get_task_observability(&self, task_id: &str) -> Result<(String, String, String, i64, String, f64, i64, i64)> {
+    pub fn get_task_observability(
+        &self,
+        task_id: &str,
+    ) -> Result<(String, String, String, i64, String, f64, i64, i64)> {
         let conn = self.get_conn();
         let mut stmt = conn.prepare("SELECT goal, status, created_at, duration_secs, llm_used, cost_estimate, tokens_used, retries FROM tasks WHERE id = ?1")?;
         let result = stmt.query_row(params![task_id], |row| {
@@ -354,12 +378,7 @@ impl MemoryEngine {
     }
 
     #[allow(dead_code)]
-    pub fn add_tagged_memory(
-        &self,
-        content: &str,
-        embedding: &[f32],
-        tags: &str,
-    ) -> Result<()> {
+    pub fn add_tagged_memory(&self, content: &str, embedding: &[f32], tags: &str) -> Result<()> {
         let id = Uuid::new_v4().to_string();
         let embedding_json = serde_json::to_string(embedding)?;
         let conn = self.get_conn();
@@ -501,7 +520,13 @@ impl MemoryEngine {
         tx.execute(
             "INSERT INTO facts (id, subject, predicate, object, confidence)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![uuid::Uuid::new_v4().to_string(), subject, predicate, object, confidence],
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                subject,
+                predicate,
+                object,
+                confidence
+            ],
         )?;
 
         tx.commit()?;
@@ -558,11 +583,11 @@ impl MemoryEngine {
         if !memories.is_empty() {
             context.push_str("## Relevant past memories:\n");
             for m in &memories {
-                let display = if m.chars().count() > 200 { 
+                let display = if m.chars().count() > 200 {
                     let truncated: String = m.chars().take(200).collect();
                     format!("{}...", truncated)
-                } else { 
-                    m.to_string() 
+                } else {
+                    m.to_string()
                 };
                 context.push_str(&format!("- {}\n", display));
             }
@@ -596,12 +621,11 @@ impl MemoryEngine {
 impl EventSink for MemoryEngine {
     fn record(&self, event: Event) -> Result<()> {
         let conn = self.get_conn();
-        
-        let budget_snapshot_str = event.budget_snapshot_json
-            .map(|v| v.to_string());
-            
+
+        let budget_snapshot_str = event.budget_snapshot_json.map(|v| v.to_string());
+
         let payload_str = event.payload_json.to_string();
-        
+
         conn.execute(
             "INSERT INTO events (
                 event_id, task_id, session_id, sequence, timestamp, event_type, actor, severity,
@@ -627,7 +651,7 @@ impl EventSink for MemoryEngine {
                 payload_str
             ],
         ).context("Failed to insert event")?;
-        
+
         Ok(())
     }
 }
@@ -640,14 +664,14 @@ impl MemoryEngine {
                     model, tool, policy_decision, risk_score, parent_event_id, correlation_id, redaction_status, budget_snapshot_json, payload_json
              FROM events WHERE task_id = ?1 ORDER BY sequence ASC"
         )?;
-        
+
         let rows = stmt.query_map(params![task_id], |row| {
             let budget_str: Option<String> = row.get(15)?;
             let budget_json = budget_str.and_then(|s| serde_json::from_str(&s).ok());
-            
+
             let payload_str: String = row.get(16)?;
             let payload_json = serde_json::from_str(&payload_str).unwrap_or(serde_json::json!({}));
-            
+
             Ok(Event {
                 event_id: row.get(0)?,
                 task_id: row.get(1)?,
@@ -668,7 +692,7 @@ impl MemoryEngine {
                 payload_json,
             })
         })?;
-        
+
         let mut events = Vec::new();
         for r in rows {
             events.push(r?);
@@ -707,11 +731,12 @@ mod tests {
     fn test_memory_engine_creates_and_queries_tasks() {
         let mem = setup_test_db("test_tasks");
         let task_id = Uuid::new_v4();
-        
+
         mem.create_task(task_id, None, "Test goal").unwrap();
         mem.update_task_status(task_id, "completed").unwrap();
-        mem.log_message(task_id, "INFO", "Testing task log").unwrap();
-        
+        mem.log_message(task_id, "INFO", "Testing task log")
+            .unwrap();
+
         let logs = mem.get_task_logs(&task_id.to_string()).unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].2, "Testing task log");
@@ -722,11 +747,12 @@ mod tests {
         let mem = setup_test_db("test_stress");
         let task_id = Uuid::new_v4();
         mem.create_task(task_id, None, "Stress Test").unwrap();
-        
+
         for i in 0..100 {
-            mem.log_message(task_id, "INFO", &format!("Log message {}", i)).unwrap();
+            mem.log_message(task_id, "INFO", &format!("Log message {}", i))
+                .unwrap();
         }
-        
+
         let logs = mem.get_task_logs(&task_id.to_string()).unwrap();
         assert_eq!(logs.len(), 100);
     }
@@ -737,23 +763,28 @@ mod tests {
         let mem = Arc::new(setup_test_db("sabotage_concurrency"));
         let task_id = Uuid::new_v4();
         mem.create_task(task_id, None, "Concurrency Test").unwrap();
-        
+
         let mut handles = vec![];
-        
+
         for i in 0..50 {
             let mem_clone = mem.clone();
             handles.push(std::thread::spawn(move || {
                 for j in 0..100 {
-                    let _ = mem_clone.log_message(task_id, "INFO", &format!("Thread {} Msg {}", i, j));
+                    let _ =
+                        mem_clone.log_message(task_id, "INFO", &format!("Thread {} Msg {}", i, j));
                 }
             }));
         }
-        
+
         for h in handles {
             let _ = h.join();
         }
-        
+
         let logs = mem.get_task_logs(&task_id.to_string()).unwrap();
-        assert_eq!(logs.len(), 5000, "Database must survive extreme concurrency without locking");
+        assert_eq!(
+            logs.len(),
+            5000,
+            "Database must survive extreme concurrency without locking"
+        );
     }
 }

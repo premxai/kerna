@@ -38,7 +38,11 @@ impl BudgetTracker {
     pub fn check_runtime(&self) -> Result<()> {
         let elapsed = self.start_time.elapsed().as_secs();
         if elapsed > self.config.max_runtime_seconds {
-            return Err(anyhow!("BUDGET_EXCEEDED: max runtime of {}s exceeded (used {}s)", self.config.max_runtime_seconds, elapsed));
+            return Err(anyhow!(
+                "BUDGET_EXCEEDED: max runtime of {}s exceeded (used {}s)",
+                self.config.max_runtime_seconds,
+                elapsed
+            ));
         }
         Ok(())
     }
@@ -46,13 +50,20 @@ impl BudgetTracker {
     pub fn record_llm_call(&mut self, cost_increment: f64) -> Result<()> {
         self.check_runtime()?;
         if self.llm_calls >= self.config.max_llm_calls {
-            return Err(anyhow!("BUDGET_EXCEEDED: max LLM calls of {} exceeded", self.config.max_llm_calls));
+            return Err(anyhow!(
+                "BUDGET_EXCEEDED: max LLM calls of {} exceeded",
+                self.config.max_llm_calls
+            ));
         }
         self.llm_calls += 1;
 
         self.cost_usd += cost_increment;
         if self.cost_usd > self.config.max_cost_usd {
-            return Err(anyhow!("BUDGET_EXCEEDED: max cost of ${:.2} exceeded (used ${:.2})", self.config.max_cost_usd, self.cost_usd));
+            return Err(anyhow!(
+                "BUDGET_EXCEEDED: max cost of ${:.2} exceeded (used ${:.2})",
+                self.config.max_cost_usd,
+                self.cost_usd
+            ));
         }
 
         Ok(())
@@ -61,7 +72,10 @@ impl BudgetTracker {
     pub fn record_tool_call(&mut self) -> Result<()> {
         self.check_runtime()?;
         if self.tool_calls >= self.config.max_tool_calls {
-            return Err(anyhow!("BUDGET_EXCEEDED: max tool calls of {} exceeded", self.config.max_tool_calls));
+            return Err(anyhow!(
+                "BUDGET_EXCEEDED: max tool calls of {} exceeded",
+                self.config.max_tool_calls
+            ));
         }
         self.tool_calls += 1;
         Ok(())
@@ -69,7 +83,10 @@ impl BudgetTracker {
 
     pub fn record_output_bytes(&mut self, bytes: u64) -> Result<()> {
         if self.output_bytes + bytes > self.config.max_output_bytes {
-            return Err(anyhow!("BUDGET_EXCEEDED: max output bytes of {} exceeded", self.config.max_output_bytes));
+            return Err(anyhow!(
+                "BUDGET_EXCEEDED: max output bytes of {} exceeded",
+                self.config.max_output_bytes
+            ));
         }
         self.output_bytes += bytes;
         Ok(())
@@ -77,7 +94,10 @@ impl BudgetTracker {
 
     pub fn record_memory_write(&mut self) -> Result<()> {
         if self.memory_writes >= self.config.max_memory_writes {
-            return Err(anyhow!("BUDGET_EXCEEDED: max memory writes of {} exceeded", self.config.max_memory_writes));
+            return Err(anyhow!(
+                "BUDGET_EXCEEDED: max memory writes of {} exceeded",
+                self.config.max_memory_writes
+            ));
         }
         self.memory_writes += 1;
         Ok(())

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::time::timeout;
-use wasmtime::{Engine, Module, Store, Linker};
+use wasmtime::{Engine, Linker, Module, Store};
 
 pub struct ProcessSandbox {
     sandbox_dir: PathBuf,
@@ -15,16 +15,31 @@ pub struct ProcessSandbox {
 }
 
 impl ProcessSandbox {
-    pub fn new<P: AsRef<Path>>(dir: P, runtime_mode: String, allow_dynamic_installs: bool, network_mode: String, egress_proxy: Option<String>) -> Result<Self> {
+    pub fn new<P: AsRef<Path>>(
+        dir: P,
+        runtime_mode: String,
+        allow_dynamic_installs: bool,
+        network_mode: String,
+        egress_proxy: Option<String>,
+    ) -> Result<Self> {
         let sandbox_dir = dir.as_ref().to_path_buf();
         if !sandbox_dir.exists() {
             fs::create_dir_all(&sandbox_dir)?;
         }
-        Ok(ProcessSandbox { sandbox_dir, runtime_mode, allow_dynamic_installs, network_mode, egress_proxy })
+        Ok(ProcessSandbox {
+            sandbox_dir,
+            runtime_mode,
+            allow_dynamic_installs,
+            network_mode,
+            egress_proxy,
+        })
     }
 
     pub fn snapshot(&self) -> Result<()> {
-        let snapshot_dir = self.sandbox_dir.parent().unwrap().join(format!("{}_snapshot", self.sandbox_dir.file_name().unwrap().to_string_lossy()));
+        let snapshot_dir = self.sandbox_dir.parent().unwrap().join(format!(
+            "{}_snapshot",
+            self.sandbox_dir.file_name().unwrap().to_string_lossy()
+        ));
         if snapshot_dir.exists() {
             fs::remove_dir_all(&snapshot_dir)?;
         }
@@ -35,7 +50,10 @@ impl ProcessSandbox {
     }
 
     pub fn rollback(&self) -> Result<()> {
-        let snapshot_dir = self.sandbox_dir.parent().unwrap().join(format!("{}_snapshot", self.sandbox_dir.file_name().unwrap().to_string_lossy()));
+        let snapshot_dir = self.sandbox_dir.parent().unwrap().join(format!(
+            "{}_snapshot",
+            self.sandbox_dir.file_name().unwrap().to_string_lossy()
+        ));
         if !snapshot_dir.exists() {
             return Err(anyhow!("No snapshot available for rollback."));
         }
@@ -46,21 +64,25 @@ impl ProcessSandbox {
         options.copy_inside = true;
         let original_name_dir = snapshot_dir.join(self.sandbox_dir.file_name().unwrap());
         if original_name_dir.exists() {
-            fs_extra::dir::copy(&original_name_dir, self.sandbox_dir.parent().unwrap(), &options)?;
+            fs_extra::dir::copy(
+                &original_name_dir,
+                self.sandbox_dir.parent().unwrap(),
+                &options,
+            )?;
         } else {
-             // Fallback if structure differs slightly based on fs_extra version
-             fs::create_dir_all(&self.sandbox_dir)?;
-             fs_extra::dir::copy(&snapshot_dir, self.sandbox_dir.parent().unwrap(), &options)?;
+            // Fallback if structure differs slightly based on fs_extra version
+            fs::create_dir_all(&self.sandbox_dir)?;
+            fs_extra::dir::copy(&snapshot_dir, self.sandbox_dir.parent().unwrap(), &options)?;
         }
         Ok(())
     }
 
     pub async fn run_command(&self, cmd: &str, args: &[&str], timeout_sec: u64) -> Result<String> {
         if !self.allow_dynamic_installs {
-            let is_install = (cmd == "npm" && args.contains(&"install")) ||
-                             (cmd == "pip" && args.contains(&"install")) ||
-                             (cmd == "cargo" && args.contains(&"install")) ||
-                             cmd == "apt-get";
+            let is_install = (cmd == "npm" && args.contains(&"install"))
+                || (cmd == "pip" && args.contains(&"install"))
+                || (cmd == "cargo" && args.contains(&"install"))
+                || cmd == "apt-get";
             if is_install {
                 return Err(anyhow!("Security policy violation: dynamic package installations are disabled via config."));
             }
@@ -76,19 +98,21 @@ impl ProcessSandbox {
                 "run".to_string(),
                 "-i".to_string(),
                 "--rm".to_string(),
-                "-v".to_string(), format!("{}:/workspace", absolute_sandbox.display()),
-                "-w".to_string(), "/workspace".to_string(),
+                "-v".to_string(),
+                format!("{}:/workspace", absolute_sandbox.display()),
+                "-w".to_string(),
+                "/workspace".to_string(),
                 "--cap-drop=ALL".to_string(),
                 format!("--network={}", self.network_mode),
             ];
-            
+
             if let Some(proxy) = &self.egress_proxy {
                 docker_args.push("-e".to_string());
                 docker_args.push(format!("http_proxy={}", proxy));
                 docker_args.push("-e".to_string());
                 docker_args.push(format!("https_proxy={}", proxy));
             }
-            
+
             docker_args.push("ubuntu:latest".to_string()); // Default image for sandbox commands
             docker_args.push(actual_cmd);
             docker_args.append(&mut actual_args);
@@ -119,9 +143,10 @@ impl ProcessSandbox {
                 }
             }
             Ok(Err(e)) => Err(anyhow!("Failed to wait for process: {}", e)),
-            Err(_) => {
-                Err(anyhow!("Process execution timed out after {} seconds", timeout_sec))
-            }
+            Err(_) => Err(anyhow!(
+                "Process execution timed out after {} seconds",
+                timeout_sec
+            )),
         }
     }
 }
@@ -144,14 +169,14 @@ impl WasmSandbox {
     pub fn run_wasm_module(&self, wasm_path: &Path) -> Result<String> {
         let wasm_bytes = fs::read(wasm_path)?;
         let module = Module::new(&self.engine, &wasm_bytes)?;
-        
+
         let mut store = Store::new(&self.engine, ());
         store.set_fuel(10_000_000)?; // 10 million instructions budget
         let linker = Linker::new(&self.engine);
-        
+
         // Instantiate the module (empty imports for core calculation modules)
         let instance = linker.instantiate(&mut store, &module)?;
-        
+
         // Try calling default run or start functions if exported
         if let Ok(func) = instance.get_typed_func::<(), ()>(&mut store, "run") {
             func.call(&mut store, ())?;
@@ -161,7 +186,9 @@ impl WasmSandbox {
             func.call(&mut store, ())?;
             Ok("Wasm module execution completed successfully via _start().".to_string())
         } else {
-            Err(anyhow!("Wasm module has no exported run() or _start() entry point"))
+            Err(anyhow!(
+                "Wasm module has no exported run() or _start() entry point"
+            ))
         }
     }
 }
@@ -174,16 +201,19 @@ mod tests {
     #[tokio::test]
     async fn test_package_manager_blocking() {
         let dir = env::temp_dir().join("kerna_test_sandbox");
-        let sandbox = ProcessSandbox::new(&dir, "native".to_string(), false, "none".to_string(), None).unwrap();
-        
-        let res = sandbox.run_command("npm", &["install", "evil-package"], 5).await;
+        let sandbox =
+            ProcessSandbox::new(&dir, "native".to_string(), false, "none".to_string(), None)
+                .unwrap();
+
+        let res = sandbox
+            .run_command("npm", &["install", "evil-package"], 5)
+            .await;
         assert!(res.is_err());
         let err_str = res.unwrap_err().to_string();
         assert!(err_str.contains("dynamic package installations are disabled"));
-        
+
         let res2 = sandbox.run_command("whoami", &[], 5).await;
         // whoami should be allowed
         assert!(res2.is_ok(), "whoami failed: {:?}", res2.err());
     }
 }
-

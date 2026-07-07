@@ -1,8 +1,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
-use sha2::{Sha256, Digest};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
@@ -15,10 +15,10 @@ pub struct PluginMetadata {
     pub version: String,
     pub kind: String, // "tool.mcp", "tool.native", etc.
     pub entrypoint: String,
-    
+
     #[serde(default = "default_source")]
     pub source: String,
-    
+
     #[serde(default = "default_trust")]
     pub trust: String, // "untrusted", "verified", "core"
 
@@ -47,15 +47,21 @@ pub struct PluginMetadata {
     pub signature: Option<String>,
 }
 
-fn default_source() -> String { "local".to_string() }
-fn default_trust() -> String { "untrusted".to_string() }
-fn default_max_output_bytes() -> u64 { 50000 }
+fn default_source() -> String {
+    "local".to_string()
+}
+fn default_trust() -> String {
+    "untrusted".to_string()
+}
+fn default_max_output_bytes() -> u64 {
+    50000
+}
 
 impl PluginManifest {
     pub fn load(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)?;
         let mut manifest: PluginManifest = toml::from_str(&content)?;
-        
+
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
         manifest.plugin.manifest_sha256 = Some(format!("{:x}", hasher.finalize()));
@@ -65,17 +71,17 @@ impl PluginManifest {
 
     pub fn print_risk_card(&self) {
         let p = &self.plugin;
-        
+
         println!("\n╔══════════════════════════════════════════════════════════════╗");
         println!("║  PLUGIN RISK CARD: {:<40}  ║", p.name);
         println!("╠══════════════════════════════════════════════════════════════╣");
-        
+
         let trust_icon = match p.trust.as_str() {
             "core" | "verified" => "✔️",
             _ => "⚠️",
         };
         println!("║  Trust: {} {:<47} ║", trust_icon, p.trust);
-        
+
         println!("║                                                              ║");
         println!("║  Capabilities:                                               ║");
         for cap in &p.capabilities {
@@ -109,9 +115,11 @@ impl PluginManifest {
                 println!("║    ✋ {:<52} ║", req);
             }
         }
-        
+
         println!("║                                                              ║");
-        let risk_level = if p.trust == "untrusted" && (!p.secrets.is_empty() || !p.network_allowlist.is_empty()) {
+        let risk_level = if p.trust == "untrusted"
+            && (!p.secrets.is_empty() || !p.network_allowlist.is_empty())
+        {
             "High"
         } else if p.trust == "untrusted" {
             "Medium"

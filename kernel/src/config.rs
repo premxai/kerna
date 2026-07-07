@@ -8,25 +8,25 @@ use std::path::Path;
 pub struct McpServerConfig {
     pub name: String,
     pub command: String,
-    
+
     #[serde(default)]
     pub args: Vec<String>,
-    
+
     #[serde(default = "default_true")]
     pub enabled: bool,
-    
+
     #[serde(default)]
     pub capabilities: Vec<String>,
-    
+
     #[serde(default)]
     pub allowed_paths: Vec<String>,
-    
+
     #[serde(default)]
     pub approval_required: Vec<String>,
-    
+
     #[serde(default = "default_runtime_mode")]
     pub runtime_mode: String,
-    
+
     #[serde(default = "default_docker_image")]
     pub docker_image: String,
 }
@@ -68,13 +68,13 @@ pub struct Config {
     pub max_retries: u32,
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: u32,
-    
+
     #[serde(default = "default_runtime_mode")]
     pub runtime_mode: String,
-    
+
     #[serde(default = "default_false")]
     pub allow_dynamic_installs: bool,
-    
+
     // Budget Envelope (Phase 1)
     #[serde(default = "default_max_runtime_seconds")]
     pub max_runtime_seconds: u64,
@@ -88,26 +88,26 @@ pub struct Config {
     pub max_output_bytes: u64,
     #[serde(default = "default_max_memory_writes")]
     pub max_memory_writes: u64,
-    
+
     #[serde(default = "default_network_mode")]
     pub network_mode: String,
-    
+
     #[serde(default)]
     pub egress_proxy: Option<String>,
-    
+
     #[serde(default = "default_false")]
     pub enable_supervisor: bool,
-    
+
     // v1.1 Hermes Parity Features
     #[serde(default)]
     pub converse: bool,
-    
+
     #[serde(default)]
     pub llm_fallback_provider: Option<String>,
-    
+
     #[serde(default)]
     pub llm_fallback_api_key: Option<String>,
-    
+
     #[serde(default)]
     pub credential_pool: Vec<String>,
 }
@@ -140,12 +140,24 @@ fn default_network_mode() -> String {
     "none".to_string()
 }
 
-fn default_max_runtime_seconds() -> u64 { 300 }
-fn default_max_tool_calls() -> u64 { 25 }
-fn default_max_llm_calls() -> u64 { 10 }
-fn default_max_cost_usd() -> f64 { 0.25 }
-fn default_max_output_bytes() -> u64 { 50000 }
-fn default_max_memory_writes() -> u64 { 20 }
+fn default_max_runtime_seconds() -> u64 {
+    300
+}
+fn default_max_tool_calls() -> u64 {
+    25
+}
+fn default_max_llm_calls() -> u64 {
+    10
+}
+fn default_max_cost_usd() -> f64 {
+    0.25
+}
+fn default_max_output_bytes() -> u64 {
+    50000
+}
+fn default_max_memory_writes() -> u64 {
+    20
+}
 
 impl Config {
     pub fn load() -> Self {
@@ -153,15 +165,13 @@ impl Config {
         let toml_path = "kerna.toml";
         if Path::new(toml_path).exists() {
             match fs::read_to_string(toml_path) {
-                Ok(content) => {
-                    match toml::from_str::<Config>(&content) {
-                        Ok(config) => return config,
-                        Err(e) => {
-                            eprintln!("[-] Fatal: Failed to parse kerna.toml: {}", e);
-                            std::process::exit(1);
-                        }
+                Ok(content) => match toml::from_str::<Config>(&content) {
+                    Ok(config) => return config,
+                    Err(e) => {
+                        eprintln!("[-] Fatal: Failed to parse kerna.toml: {}", e);
+                        std::process::exit(1);
                     }
-                }
+                },
                 Err(e) => {
                     eprintln!("[-] Fatal: Failed to read kerna.toml: {}", e);
                     std::process::exit(1);
@@ -170,8 +180,7 @@ impl Config {
         }
 
         // 2. Fall back to environment variables with sensible defaults
-        let llm_provider =
-            env::var("KERNA_LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string());
+        let llm_provider = env::var("KERNA_LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string());
 
         let llm_api_key = env::var("KERNA_LLM_API_KEY")
             .or_else(|_| env::var("OPENAI_API_KEY"))
@@ -185,8 +194,7 @@ impl Config {
             });
 
         let db_path = env::var("KERNA_DB_PATH").unwrap_or_else(|_| "kerna.db".to_string());
-        let sandbox_dir =
-            env::var("KERNA_SANDBOX_DIR").unwrap_or_else(|_| "sandbox".to_string());
+        let sandbox_dir = env::var("KERNA_SANDBOX_DIR").unwrap_or_else(|_| "sandbox".to_string());
 
         Config {
             llm_provider,
@@ -250,7 +258,7 @@ mod tests {
         allowed_paths = ["/tmp"]
         approval_required = ["write"]
         "#;
-        
+
         let result: Result<McpServerConfig, _> = toml::from_str(toml_str);
         assert!(result.is_ok());
         let conf = result.unwrap();

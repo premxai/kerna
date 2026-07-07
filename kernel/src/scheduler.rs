@@ -1,10 +1,10 @@
+use crate::budget::{BudgetConfig, BudgetTracker};
 use crate::config::Config;
+use crate::events::{Event, EventSink};
 use crate::mcp_registry::McpRegistry;
 use crate::memory::MemoryEngine;
 use crate::permissions::{PermissionLevel, PermissionManager};
 use crate::sandbox::ProcessSandbox;
-use crate::budget::{BudgetTracker, BudgetConfig};
-use crate::events::{Event, EventSink};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -54,8 +54,8 @@ impl TaskScheduler {
         session_id: Option<String>,
     ) -> Result<Self> {
         let sandbox = ProcessSandbox::new(
-            &config.sandbox_dir, 
-            config.runtime_mode.clone(), 
+            &config.sandbox_dir,
+            config.runtime_mode.clone(),
             config.allow_dynamic_installs,
             config.network_mode.clone(),
             config.egress_proxy.clone(),
@@ -74,14 +74,19 @@ impl TaskScheduler {
     /// Run a goal using an agentic tool-call loop.
     /// The LLM decides which tools to call, we execute them, feed results back,
     /// and repeat until the LLM returns a final text response.
-    pub fn run_goal<'a>(&'a self, goal: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
+    pub fn run_goal<'a>(
+        &'a self,
+        goal: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
         Box::pin(async move {
             let task_id = Uuid::new_v4();
-            self.memory.create_task(task_id, self.session_id.as_deref(), goal)?;
+            self.memory
+                .create_task(task_id, self.session_id.as_deref(), goal)?;
             self.memory
                 .log_message(task_id, "INFO", &format!("Received goal: {}", goal))?;
 
-            let mut tool_failures: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+            let mut tool_failures: std::collections::HashMap<String, u32> =
+                std::collections::HashMap::new();
             let mut total_tool_failures = 0;
             let mut event_seq: i64 = 0;
 
@@ -120,15 +125,15 @@ impl TaskScheduler {
                 },
             ];
 
-        // Get tool definitions from MCP registry
-        let tool_defs = {
-            let registry = self.mcp_registry.lock().await;
-            registry.get_tool_definitions()
-        };
+            // Get tool definitions from MCP registry
+            let tool_defs = {
+                let registry = self.mcp_registry.lock().await;
+                registry.get_tool_definitions()
+            };
 
-        // Add built-in sandbox tools
-        let mut all_tools = tool_defs;
-        all_tools.push(json!({
+            // Add built-in sandbox tools
+            let mut all_tools = tool_defs;
+            all_tools.push(json!({
             "type": "function",
             "function": {
                 "name": "run_command",
@@ -143,8 +148,8 @@ impl TaskScheduler {
                 }
             }
         }));
-        
-        all_tools.push(json!({
+
+            all_tools.push(json!({
             "type": "function",
             "function": {
                 "name": "delegate_task",
@@ -158,8 +163,8 @@ impl TaskScheduler {
                 }
             }
         }));
-        
-        all_tools.push(json!({
+
+            all_tools.push(json!({
             "type": "function",
             "function": {
                 "name": "execute_code",
@@ -174,7 +179,7 @@ impl TaskScheduler {
             }
         }));
 
-        all_tools.push(json!({
+            all_tools.push(json!({
             "type": "function",
             "function": {
                 "name": "execute_wasm",
@@ -189,205 +194,156 @@ impl TaskScheduler {
             }
         }));
 
-        self.memory
-            .update_task_status(task_id, "running")?;
+            self.memory.update_task_status(task_id, "running")?;
 
-        let mut round = 0;
-        let max_rounds = self.config.max_tool_rounds;
-        let max_retries = self.config.max_retries;
+            let mut round = 0;
+            let max_rounds = self.config.max_tool_rounds;
+            let max_retries = self.config.max_retries;
 
-        let budget_config = BudgetConfig {
-            max_runtime_seconds: self.config.max_runtime_seconds,
-            max_tool_calls: self.config.max_tool_calls,
-            max_llm_calls: self.config.max_llm_calls,
-            max_cost_usd: self.config.max_cost_usd,
-            max_output_bytes: self.config.max_output_bytes,
-            max_memory_writes: self.config.max_memory_writes,
-        };
-        let mut budget = BudgetTracker::new(budget_config);
-
-        // === AGENTIC LOOP ===
-        let loop_result: Result<()> = tokio::select! {
-            res = async {
-                loop {
-            round += 1;
-            if round > max_rounds {
-                println!("[!] Max tool rounds ({}) reached. Finishing.", max_rounds);
-                self.memory
-                    .log_message(task_id, "WARN", "Max tool rounds reached")?;
-                let _ = self.memory.update_task_status(task_id, "failed");
-                return Err(anyhow::anyhow!("Task failed: Max tool rounds reached"));
-            }
-
-            println!("[*] Round {}/{} — Calling LLM...", round, max_rounds);
-
-            // Call the LLM with retry logic for bad responses
-            let mut attempt = 0;
-            let response = loop {
-                attempt += 1;
-                match self.call_llm(&messages, &all_tools).await {
-                    Ok(r) => break Ok(r),
-                    Err(e) => {
-                        let err_msg = format!("LLM call failed (Attempt {}/{}): {}", attempt, max_retries, e);
-                        let _ = self.memory.log_message(task_id, "WARN", &err_msg);
-                        println!("[!] {}", err_msg);
-                        
-                        if attempt >= max_retries {
-                            break Err(e);
-                        }
-                        
-                        // Exponential backoff
-                        let backoff_secs = 2u64.pow(attempt);
-                        println!("[*] Retrying in {} seconds...", backoff_secs);
-                        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-                    }
-                }
+            let budget_config = BudgetConfig {
+                max_runtime_seconds: self.config.max_runtime_seconds,
+                max_tool_calls: self.config.max_tool_calls,
+                max_llm_calls: self.config.max_llm_calls,
+                max_cost_usd: self.config.max_cost_usd,
+                max_output_bytes: self.config.max_output_bytes,
+                max_memory_writes: self.config.max_memory_writes,
             };
+            let mut budget = BudgetTracker::new(budget_config);
 
-            let (response, tokens_used) = match response {
-                Ok(r) => r,
-                Err(e) => {
-                    println!("[!] LLM failed after {} attempts. Aborting task.", max_retries);
+            // === AGENTIC LOOP ===
+            let loop_result: Result<()> = tokio::select! {
+                res = async {
+                    loop {
+                round += 1;
+                if round > max_rounds {
+                    println!("[!] Max tool rounds ({}) reached. Finishing.", max_rounds);
+                    self.memory
+                        .log_message(task_id, "WARN", "Max tool rounds reached")?;
+                    let _ = self.memory.update_task_status(task_id, "failed");
+                    return Err(anyhow::anyhow!("Task failed: Max tool rounds reached"));
+                }
+
+                println!("[*] Round {}/{} — Calling LLM...", round, max_rounds);
+
+                // Call the LLM with retry logic for bad responses
+                let mut attempt = 0;
+                let response = loop {
+                    attempt += 1;
+                    match self.call_llm(&messages, &all_tools).await {
+                        Ok(r) => break Ok(r),
+                        Err(e) => {
+                            let err_msg = format!("LLM call failed (Attempt {}/{}): {}", attempt, max_retries, e);
+                            let _ = self.memory.log_message(task_id, "WARN", &err_msg);
+                            println!("[!] {}", err_msg);
+
+                            if attempt >= max_retries {
+                                break Err(e);
+                            }
+
+                            // Exponential backoff
+                            let backoff_secs = 2u64.pow(attempt);
+                            println!("[*] Retrying in {} seconds...", backoff_secs);
+                            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                        }
+                    }
+                };
+
+                let (response, tokens_used) = match response {
+                    Ok(r) => r,
+                    Err(e) => {
+                        println!("[!] LLM failed after {} attempts. Aborting task.", max_retries);
+                        return Err(e);
+                    }
+                };
+
+                // Update budget
+                let cost_increment = (tokens_used as f64) * 0.00001; // basic mock pricing
+                if let Err(e) = budget.record_llm_call(cost_increment) {
+                    let _ = self.memory.log_message(task_id, "ERROR", &e.to_string());
+                    let _ = self.memory.update_task_status(task_id, "failed");
                     return Err(e);
                 }
-            };
-            
-            // Update budget
-            let cost_increment = (tokens_used as f64) * 0.00001; // basic mock pricing
-            if let Err(e) = budget.record_llm_call(cost_increment) {
-                let _ = self.memory.log_message(task_id, "ERROR", &e.to_string());
-                let _ = self.memory.update_task_status(task_id, "failed");
-                return Err(e);
-            }
 
-            // Check if the LLM returned tool calls
-            if let Some(tool_calls) = &response.tool_calls {
-                messages.push(response.clone());
+                // Check if the LLM returned tool calls
+                if let Some(tool_calls) = &response.tool_calls {
+                    messages.push(response.clone());
 
-                for tc in tool_calls {
-                    let tool_name = &tc.function.name;
-                    let tool_args_str = &tc.function.arguments;
+                    for tc in tool_calls {
+                        let tool_name = &tc.function.name;
+                        let tool_args_str = &tc.function.arguments;
 
-                    let display_name = match tool_name.as_str() {
-                        "run_command" => "Terminal",
-                        "fs_list_dir" => "Filesystem",
-                        "desktop_click" | "desktop_type" => "Desktop",
-                        "voice_speak" | "voice_listen" => "Voice",
-                        "web_search" | "web_navigate" => "Browser",
-                        _ => "Planning",
-                    };
-
-                    let server_name = {
-                        let registry = self.mcp_registry.lock().await;
-                        registry.get_server_for_tool(tool_name)
-                    };
-
-                    if self.config.enable_supervisor {
-                        let supervisor_prompt = format!(
-                            "You are a Supervisor Agent. Does this tool call look safe and logical for a background agent? Tool: {}, Args: {}. Reply exactly with 'APPROVE' or 'REJECT'.",
-                            tool_name, tool_args_str
-                        );
-                        let sup_msg = ChatMessage {
-                            role: "user".to_string(),
-                            content: Some(supervisor_prompt),
-                            tool_calls: None,
-                            tool_call_id: None,
+                        let display_name = match tool_name.as_str() {
+                            "run_command" => "Terminal",
+                            "fs_list_dir" => "Filesystem",
+                            "desktop_click" | "desktop_type" => "Desktop",
+                            "voice_speak" | "voice_listen" => "Voice",
+                            "web_search" | "web_navigate" => "Browser",
+                            _ => "Planning",
                         };
-                        println!("[Supervisor] Checking {}...", tool_name);
-                        match self.call_llm(&[sup_msg], &[]).await {
-                            Ok((res, _)) => {
-                                let decision = res.content.unwrap_or_default().trim().to_uppercase();
-                                if decision.contains("REJECT") {
-                                    println!("❌ {} (Rejected by Supervisor)", display_name);
-                                    messages.push(ChatMessage {
-                                        role: "tool".to_string(),
-                                        content: Some("Supervisor rejected this action because it appears unsafe or illogical.".to_string()),
-                                        tool_calls: None,
-                                        tool_call_id: Some(tc.id.clone()),
-                                    });
-                                    continue;
+
+                        let server_name = {
+                            let registry = self.mcp_registry.lock().await;
+                            registry.get_server_for_tool(tool_name)
+                        };
+
+                        if self.config.enable_supervisor {
+                            let supervisor_prompt = format!(
+                                "You are a Supervisor Agent. Does this tool call look safe and logical for a background agent? Tool: {}, Args: {}. Reply exactly with 'APPROVE' or 'REJECT'.",
+                                tool_name, tool_args_str
+                            );
+                            let sup_msg = ChatMessage {
+                                role: "user".to_string(),
+                                content: Some(supervisor_prompt),
+                                tool_calls: None,
+                                tool_call_id: None,
+                            };
+                            println!("[Supervisor] Checking {}...", tool_name);
+                            match self.call_llm(&[sup_msg], &[]).await {
+                                Ok((res, _)) => {
+                                    let decision = res.content.unwrap_or_default().trim().to_uppercase();
+                                    if decision.contains("REJECT") {
+                                        println!("❌ {} (Rejected by Supervisor)", display_name);
+                                        messages.push(ChatMessage {
+                                            role: "tool".to_string(),
+                                            content: Some("Supervisor rejected this action because it appears unsafe or illogical.".to_string()),
+                                            tool_calls: None,
+                                            tool_call_id: Some(tc.id.clone()),
+                                        });
+                                        continue;
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("[!] Supervisor check failed: {}", e);
                                 }
                             }
-                            Err(e) => {
-                                println!("[!] Supervisor check failed: {}", e);
-                            }
                         }
-                    }
 
-                    // 1. Emit tool.call.requested
-                    event_seq += 1;
-                    let parent_evt_id = uuid::Uuid::new_v4().to_string();
-                    let _ = self.memory.record(Event {
-                        event_id: parent_evt_id.clone(),
-                        task_id: task_id.to_string(),
-                        session_id: self.session_id.clone(),
-                        sequence: event_seq,
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                        event_type: "tool.call.requested".to_string(),
-                        actor: "llm".to_string(),
-                        severity: "info".to_string(),
-                        model: Some(self.config.llm_model.clone()),
-                        tool: Some(tool_name.clone()),
-                        policy_decision: None,
-                        risk_score: None,
-                        parent_event_id: None,
-                        correlation_id: Some(tc.id.clone()),
-                        redaction_status: None,
-                        budget_snapshot_json: Some(budget.get_snapshot_json()),
-                        payload_json: json!({ "args": tool_args_str }),
-                    });
-
-                    let perm_level = self.permissions.check(tool_name, server_name.as_deref());
-                    
-                    // 2. Emit tool.policy.checked
-                    event_seq += 1;
-                    let _ = self.memory.record(Event {
-                        event_id: uuid::Uuid::new_v4().to_string(),
-                        task_id: task_id.to_string(),
-                        session_id: self.session_id.clone(),
-                        sequence: event_seq,
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                        event_type: "tool.policy.checked".to_string(),
-                        actor: "kerna".to_string(),
-                        severity: if perm_level == PermissionLevel::Deny { "warning".to_string() } else { "info".to_string() },
-                        model: None,
-                        tool: Some(tool_name.clone()),
-                        policy_decision: Some(format!("{:?}", perm_level)),
-                        risk_score: None,
-                        parent_event_id: Some(parent_evt_id.clone()),
-                        correlation_id: Some(tc.id.clone()),
-                        redaction_status: None,
-                        budget_snapshot_json: Some(budget.get_snapshot_json()),
-                        payload_json: json!({ "args": tool_args_str }),
-                    });
-                    
-                    if perm_level == PermissionLevel::Deny {
-                        println!("❌ {} (Denied by policy)", display_name);
-                        messages.push(ChatMessage {
-                            role: "tool".to_string(),
-                            content: Some("Permission denied.".to_string()),
-                            tool_calls: None,
-                            tool_call_id: Some(tc.id.clone()),
+                        // 1. Emit tool.call.requested
+                        event_seq += 1;
+                        let parent_evt_id = uuid::Uuid::new_v4().to_string();
+                        let _ = self.memory.record(Event {
+                            event_id: parent_evt_id.clone(),
+                            task_id: task_id.to_string(),
+                            session_id: self.session_id.clone(),
+                            sequence: event_seq,
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            event_type: "tool.call.requested".to_string(),
+                            actor: "llm".to_string(),
+                            severity: "info".to_string(),
+                            model: Some(self.config.llm_model.clone()),
+                            tool: Some(tool_name.clone()),
+                            policy_decision: None,
+                            risk_score: None,
+                            parent_event_id: None,
+                            correlation_id: Some(tc.id.clone()),
+                            redaction_status: None,
+                            budget_snapshot_json: Some(budget.get_snapshot_json()),
+                            payload_json: json!({ "args": tool_args_str }),
                         });
-                        continue;
-                    }
 
-                    if self.config.converse || perm_level == PermissionLevel::RequireConfirmation {
-                        println!("⚠️ ACTION REQUIRES APPROVAL: {} {}", tool_name, tool_args_str);
-                        let approved = PermissionManager::prompt_approval(tool_name, tool_args_str)?;
-                        if !approved {
-                            println!("❌ {} (Rejected)", display_name);
-                            messages.push(ChatMessage {
-                                role: "tool".to_string(),
-                                content: Some("User rejected this action.".to_string()),
-                                tool_calls: None,
-                                tool_call_id: Some(tc.id.clone()),
-                            });
-                            continue;
-                        }
-                    }
+                        let perm_level = self.permissions.check(tool_name, server_name.as_deref());
 
-                    if let Err(e) = budget.record_tool_call() {
+                        // 2. Emit tool.policy.checked
                         event_seq += 1;
                         let _ = self.memory.record(Event {
                             event_id: uuid::Uuid::new_v4().to_string(),
@@ -395,23 +351,94 @@ impl TaskScheduler {
                             session_id: self.session_id.clone(),
                             sequence: event_seq,
                             timestamp: chrono::Utc::now().to_rfc3339(),
-                            event_type: "budget.exceeded".to_string(),
+                            event_type: "tool.policy.checked".to_string(),
                             actor: "kerna".to_string(),
-                            severity: "error".to_string(),
+                            severity: if perm_level == PermissionLevel::Deny { "warning".to_string() } else { "info".to_string() },
                             model: None,
                             tool: Some(tool_name.clone()),
-                            policy_decision: None,
+                            policy_decision: Some(format!("{:?}", perm_level)),
                             risk_score: None,
                             parent_event_id: Some(parent_evt_id.clone()),
                             correlation_id: Some(tc.id.clone()),
                             redaction_status: None,
                             budget_snapshot_json: Some(budget.get_snapshot_json()),
-                            payload_json: json!({ "error": e.to_string() }),
+                            payload_json: json!({ "args": tool_args_str }),
                         });
-                        let _ = self.memory.log_message(task_id, "ERROR", &e.to_string());
-                        let _ = self.memory.update_task_status(task_id, "failed");
-                        return Err(e);
-                    } else {
+
+                        if perm_level == PermissionLevel::Deny {
+                            println!("❌ {} (Denied by policy)", display_name);
+                            messages.push(ChatMessage {
+                                role: "tool".to_string(),
+                                content: Some("Permission denied.".to_string()),
+                                tool_calls: None,
+                                tool_call_id: Some(tc.id.clone()),
+                            });
+                            continue;
+                        }
+
+                        if self.config.converse || perm_level == PermissionLevel::RequireConfirmation {
+                            println!("⚠️ ACTION REQUIRES APPROVAL: {} {}", tool_name, tool_args_str);
+                            let approved = PermissionManager::prompt_approval(tool_name, tool_args_str)?;
+                            if !approved {
+                                println!("❌ {} (Rejected)", display_name);
+                                messages.push(ChatMessage {
+                                    role: "tool".to_string(),
+                                    content: Some("User rejected this action.".to_string()),
+                                    tool_calls: None,
+                                    tool_call_id: Some(tc.id.clone()),
+                                });
+                                continue;
+                            }
+                        }
+
+                        if let Err(e) = budget.record_tool_call() {
+                            event_seq += 1;
+                            let _ = self.memory.record(Event {
+                                event_id: uuid::Uuid::new_v4().to_string(),
+                                task_id: task_id.to_string(),
+                                session_id: self.session_id.clone(),
+                                sequence: event_seq,
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                event_type: "budget.exceeded".to_string(),
+                                actor: "kerna".to_string(),
+                                severity: "error".to_string(),
+                                model: None,
+                                tool: Some(tool_name.clone()),
+                                policy_decision: None,
+                                risk_score: None,
+                                parent_event_id: Some(parent_evt_id.clone()),
+                                correlation_id: Some(tc.id.clone()),
+                                redaction_status: None,
+                                budget_snapshot_json: Some(budget.get_snapshot_json()),
+                                payload_json: json!({ "error": e.to_string() }),
+                            });
+                            let _ = self.memory.log_message(task_id, "ERROR", &e.to_string());
+                            let _ = self.memory.update_task_status(task_id, "failed");
+                            return Err(e);
+                        } else {
+                            event_seq += 1;
+                            let _ = self.memory.record(Event {
+                                event_id: uuid::Uuid::new_v4().to_string(),
+                                task_id: task_id.to_string(),
+                                session_id: self.session_id.clone(),
+                                sequence: event_seq,
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                event_type: "budget.checked".to_string(),
+                                actor: "kerna".to_string(),
+                                severity: "info".to_string(),
+                                model: None,
+                                tool: Some(tool_name.clone()),
+                                policy_decision: None,
+                                risk_score: None,
+                                parent_event_id: Some(parent_evt_id.clone()),
+                                correlation_id: Some(tc.id.clone()),
+                                redaction_status: None,
+                                budget_snapshot_json: Some(budget.get_snapshot_json()),
+                                payload_json: json!({}),
+                            });
+                        }
+
+                        // Execute tool
                         event_seq += 1;
                         let _ = self.memory.record(Event {
                             event_id: uuid::Uuid::new_v4().to_string(),
@@ -419,7 +446,7 @@ impl TaskScheduler {
                             session_id: self.session_id.clone(),
                             sequence: event_seq,
                             timestamp: chrono::Utc::now().to_rfc3339(),
-                            event_type: "budget.checked".to_string(),
+                            event_type: "tool.call.started".to_string(),
                             actor: "kerna".to_string(),
                             severity: "info".to_string(),
                             model: None,
@@ -432,41 +459,65 @@ impl TaskScheduler {
                             budget_snapshot_json: Some(budget.get_snapshot_json()),
                             payload_json: json!({}),
                         });
-                    }
 
-                    // Execute tool
-                    event_seq += 1;
-                    let _ = self.memory.record(Event {
-                        event_id: uuid::Uuid::new_v4().to_string(),
-                        task_id: task_id.to_string(),
-                        session_id: self.session_id.clone(),
-                        sequence: event_seq,
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                        event_type: "tool.call.started".to_string(),
-                        actor: "kerna".to_string(),
-                        severity: "info".to_string(),
-                        model: None,
-                        tool: Some(tool_name.clone()),
-                        policy_decision: None,
-                        risk_score: None,
-                        parent_event_id: Some(parent_evt_id.clone()),
-                        correlation_id: Some(tc.id.clone()),
-                        redaction_status: None,
-                        budget_snapshot_json: Some(budget.get_snapshot_json()),
-                        payload_json: json!({}),
-                    });
+                        let tool_args: serde_json::Value = serde_json::from_str(tool_args_str).unwrap_or(json!({}));
 
-                    let tool_args: serde_json::Value = serde_json::from_str(tool_args_str).unwrap_or(json!({}));
-                    
-                    let is_mutating = tool_name == "run_command" || tool_name == "execute_code" || tool_name == "execute_wasm";
-                    if is_mutating {
-                        let _ = self.sandbox.snapshot();
-                    }
+                        let is_mutating = tool_name == "run_command" || tool_name == "execute_code" || tool_name == "execute_wasm";
+                        if is_mutating {
+                            let _ = self.sandbox.snapshot();
+                        }
 
-                    let result = self.execute_tool(tool_name, &tool_args).await;
+                        let result = self.execute_tool(tool_name, &tool_args).await;
 
-                    if is_mutating && result.is_err() {
-                        let _ = self.sandbox.rollback();
+                        if is_mutating && result.is_err() {
+                            let _ = self.sandbox.rollback();
+                            event_seq += 1;
+                            let _ = self.memory.record(Event {
+                                event_id: uuid::Uuid::new_v4().to_string(),
+                                task_id: task_id.to_string(),
+                                session_id: self.session_id.clone(),
+                                sequence: event_seq,
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                event_type: "sandbox.rollback".to_string(),
+                                actor: "kerna".to_string(),
+                                severity: "warning".to_string(),
+                                model: None,
+                                tool: Some(tool_name.clone()),
+                                policy_decision: None,
+                                risk_score: None,
+                                parent_event_id: Some(parent_evt_id.clone()),
+                                correlation_id: Some(tc.id.clone()),
+                                redaction_status: None,
+                                budget_snapshot_json: Some(budget.get_snapshot_json()),
+                                payload_json: json!({"reason": "tool_execution_failed"}),
+                            });
+                        }
+
+                        let mut result_str = match &result {
+                            Ok(val) => {
+                                println!("✔️ {}", display_name);
+                                val.to_string()
+                            }
+                            Err(e) => {
+                                println!("❌ Retry ({})", display_name);
+                                let e_str = e.to_string();
+                                let count = tool_failures.entry(tool_name.to_string()).or_insert(0);
+                                *count += 1;
+                                total_tool_failures += 1;
+
+                                if (e_str.contains("timeout") || e_str.contains("Timeout"))
+                                    && *count >= 2 {
+                                        return Err(anyhow!("Task failed: Tool '{}' timed out {} times.", tool_name, count));
+                                    }
+
+                                if total_tool_failures >= 5 {
+                                    return Err(anyhow!("Task failed: Max total tool failures (5) reached."));
+                                }
+
+                                format!("Error: {}", e_str)
+                            }
+                        };
+
                         event_seq += 1;
                         let _ = self.memory.record(Event {
                             event_id: uuid::Uuid::new_v4().to_string(),
@@ -474,9 +525,9 @@ impl TaskScheduler {
                             session_id: self.session_id.clone(),
                             sequence: event_seq,
                             timestamp: chrono::Utc::now().to_rfc3339(),
-                            event_type: "sandbox.rollback".to_string(),
-                            actor: "kerna".to_string(),
-                            severity: "warning".to_string(),
+                            event_type: if result.is_ok() { "tool.call.completed".to_string() } else { "tool.call.failed".to_string() },
+                            actor: "tool".to_string(),
+                            severity: if result.is_ok() { "info".to_string() } else { "error".to_string() },
                             model: None,
                             tool: Some(tool_name.clone()),
                             policy_decision: None,
@@ -485,35 +536,49 @@ impl TaskScheduler {
                             correlation_id: Some(tc.id.clone()),
                             redaction_status: None,
                             budget_snapshot_json: Some(budget.get_snapshot_json()),
-                            payload_json: json!({"reason": "tool_execution_failed"}),
+                            payload_json: json!({ "result_len": result_str.len() }),
+                        });
+
+                        // HUGE OUTPUT SABOTAGE FIX: Truncate massively large tool outputs to prevent context window blowup
+                        let max_tool_output_len = self.config.max_output_bytes as usize;
+                        if result_str.len() > max_tool_output_len {
+                            let truncated: String = result_str.chars().take(max_tool_output_len).collect();
+                            result_str = format!("{}... [Output Truncated by Kerna ({} bytes exceeded)]", truncated, max_tool_output_len);
+                        }
+
+                        if let Err(e) = budget.record_output_bytes(result_str.len() as u64) {
+                            let _ = self.memory.log_message(task_id, "ERROR", &e.to_string());
+                            let _ = self.memory.update_task_status(task_id, "failed");
+                            return Err(e);
+                        }
+
+                        // SECURITY: Prompt Injection Middleware
+                        if crate::security::PromptInjectionDetector::is_prompt_injection(&result_str) {
+                            println!("⚠️ SECURITY: Prompt Injection detected in tool output. Stripping output.");
+                            result_str = "[SYSTEM: The tool output was stripped because it matched known prompt injection heuristics.]".to_string();
+                        }
+
+                        self.memory.log_message(
+                            task_id,
+                            if result.is_ok() { "INFO" } else { "ERROR" },
+                            &format!("Tool [{}]: {}", tool_name, truncate_str(&result_str, 500)),
+                        )?;
+
+                        messages.push(ChatMessage {
+                            role: "tool".to_string(),
+                            content: Some(result_str),
+                            tool_calls: None,
+                            tool_call_id: Some(tc.id.clone()),
                         });
                     }
+                } else if let Some(content) = &response.content {
+                    // Goal done
+                    println!("✓ Finished\n");
 
-                    let mut result_str = match &result {
-                        Ok(val) => {
-                            println!("✔️ {}", display_name);
-                            val.to_string()
-                        }
-                        Err(e) => {
-                            println!("❌ Retry ({})", display_name);
-                            let e_str = e.to_string();
-                            let count = tool_failures.entry(tool_name.to_string()).or_insert(0);
-                            *count += 1;
-                            total_tool_failures += 1;
-                            
-                            if (e_str.contains("timeout") || e_str.contains("Timeout"))
-                                && *count >= 2 {
-                                    return Err(anyhow!("Task failed: Tool '{}' timed out {} times.", tool_name, count));
-                                }
-                            
-                            if total_tool_failures >= 5 {
-                                return Err(anyhow!("Task failed: Max total tool failures (5) reached."));
-                            }
-                            
-                            format!("Error: {}", e_str)
-                        }
-                    };
-                    
+                    // Store as episodic memory
+                    // Store as episodic memory
+                    let memory_content = format!("Goal: {}. Result: {}", goal, content);
+
                     event_seq += 1;
                     let _ = self.memory.record(Event {
                         event_id: uuid::Uuid::new_v4().to_string(),
@@ -521,116 +586,8 @@ impl TaskScheduler {
                         session_id: self.session_id.clone(),
                         sequence: event_seq,
                         timestamp: chrono::Utc::now().to_rfc3339(),
-                        event_type: if result.is_ok() { "tool.call.completed".to_string() } else { "tool.call.failed".to_string() },
-                        actor: "tool".to_string(),
-                        severity: if result.is_ok() { "info".to_string() } else { "error".to_string() },
-                        model: None,
-                        tool: Some(tool_name.clone()),
-                        policy_decision: None,
-                        risk_score: None,
-                        parent_event_id: Some(parent_evt_id.clone()),
-                        correlation_id: Some(tc.id.clone()),
-                        redaction_status: None,
-                        budget_snapshot_json: Some(budget.get_snapshot_json()),
-                        payload_json: json!({ "result_len": result_str.len() }),
-                    });
-
-                    // HUGE OUTPUT SABOTAGE FIX: Truncate massively large tool outputs to prevent context window blowup
-                    let max_tool_output_len = self.config.max_output_bytes as usize;
-                    if result_str.len() > max_tool_output_len {
-                        let truncated: String = result_str.chars().take(max_tool_output_len).collect();
-                        result_str = format!("{}... [Output Truncated by Kerna ({} bytes exceeded)]", truncated, max_tool_output_len);
-                    }
-                    
-                    if let Err(e) = budget.record_output_bytes(result_str.len() as u64) {
-                        let _ = self.memory.log_message(task_id, "ERROR", &e.to_string());
-                        let _ = self.memory.update_task_status(task_id, "failed");
-                        return Err(e);
-                    }
-
-                    // SECURITY: Prompt Injection Middleware
-                    if crate::security::PromptInjectionDetector::is_prompt_injection(&result_str) {
-                        println!("⚠️ SECURITY: Prompt Injection detected in tool output. Stripping output.");
-                        result_str = "[SYSTEM: The tool output was stripped because it matched known prompt injection heuristics.]".to_string();
-                    }
-
-                    self.memory.log_message(
-                        task_id,
-                        if result.is_ok() { "INFO" } else { "ERROR" },
-                        &format!("Tool [{}]: {}", tool_name, truncate_str(&result_str, 500)),
-                    )?;
-
-                    messages.push(ChatMessage {
-                        role: "tool".to_string(),
-                        content: Some(result_str),
-                        tool_calls: None,
-                        tool_call_id: Some(tc.id.clone()),
-                    });
-                }
-            } else if let Some(content) = &response.content {
-                // Goal done
-                println!("✓ Finished\n");
-                
-                // Store as episodic memory
-                // Store as episodic memory
-                let memory_content = format!("Goal: {}. Result: {}", goal, content);
-                
-                event_seq += 1;
-                let _ = self.memory.record(Event {
-                    event_id: uuid::Uuid::new_v4().to_string(),
-                    task_id: task_id.to_string(),
-                    session_id: self.session_id.clone(),
-                    sequence: event_seq,
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    event_type: "memory.write.proposed".to_string(),
-                    actor: "llm".to_string(),
-                    severity: "info".to_string(),
-                    model: None,
-                    tool: None,
-                    policy_decision: None,
-                    risk_score: None,
-                    parent_event_id: None,
-                    correlation_id: None,
-                    redaction_status: None,
-                    budget_snapshot_json: Some(budget.get_snapshot_json()),
-                    payload_json: json!({ "content_len": memory_content.len() }),
-                });
-
-                if let Err(e) = budget.record_memory_write() {
-                    event_seq += 1;
-                    let _ = self.memory.record(Event {
-                        event_id: uuid::Uuid::new_v4().to_string(),
-                        task_id: task_id.to_string(),
-                        session_id: self.session_id.clone(),
-                        sequence: event_seq,
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                        event_type: "memory.write.skipped".to_string(),
-                        actor: "kerna".to_string(),
-                        severity: "warning".to_string(),
-                        model: None,
-                        tool: None,
-                        policy_decision: None,
-                        risk_score: None,
-                        parent_event_id: None,
-                        correlation_id: None,
-                        redaction_status: None,
-                        budget_snapshot_json: Some(budget.get_snapshot_json()),
-                        payload_json: json!({ "error": e.to_string() }),
-                    });
-                    println!("⚠️ Memory write skipped (Budget exceeded)");
-                } else {
-                    // TODO: Replace dummy embedding with actual embedding model call
-                    self.memory.add_episodic_memory(&memory_content, &[0.1, 0.2, 0.3])?;
-                    
-                    event_seq += 1;
-                    let _ = self.memory.record(Event {
-                        event_id: uuid::Uuid::new_v4().to_string(),
-                        task_id: task_id.to_string(),
-                        session_id: self.session_id.clone(),
-                        sequence: event_seq,
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                        event_type: "memory.write.completed".to_string(),
-                        actor: "kerna".to_string(),
+                        event_type: "memory.write.proposed".to_string(),
+                        actor: "llm".to_string(),
                         severity: "info".to_string(),
                         model: None,
                         tool: None,
@@ -642,50 +599,106 @@ impl TaskScheduler {
                         budget_snapshot_json: Some(budget.get_snapshot_json()),
                         payload_json: json!({ "content_len": memory_content.len() }),
                     });
+
+                    if let Err(e) = budget.record_memory_write() {
+                        event_seq += 1;
+                        let _ = self.memory.record(Event {
+                            event_id: uuid::Uuid::new_v4().to_string(),
+                            task_id: task_id.to_string(),
+                            session_id: self.session_id.clone(),
+                            sequence: event_seq,
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            event_type: "memory.write.skipped".to_string(),
+                            actor: "kerna".to_string(),
+                            severity: "warning".to_string(),
+                            model: None,
+                            tool: None,
+                            policy_decision: None,
+                            risk_score: None,
+                            parent_event_id: None,
+                            correlation_id: None,
+                            redaction_status: None,
+                            budget_snapshot_json: Some(budget.get_snapshot_json()),
+                            payload_json: json!({ "error": e.to_string() }),
+                        });
+                        println!("⚠️ Memory write skipped (Budget exceeded)");
+                    } else {
+                        // TODO: Replace dummy embedding with actual embedding model call
+                        self.memory.add_episodic_memory(&memory_content, &[0.1, 0.2, 0.3])?;
+
+                        event_seq += 1;
+                        let _ = self.memory.record(Event {
+                            event_id: uuid::Uuid::new_v4().to_string(),
+                            task_id: task_id.to_string(),
+                            session_id: self.session_id.clone(),
+                            sequence: event_seq,
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            event_type: "memory.write.completed".to_string(),
+                            actor: "kerna".to_string(),
+                            severity: "info".to_string(),
+                            model: None,
+                            tool: None,
+                            policy_decision: None,
+                            risk_score: None,
+                            parent_event_id: None,
+                            correlation_id: None,
+                            redaction_status: None,
+                            budget_snapshot_json: Some(budget.get_snapshot_json()),
+                            payload_json: json!({ "content_len": memory_content.len() }),
+                        });
+                    }
+
+                    self.memory.log_message(task_id, "INFO", content)?;
+                    break;
+                } else {
+                    println!("✓ Finished (Empty response)\n");
+                    break;
                 }
-                
-                self.memory.log_message(task_id, "INFO", content)?;
-                break;
-            } else {
-                println!("✓ Finished (Empty response)\n");
-                break;
             }
-        }
-                Ok(())
-            } => res,
-            _ctrl_c_res = tokio::signal::ctrl_c() => {
-                println!("\n[!] Ctrl+C detected. Cancelling task...");
-                Err(anyhow::anyhow!("Task interrupted by user"))
+                    Ok(())
+                } => res,
+                _ctrl_c_res = tokio::signal::ctrl_c() => {
+                    println!("\n[!] Ctrl+C detected. Cancelling task...");
+                    Err(anyhow::anyhow!("Task interrupted by user"))
+                }
+            };
+
+            if let Err(e) = loop_result {
+                let status = if e.to_string().contains("interrupted") {
+                    "failed: interrupted"
+                } else {
+                    "failed"
+                };
+                let _ = self.memory.update_task_status(task_id, status);
+                return Err(e);
             }
-        };
 
-        if let Err(e) = loop_result {
-            let status = if e.to_string().contains("interrupted") { "failed: interrupted" } else { "failed" };
-            let _ = self.memory.update_task_status(task_id, status);
-            return Err(e);
-        }
+            // Calculate observability metrics
+            // TODO: Use real task start time and parse actual tokens from LLM response
+            let duration_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+                - (round * 5) as i64; // Mock duration: 5 seconds per round
 
-        // Calculate observability metrics
-        // TODO: Use real task start time and parse actual tokens from LLM response
-        let duration_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64 
-            - 
-            // In a real system, we'd grab the task created_at, but we'll mock duration for now since we didn't track start
-            (round * 5) as i64; // Mock duration: 5 seconds per round
-        
-        let dur = if duration_secs < 0 { 2 } else { duration_secs };
-        
-        // Mock token usage based on rounds
-        let tokens_used = (round * 450) as i64;
-        let cost = (tokens_used as f64) * 0.00001; // Mock pricing
+            let dur = if duration_secs < 0 { 2 } else { duration_secs };
 
-        self.memory.update_task_observability(task_id, dur, &self.config.llm_model, cost, tokens_used, round.saturating_sub(1) as i64)?;
-        self.memory.update_task_status(task_id, "completed")?;
-        println!("\n[+] Task {} completed.", task_id);
+            // Mock token usage based on rounds
+            let tokens_used = (round * 450) as i64;
+            let cost = (tokens_used as f64) * 0.00001; // Mock pricing
 
-        Ok(task_id)
+            self.memory.update_task_observability(
+                task_id,
+                dur,
+                &self.config.llm_model,
+                cost,
+                tokens_used,
+                round.saturating_sub(1) as i64,
+            )?;
+            self.memory.update_task_status(task_id, "completed")?;
+            println!("\n[+] Task {} completed.", task_id);
+
+            Ok(task_id)
         })
     }
 
@@ -721,12 +734,12 @@ impl TaskScheduler {
                 let sub_goal = args["goal"]
                     .as_str()
                     .ok_or_else(|| anyhow!("Missing 'goal' argument"))?;
-                
+
                 let mut sub_config = self.config.clone();
                 // Isolate the subagent's budget to a strict bound
                 sub_config.max_tool_calls = std::cmp::min(self.config.max_tool_calls, 10);
                 sub_config.max_llm_calls = std::cmp::min(self.config.max_llm_calls, 10);
-                
+
                 // Spawn a new TaskScheduler for the subagent
                 // We pass a new session_id to isolate its working memory
                 let sub_scheduler = TaskScheduler::new(
@@ -735,44 +748,53 @@ impl TaskScheduler {
                     self.mcp_registry.clone(),
                     Some(uuid::Uuid::new_v4().to_string()),
                 )?;
-                
+
                 // Run the sub-goal
                 let sub_task_id = sub_scheduler.run_goal(sub_goal).await?;
-                Ok(json!({ "status": "Subagent completed task", "sub_task_id": sub_task_id.to_string() }))
+                Ok(
+                    json!({ "status": "Subagent completed task", "sub_task_id": sub_task_id.to_string() }),
+                )
             }
             "execute_code" => {
                 let code = args["code"]
                     .as_str()
                     .ok_or_else(|| anyhow!("Missing 'code' argument"))?;
-                
+
                 // Write the code to a temporary file in the sandbox and execute it via python3
-                let script_path = std::path::Path::new(&self.config.sandbox_dir).join("temp_exec.py");
+                let script_path =
+                    std::path::Path::new(&self.config.sandbox_dir).join("temp_exec.py");
                 std::fs::write(&script_path, code)?;
-                
-                let output = self.sandbox.run_command("python3", &["temp_exec.py"], 60).await;
+
+                let output = self
+                    .sandbox
+                    .run_command("python3", &["temp_exec.py"], 60)
+                    .await;
                 let _ = std::fs::remove_file(script_path); // Cleanup
-                
+
                 match output {
                     Ok(out) => Ok(json!({ "output": out })),
-                    Err(e) => Err(anyhow!("Python execution failed: {}", e))
+                    Err(e) => Err(anyhow!("Python execution failed: {}", e)),
                 }
             }
             "execute_wasm" => {
                 let wasm_path_str = args["wasm_path"]
                     .as_str()
                     .ok_or_else(|| anyhow!("Missing 'wasm_path' argument"))?;
-                
+
                 let wasm_path = std::path::Path::new(&self.config.sandbox_dir).join(wasm_path_str);
                 if !wasm_path.exists() {
-                    return Err(anyhow!("WASM file not found at path: {}", wasm_path.display()));
+                    return Err(anyhow!(
+                        "WASM file not found at path: {}",
+                        wasm_path.display()
+                    ));
                 }
-                
+
                 let wasm_sandbox = crate::sandbox::WasmSandbox::new()?;
                 let output = wasm_sandbox.run_wasm_module(&wasm_path);
-                
+
                 match output {
                     Ok(out) => Ok(json!({ "output": out })),
-                    Err(e) => Err(anyhow!("WASM execution failed: {}", e))
+                    Err(e) => Err(anyhow!("WASM execution failed: {}", e)),
                 }
             }
             _ => Err(anyhow!("Unknown tool: {}", tool_name)),
@@ -791,19 +813,24 @@ impl TaskScheduler {
 
         let mut keys = vec![self.config.llm_api_key.clone()];
         keys.extend(self.config.credential_pool.clone());
-        
+
         let primary_provider = &self.config.llm_provider;
-        
+
         let mut last_error = anyhow!("Unknown error");
 
         for key in &keys {
-            match self.execute_llm_call(primary_provider, key, messages, tools).await {
+            match self
+                .execute_llm_call(primary_provider, key, messages, tools)
+                .await
+            {
                 Ok(res) => return Ok(res),
                 Err(e) => {
                     let err_str = e.to_string();
                     last_error = e;
                     if err_str.contains("429") || err_str.contains("401") {
-                        println!("[!] Rate limited or unauthorized. Trying next credential in pool...");
+                        println!(
+                            "[!] Rate limited or unauthorized. Trying next credential in pool..."
+                        );
                         continue;
                     } else {
                         break;
@@ -811,13 +838,24 @@ impl TaskScheduler {
                 }
             }
         }
-        
-        if let (Some(fb_prov), Some(fb_key)) = (&self.config.llm_fallback_provider, &self.config.llm_fallback_api_key) {
-            println!("[!] Primary LLM failed. Trying fallback provider: {}", fb_prov);
-            return self.execute_llm_call(fb_prov, fb_key, messages, tools).await;
+
+        if let (Some(fb_prov), Some(fb_key)) = (
+            &self.config.llm_fallback_provider,
+            &self.config.llm_fallback_api_key,
+        ) {
+            println!(
+                "[!] Primary LLM failed. Trying fallback provider: {}",
+                fb_prov
+            );
+            return self
+                .execute_llm_call(fb_prov, fb_key, messages, tools)
+                .await;
         }
-        
-        Err(anyhow!("LLM call failed after all attempts: {}", last_error))
+
+        Err(anyhow!(
+            "LLM call failed after all attempts: {}",
+            last_error
+        ))
     }
 
     async fn execute_llm_call(
@@ -827,7 +865,9 @@ impl TaskScheduler {
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
     ) -> Result<(ChatMessage, u64)> {
-        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).build()?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()?;
 
         match provider {
             "mock" => {
@@ -836,18 +876,26 @@ impl TaskScheduler {
                     if last_msg.role == "tool" {
                         let content = last_msg.content.as_deref().unwrap_or("");
                         if !content.contains("Error:") && !content.contains("Supervisor rejected") {
-                            return Ok((ChatMessage {
-                                role: "assistant".to_string(),
-                                content: Some("Mock finished".to_string()),
-                                tool_calls: None,
-                                tool_call_id: None,
-                            }, 10));
+                            return Ok((
+                                ChatMessage {
+                                    role: "assistant".to_string(),
+                                    content: Some("Mock finished".to_string()),
+                                    tool_calls: None,
+                                    tool_call_id: None,
+                                },
+                                10,
+                            ));
                         }
                     }
                 }
 
                 // Determine mock behavior based on goal (last user message)
-                let last_user_msg = messages.iter().rev().find(|m| m.role == "user").and_then(|m| m.content.as_deref()).unwrap_or("");
+                let last_user_msg = messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "user")
+                    .and_then(|m| m.content.as_deref())
+                    .unwrap_or("");
                 let (cmd, args) = if last_user_msg.contains("echo") {
                     ("echo".to_string(), "{}".to_string())
                 } else if last_user_msg.contains("hang") {
@@ -860,24 +908,38 @@ impl TaskScheduler {
                     ("fail_once_then_pass".to_string(), "{}".to_string())
                 } else if last_user_msg.contains("malicious") {
                     ("malicious".to_string(), "{}".to_string())
-                } else if last_user_msg.contains("Please fail") { // For rollback test
-                    ("run_command".to_string(), "{\"command\": \"exit\", \"args\": [\"1\"]}".to_string())
-                } else if last_user_msg.contains("Please delegate") { // For subagent test
-                    ("delegate_task".to_string(), "{\"goal\": \"subtask\"}".to_string())
+                } else if last_user_msg.contains("Please fail") {
+                    // For rollback test
+                    (
+                        "run_command".to_string(),
+                        "{\"command\": \"exit\", \"args\": [\"1\"]}".to_string(),
+                    )
+                } else if last_user_msg.contains("Please delegate") {
+                    // For subagent test
+                    (
+                        "delegate_task".to_string(),
+                        "{\"goal\": \"subtask\"}".to_string(),
+                    )
                 } else if last_user_msg.contains("memory_writes") {
-                    return Ok((ChatMessage {
-                        role: "assistant".to_string(),
-                        content: Some("I am attempting to write to memory now.".to_string()),
-                        tool_calls: None,
-                        tool_call_id: None,
-                    }, 10));
+                    return Ok((
+                        ChatMessage {
+                            role: "assistant".to_string(),
+                            content: Some("I am attempting to write to memory now.".to_string()),
+                            tool_calls: None,
+                            tool_call_id: None,
+                        },
+                        10,
+                    ));
                 } else {
-                    return Ok((ChatMessage {
-                        role: "assistant".to_string(),
-                        content: Some("Mock finished".to_string()),
-                        tool_calls: None,
-                        tool_call_id: None,
-                    }, 10));
+                    return Ok((
+                        ChatMessage {
+                            role: "assistant".to_string(),
+                            content: Some("Mock finished".to_string()),
+                            tool_calls: None,
+                            tool_call_id: None,
+                        },
+                        10,
+                    ));
                 };
 
                 // Create a mock tool call
@@ -887,15 +949,18 @@ impl TaskScheduler {
                     function: FunctionCall {
                         name: cmd,
                         arguments: args,
-                    }
+                    },
                 };
 
-                Ok((ChatMessage {
-                    role: "assistant".to_string(),
-                    content: None,
-                    tool_calls: Some(vec![tc]),
-                    tool_call_id: None,
-                }, 10))
+                Ok((
+                    ChatMessage {
+                        role: "assistant".to_string(),
+                        content: None,
+                        tool_calls: Some(vec![tc]),
+                        tool_call_id: None,
+                    },
+                    10,
+                ))
             }
             "openai" | "venice" => {
                 let url = if provider == "venice" {
@@ -942,18 +1007,23 @@ impl TaskScheduler {
                 let content = choice["content"].as_str().map(|s| s.to_string());
 
                 let tool_calls: Option<Vec<ToolCallRequest>> =
-                    choice["tool_calls"].as_array().map(|tcs| tcs.iter()
-                                .filter_map(|tc| serde_json::from_value(tc.clone()).ok())
-                                .collect());
+                    choice["tool_calls"].as_array().map(|tcs| {
+                        tcs.iter()
+                            .filter_map(|tc| serde_json::from_value(tc.clone()).ok())
+                            .collect()
+                    });
 
                 let total_tokens = res_json["usage"]["total_tokens"].as_u64().unwrap_or(0);
 
-                Ok((ChatMessage {
-                    role: "assistant".to_string(),
-                    content,
-                    tool_calls,
-                    tool_call_id: None,
-                }, total_tokens))
+                Ok((
+                    ChatMessage {
+                        role: "assistant".to_string(),
+                        content,
+                        tool_calls,
+                        tool_call_id: None,
+                    },
+                    total_tokens,
+                ))
             }
             "anthropic" => {
                 let mut anthropic_messages = Vec::new();
@@ -978,13 +1048,16 @@ impl TaskScheduler {
                 });
 
                 if !tools.is_empty() {
-                    let anthropic_tools: Vec<_> = tools.iter().map(|t| {
-                        json!({
-                            "name": t["function"]["name"],
-                            "description": t["function"]["description"],
-                            "input_schema": t["function"]["parameters"]
+                    let anthropic_tools: Vec<_> = tools
+                        .iter()
+                        .map(|t| {
+                            json!({
+                                "name": t["function"]["name"],
+                                "description": t["function"]["description"],
+                                "input_schema": t["function"]["parameters"]
+                            })
                         })
-                    }).collect();
+                        .collect();
                     body["tools"] = json!(anthropic_tools);
                 }
 
@@ -1011,10 +1084,7 @@ impl TaskScheduler {
                     return Err(anyhow!("Anthropic API Error: {}", err));
                 }
 
-                let content_blocks = res_json["content"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
+                let content_blocks = res_json["content"].as_array().cloned().unwrap_or_default();
 
                 let mut text_content: Option<String> = None;
                 let mut tool_calls_vec: Vec<ToolCallRequest> = Vec::new();
@@ -1026,16 +1096,10 @@ impl TaskScheduler {
                         }
                         Some("tool_use") => {
                             tool_calls_vec.push(ToolCallRequest {
-                                id: block["id"]
-                                    .as_str()
-                                    .unwrap_or("unknown")
-                                    .to_string(),
+                                id: block["id"].as_str().unwrap_or("unknown").to_string(),
                                 call_type: "function".to_string(),
                                 function: FunctionCall {
-                                    name: block["name"]
-                                        .as_str()
-                                        .unwrap_or("unknown")
-                                        .to_string(),
+                                    name: block["name"].as_str().unwrap_or("unknown").to_string(),
                                     arguments: block["input"].to_string(),
                                 },
                             });
@@ -1050,19 +1114,20 @@ impl TaskScheduler {
                     Some(tool_calls_vec)
                 };
 
-                let total_tokens = res_json["usage"]["input_tokens"].as_u64().unwrap_or(0) + res_json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                let total_tokens = res_json["usage"]["input_tokens"].as_u64().unwrap_or(0)
+                    + res_json["usage"]["output_tokens"].as_u64().unwrap_or(0);
 
-                Ok((ChatMessage {
-                    role: "assistant".to_string(),
-                    content: text_content,
-                    tool_calls,
-                    tool_call_id: None,
-                }, total_tokens))
+                Ok((
+                    ChatMessage {
+                        role: "assistant".to_string(),
+                        content: text_content,
+                        tool_calls,
+                        tool_call_id: None,
+                    },
+                    total_tokens,
+                ))
             }
-            _ => Err(anyhow!(
-                "Unsupported LLM provider: {}",
-                provider
-            )),
+            _ => Err(anyhow!("Unsupported LLM provider: {}", provider)),
         }
     }
 
@@ -1078,11 +1143,7 @@ impl TaskScheduler {
 
         let steps: Vec<(&str, &str, Vec<&str>)> = vec![
             ("Create workspace", "cmd", vec!["/C", "mkdir workspace_v2"]),
-            (
-                "Generate report",
-                "cmd",
-                vec!["/C", &echo_cmd],
-            ),
+            ("Generate report", "cmd", vec!["/C", &echo_cmd]),
             (
                 "Verify output",
                 "cmd",
@@ -1102,8 +1163,11 @@ impl TaskScheduler {
                     )?;
                 }
                 Err(e) => {
-                    self.memory
-                        .log_message(task_id, "ERROR", &format!("Step '{}' failed: {}", name, e))?;
+                    self.memory.log_message(
+                        task_id,
+                        "ERROR",
+                        &format!("Step '{}' failed: {}", name, e),
+                    )?;
                 }
             }
         }

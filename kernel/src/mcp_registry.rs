@@ -55,17 +55,20 @@ impl McpRegistry {
             }
 
             match McpClient::spawn(
-                &config.command, 
-                &args_ref, 
-                &config.runtime_mode, 
+                &config.command,
+                &args_ref,
+                &config.runtime_mode,
                 &config.docker_image,
                 "bridge",
-                None
+                None,
             ) {
                 Ok(mut client) => {
                     // Initialize the client
                     if let Err(e) = client.initialize().await {
-                        eprintln!("[MCP] Warning: Failed to initialize server '{}': {}", config.name, e);
+                        eprintln!(
+                            "[MCP] Warning: Failed to initialize server '{}': {}",
+                            config.name, e
+                        );
                     }
 
                     // Discover tools from this server
@@ -90,7 +93,8 @@ impl McpRegistry {
                                 self.all_tools.push(tool.clone());
                             }
                             self.clients.insert(config.name.clone(), client);
-                            self.server_configs.insert(config.name.clone(), config.clone());
+                            self.server_configs
+                                .insert(config.name.clone(), config.clone());
                         }
                         Err(e) => {
                             eprintln!(
@@ -143,10 +147,15 @@ impl McpRegistry {
             .clone();
 
         if let Some(config) = self.server_configs.get(&server_name) {
-            if !config.capabilities.is_empty() 
-                && !config.capabilities.contains(&tool_name.to_string()) 
-                && !config.capabilities.contains(&"*".to_string()) {
-                return Err(anyhow!("Server '{}' does not have capability to run tool '{}'", server_name, tool_name));
+            if !config.capabilities.is_empty()
+                && !config.capabilities.contains(&tool_name.to_string())
+                && !config.capabilities.contains(&"*".to_string())
+            {
+                return Err(anyhow!(
+                    "Server '{}' does not have capability to run tool '{}'",
+                    server_name,
+                    tool_name
+                ));
             }
         }
 

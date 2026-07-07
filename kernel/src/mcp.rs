@@ -36,10 +36,17 @@ pub struct McpClient {
 }
 
 impl McpClient {
-    pub fn spawn(cmd: &str, args: &[&str], runtime_mode: &str, docker_image: &str, network_mode: &str, egress_proxy: Option<&str>) -> Result<Self> {
+    pub fn spawn(
+        cmd: &str,
+        args: &[&str],
+        runtime_mode: &str,
+        docker_image: &str,
+        network_mode: &str,
+        egress_proxy: Option<&str>,
+    ) -> Result<Self> {
         // Create an isolated working directory (not an OS sandbox)
         let _ = std::fs::create_dir_all("sandbox");
-        
+
         let mut actual_cmd = cmd.to_string();
         let mut actual_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
 
@@ -49,19 +56,21 @@ impl McpClient {
                 "run".to_string(),
                 "-i".to_string(),
                 "--rm".to_string(),
-                "-v".to_string(), format!("{}:/workspace", absolute_sandbox.display()),
-                "-w".to_string(), "/workspace".to_string(),
+                "-v".to_string(),
+                format!("{}:/workspace", absolute_sandbox.display()),
+                "-w".to_string(),
+                "/workspace".to_string(),
                 "--cap-drop=ALL".to_string(),
                 format!("--network={}", network_mode),
             ];
-            
+
             if let Some(proxy) = egress_proxy {
                 docker_args.push("-e".to_string());
                 docker_args.push(format!("http_proxy={}", proxy));
                 docker_args.push("-e".to_string());
                 docker_args.push(format!("https_proxy={}", proxy));
             }
-            
+
             docker_args.push(docker_image.to_string());
             docker_args.push(actual_cmd);
             docker_args.append(&mut actual_args);
@@ -70,23 +79,41 @@ impl McpClient {
         }
 
         let mut command = Command::new(actual_cmd);
-        command.args(&actual_args).env_clear().current_dir("sandbox");
-        
-        let retain_vars = ["PATH", "SystemRoot", "SystemDrive", "USERPROFILE", "APPDATA", "TEMP", "TMP", "PATHEXT"];
+        command
+            .args(&actual_args)
+            .env_clear()
+            .current_dir("sandbox");
+
+        let retain_vars = [
+            "PATH",
+            "SystemRoot",
+            "SystemDrive",
+            "USERPROFILE",
+            "APPDATA",
+            "TEMP",
+            "TMP",
+            "PATHEXT",
+        ];
         for var in retain_vars {
             if let Ok(val) = std::env::var(var) {
                 command.env(var, val);
             }
         }
-        
+
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()?;
 
-        let stdin = child.stdin.take().ok_or_else(|| anyhow!("Failed to open child stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to open child stdout"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("Failed to open child stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("Failed to open child stdout"))?;
         let stdout_reader = BufReader::new(stdout);
 
         Ok(McpClient {
@@ -112,11 +139,11 @@ impl McpClient {
             },
             "id": id
         });
-        
+
         // Some servers might not return a result for initialize, or might return capabilities.
         // We just ensure it doesn't fail.
         let _ = self.send_request(request).await?;
-        
+
         // Also send initialized notification
         let notify = json!({
             "jsonrpc": "2.0",
@@ -127,7 +154,7 @@ impl McpClient {
         req_str.push('\n');
         self.stdin_writer.write_all(req_str.as_bytes()).await?;
         self.stdin_writer.flush().await?;
-        
+
         Ok(())
     }
 
@@ -143,11 +170,15 @@ impl McpClient {
         let response_val = self.send_request(request).await?;
         let list_resp: McpListToolsResponse = serde_json::from_value(response_val)
             .map_err(|e| anyhow!("Invalid MCP list tools response: {}", e))?;
-        
+
         Ok(list_resp.result.tools)
     }
 
-    pub async fn call_tool(&mut self, name: &str, arguments: serde_json::Value) -> Result<serde_json::Value> {
+    pub async fn call_tool(
+        &mut self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let id = self.next_id();
         let request = json!({
             "jsonrpc": "2.0",
@@ -176,7 +207,12 @@ impl McpClient {
         let mut line = String::new();
         // Item 17: Limit response size to 5MB to prevent OOM
         let mut handle = (&mut self.stdout_reader).take(5 * 1024 * 1024);
-        match tokio::time::timeout(std::time::Duration::from_secs(30), handle.read_line(&mut line)).await {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            handle.read_line(&mut line),
+        )
+        .await
+        {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => return Err(anyhow!("Failed to read from MCP server: {}", e)),
             Err(_) => {
@@ -186,7 +222,9 @@ impl McpClient {
         }
 
         if line.is_empty() {
-            return Err(anyhow!("MCP server disconnected or returned empty response"));
+            return Err(anyhow!(
+                "MCP server disconnected or returned empty response"
+            ));
         }
 
         let val: serde_json::Value = serde_json::from_str(&line)?;
