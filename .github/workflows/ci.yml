@@ -41,6 +41,9 @@ jobs:
 
     - name: Security audit
       run: cargo audit      
+    - name: Build binary
+      run: cargo build
+      working-directory: ./kernel
     - name: Run tests
       run: cargo test --verbose
       working-directory: ./kernel

@@ -25,7 +25,7 @@ async fn setup_test_env(
         .unwrap()
         .parent()
         .unwrap()
-        .join("kerna.exe")
+        .join(format!("kerna{}", std::env::consts::EXE_SUFFIX))
         .to_string_lossy()
         .to_string();
 
@@ -274,7 +274,7 @@ async fn test_mockmcp_invalid_json_fails_cleanly() {
         .unwrap()
         .parent()
         .unwrap()
-        .join("kerna.exe")
+        .join(format!("kerna{}", std::env::consts::EXE_SUFFIX))
         .to_string_lossy()
         .to_string();
     config.mcp_servers[0].command = kerna_bin;
@@ -348,7 +348,7 @@ async fn test_mockmcp_malicious_mode_prevents_poison() {
         .unwrap()
         .parent()
         .unwrap()
-        .join("kerna.exe")
+        .join(format!("kerna{}", std::env::consts::EXE_SUFFIX))
         .to_string_lossy()
         .to_string();
     config.mcp_servers[0].command = kerna_bin;
