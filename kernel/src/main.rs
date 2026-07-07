@@ -7,6 +7,7 @@ mod mcp;
 mod mcp_registry;
 mod memory;
 mod mockmcp;
+mod onboarding;
 mod permissions;
 pub mod plugin_manifest;
 mod sandbox;
@@ -41,6 +42,22 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Initialize the Kerna runtime trust layer
+    Init {
+        #[arg(long)]
+        quick: bool,
+        #[arg(long)]
+        ci: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        no_setup: bool,
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+    },
+
     /// Start the Kerna background daemon (Cron, Watchdog)
     Daemon,
 
@@ -107,9 +124,6 @@ enum Commands {
         action: Option<PluginCommands>,
     },
 
-    /// Initialize and configure API keys
-    Init,
-
     /// Show the path to the current configuration file
     Config {
         #[command(subcommand)]
@@ -129,6 +143,26 @@ enum Commands {
 
         #[arg(short, long, default_value = "5m")]
         interval: String,
+    },
+
+    /// View or test security and execution policies
+    Policy {
+        #[command(subcommand)]
+        action: PolicyCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PolicyCommands {
+    /// Dry-run a tool call against the current policy and workspace boundaries
+    Simulate {
+        /// The tool name to simulate (e.g., "run_command")
+        #[arg(index = 1)]
+        tool: String,
+
+        /// The JSON arguments for the tool
+        #[arg(index = 2)]
+        args: String,
     },
 }
 
@@ -193,6 +227,16 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
+        Some(Commands::Init {
+            quick,
+            ci,
+            yes,
+            no_setup,
+            provider,
+            model,
+        }) => {
+            onboarding::run_onboarding(quick, ci, yes, no_setup, provider, model);
+        }
         Some(Commands::Daemon) => {
             let watchdog = WatchdogEngine::new(memory.clone(), config.clone());
             if let Err(e) = watchdog.start().await {
@@ -596,6 +640,42 @@ approval_required = []
             );
         }
 
+        Some(Commands::Policy { action }) => {
+            match action {
+                PolicyCommands::Simulate { tool, args } => {
+                    let permissions = permissions::PermissionManager::new(config.clone());
+                    let sandbox = sandbox::ProcessSandbox::new(
+                        &config.sandbox_dir,
+                        config.runtime_mode.clone(),
+                        config.allow_dynamic_installs,
+                        config.network_mode.clone(),
+                        config.egress_proxy.clone(),
+                    )?;
+                    // The simulation should not require a full scheduler, just process verification
+                    match sandbox.simulate_command(&tool, &args, &permissions) {
+                        Ok(decision) => {
+                            println!("Policy Simulation Result:");
+                            if decision.is_allowed {
+                                println!("  Decision: \x1b[32mALLOW\x1b[0m");
+                            } else {
+                                println!("  Decision: \x1b[31mDENY\x1b[0m");
+                            }
+                            if !decision.reasons.is_empty() {
+                                println!("  Reasons:");
+                                for reason in decision.reasons {
+                                    println!("    - {}", reason);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[-] Policy simulation failed: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+
         Some(Commands::Memory { query }) => {
             let q = query.unwrap_or_default();
             println!("Memory Search: {}\n", q);
@@ -651,59 +731,6 @@ approval_required = []
                 println!("Usage: kerna config path");
             }
         },
-
-        Some(Commands::Init) => {
-            use std::io::{self, Write};
-            println!("Kerna Login\n");
-            print!("Enter your LLM Provider (openai/anthropic/venice) [openai]: ");
-            io::stdout().flush()?;
-            let mut provider = String::new();
-            io::stdin().read_line(&mut provider)?;
-            let provider = provider.trim();
-            let provider = if provider.is_empty() {
-                "openai"
-            } else {
-                provider
-            };
-
-            print!("Enter your API Key: ");
-            io::stdout().flush()?;
-            let mut api_key = String::new();
-            io::stdin().read_line(&mut api_key)?;
-            let api_key = api_key.trim();
-
-            let toml_content = format!(
-                r#"# Kerna Configuration
-llm_provider = "{}"
-llm_api_key = "{}"
-llm_model = "{}"
-db_path = "kerna.db"
-sandbox_dir = "sandbox"
-memory_backend = "sqlite"
-max_retries = 3
-max_tool_rounds = 15
-
-[[mcp_servers]]
-name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "./"]
-enabled = true
-capabilities = ["fs.read", "fs.write"]
-allowed_paths = ["./"]
-approval_required = ["fs.write", "fs.delete"]
-"#,
-                provider,
-                api_key,
-                if provider == "anthropic" {
-                    "claude-sonnet-4-20250514"
-                } else {
-                    "gpt-4o-mini"
-                }
-            );
-
-            std::fs::write("kerna.toml", toml_content)?;
-            println!("\n[+] Saved configuration to kerna.toml!");
-        }
 
         Some(Commands::Task { action }) => match action {
             TaskCommands::List => {

@@ -6,6 +6,46 @@ use std::time::Duration;
 use tokio::time::timeout;
 use wasmtime::{Engine, Linker, Module, Store};
 
+#[derive(Debug, PartialEq)]
+pub enum CommandClass {
+    SafeReadOnly,
+    WorkspaceMutating,
+    DangerousGlobal,
+}
+
+pub fn classify_command(cmd: &str, args: &[&str]) -> CommandClass {
+    let dangerous = ["rm", "sudo", "curl", "wget", "npm", "chmod", "chown", "su"];
+    if dangerous.contains(&cmd) {
+        if cmd == "rm" && args.contains(&"-rf") && (args.contains(&"/") || args.contains(&"~")) {
+            return CommandClass::DangerousGlobal;
+        }
+        if cmd == "sudo" || cmd == "su" || cmd == "chmod" || cmd == "chown" {
+            return CommandClass::DangerousGlobal;
+        }
+        if cmd == "npm" && args.contains(&"install") && args.contains(&"-g") {
+            return CommandClass::DangerousGlobal;
+        }
+    }
+
+    let safe_read = ["ls", "cat", "grep", "git", "pwd", "whoami", "echo"];
+    if safe_read.contains(&cmd) {
+        if cmd == "git"
+            && !args.contains(&"status")
+            && !args.contains(&"log")
+            && !args.contains(&"diff")
+        {
+            return CommandClass::WorkspaceMutating;
+        }
+        if cmd == "echo" && args.contains(&">") {
+            return CommandClass::WorkspaceMutating;
+        }
+        return CommandClass::SafeReadOnly;
+    }
+
+    // Default to workspace mutating
+    CommandClass::WorkspaceMutating
+}
+
 pub struct ProcessSandbox {
     sandbox_dir: PathBuf,
     runtime_mode: String,
@@ -26,6 +66,7 @@ impl ProcessSandbox {
         if !sandbox_dir.exists() {
             fs::create_dir_all(&sandbox_dir)?;
         }
+
         Ok(ProcessSandbox {
             sandbox_dir,
             runtime_mode,
@@ -36,45 +77,69 @@ impl ProcessSandbox {
     }
 
     pub fn snapshot(&self) -> Result<()> {
-        let snapshot_dir = self.sandbox_dir.parent().unwrap().join(format!(
-            "{}_snapshot",
-            self.sandbox_dir.file_name().unwrap().to_string_lossy()
-        ));
+        let parent = self.sandbox_dir.parent().unwrap_or(&self.sandbox_dir);
+        let name = self
+            .sandbox_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "workspace".to_string());
+        let snapshot_dir = parent.join(format!("{}_snapshot", name));
+
         if snapshot_dir.exists() {
             fs::remove_dir_all(&snapshot_dir)?;
         }
-        let mut options = fs_extra::dir::CopyOptions::new();
-        options.copy_inside = true;
-        fs_extra::dir::copy(&self.sandbox_dir, &snapshot_dir, &options)?;
+        fs::create_dir_all(&snapshot_dir)?;
+        copy_dir_all(&self.sandbox_dir, &snapshot_dir)?;
         Ok(())
     }
 
     pub fn rollback(&self) -> Result<()> {
-        let snapshot_dir = self.sandbox_dir.parent().unwrap().join(format!(
-            "{}_snapshot",
-            self.sandbox_dir.file_name().unwrap().to_string_lossy()
-        ));
+        let parent = self.sandbox_dir.parent().unwrap_or(&self.sandbox_dir);
+        let name = self
+            .sandbox_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "workspace".to_string());
+        let snapshot_dir = parent.join(format!("{}_snapshot", name));
+
         if !snapshot_dir.exists() {
             return Err(anyhow!("No snapshot available for rollback."));
         }
         if self.sandbox_dir.exists() {
             fs::remove_dir_all(&self.sandbox_dir)?;
         }
-        let mut options = fs_extra::dir::CopyOptions::new();
-        options.copy_inside = true;
-        let original_name_dir = snapshot_dir.join(self.sandbox_dir.file_name().unwrap());
-        if original_name_dir.exists() {
-            fs_extra::dir::copy(
-                &original_name_dir,
-                self.sandbox_dir.parent().unwrap(),
-                &options,
-            )?;
-        } else {
-            // Fallback if structure differs slightly based on fs_extra version
-            fs::create_dir_all(&self.sandbox_dir)?;
-            fs_extra::dir::copy(&snapshot_dir, self.sandbox_dir.parent().unwrap(), &options)?;
-        }
+        fs::create_dir_all(&self.sandbox_dir)?;
+        copy_dir_all(&snapshot_dir, &self.sandbox_dir)?;
         Ok(())
+    }
+
+    pub fn is_path_in_workspace(&self, target_path: &Path) -> bool {
+        let canonical_target = target_path
+            .canonicalize()
+            .unwrap_or_else(|_| target_path.to_path_buf());
+        let canonical_workspace = self
+            .sandbox_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.sandbox_dir.clone());
+        canonical_target.starts_with(&canonical_workspace)
+    }
+
+    pub fn is_trusted_for_rollback(&self, cmd: &str, args: &[&str]) -> bool {
+        let classification = classify_command(cmd, args);
+        if classification == CommandClass::DangerousGlobal {
+            return false; // Cannot trust rollback for global destructive commands
+        }
+
+        // Detect forbidden absolute paths
+        for arg in args {
+            if arg.starts_with('/') || arg.starts_with('~') || arg.contains(":\\") {
+                let path = Path::new(arg);
+                if !self.is_path_in_workspace(path) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     pub async fn run_command(&self, cmd: &str, args: &[&str], timeout_sec: u64) -> Result<String> {
@@ -151,6 +216,99 @@ impl ProcessSandbox {
     }
 }
 
+pub struct SimulationDecision {
+    pub is_allowed: bool,
+    pub reasons: Vec<String>,
+}
+
+impl ProcessSandbox {
+    pub fn simulate_command(
+        &self,
+        tool: &str,
+        args: &str,
+        permissions: &crate::permissions::PermissionManager,
+    ) -> Result<SimulationDecision> {
+        let mut decision = SimulationDecision {
+            is_allowed: true,
+            reasons: Vec::new(),
+        };
+
+        // 1. Basic tool validation
+        if tool != "run_command" && tool != "read_file" && tool != "write_file" && tool != "mcp" {
+            decision.is_allowed = false;
+            decision
+                .reasons
+                .push(format!("Tool '{}' is not recognized or not allowed.", tool));
+            return Ok(decision);
+        }
+
+        // 2. Workspace bounds checking for run_command
+        if tool == "run_command" {
+            if let Ok(parsed_args) = serde_json::from_str::<serde_json::Value>(args) {
+                if let Some(cmd) = parsed_args.get("command").and_then(|v| v.as_str()) {
+                    if cmd == "rm" || cmd == "mv" || cmd == "cp" {
+                        let is_global = parsed_args
+                            .get("args")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter().any(|arg| {
+                                    arg.as_str().unwrap_or("").starts_with("/")
+                                        || arg.as_str().unwrap_or("").contains("..")
+                                })
+                            })
+                            .unwrap_or(false);
+
+                        if is_global {
+                            decision.is_allowed = false;
+                            decision.reasons.push(
+                                "Command operates destructively outside the workspace boundary."
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            } else {
+                decision.is_allowed = false;
+                decision
+                    .reasons
+                    .push("Failed to parse tool arguments as JSON.".to_string());
+            }
+        }
+
+        let parsed = serde_json::from_str::<serde_json::Value>(args).ok();
+        let target_str = match &parsed {
+            Some(p) => match tool {
+                "run_command" => p.get("command").and_then(|v| v.as_str()).unwrap_or("*"),
+                "read_file" | "write_file" => p.get("path").and_then(|v| v.as_str()).unwrap_or("*"),
+                _ => "*",
+            },
+            None => "*",
+        };
+
+        let perm_level = permissions.check(tool, None);
+        if perm_level == crate::permissions::PermissionLevel::Deny {
+            decision.is_allowed = false;
+            decision.reasons.push(format!(
+                "Permission denied by Trust Layer for tool '{}' on target '{}'.",
+                tool, target_str
+            ));
+        } else {
+            decision.reasons.push(format!(
+                "Trust layer allows tool '{}' on target '{}' (Level: {:?}).",
+                tool, target_str, perm_level
+            ));
+        }
+
+        if decision.is_allowed && decision.reasons.is_empty() {
+            decision
+                .reasons
+                .push("Command passes all security policies and workspace bounds.".to_string());
+        }
+
+        Ok(decision)
+    }
+}
+
 #[allow(dead_code)]
 pub struct WasmSandbox {
     engine: Engine,
@@ -216,4 +374,18 @@ mod tests {
         // whoami should be allowed
         assert!(res2.is_ok(), "whoami failed: {:?}", res2.err());
     }
+}
+
+fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
+    fs::create_dir_all(&dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
+        } else {
+            std::fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
+        }
+    }
+    Ok(())
 }

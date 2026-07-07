@@ -47,6 +47,38 @@ pub struct PermissionRule {
     pub action: String, // "auto_approve" | "require_confirmation" | "deny"
 }
 
+/// Workspace configuration for bounding checkpoints and execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceConfig {
+    #[serde(default = "default_workspace_root")]
+    pub root: String,
+    #[serde(default = "default_true")]
+    pub checkpoint_enabled: bool,
+    #[serde(default = "default_checkpoint_max_bytes")]
+    pub checkpoint_max_bytes: u64,
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            root: default_workspace_root(),
+            checkpoint_enabled: default_true(),
+            checkpoint_max_bytes: default_checkpoint_max_bytes(),
+        }
+    }
+}
+
+/// A named budget preset to quickly switch limits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetPreset {
+    pub max_tool_calls: u64,
+    pub max_llm_calls: u64,
+    pub max_runtime_seconds: u64,
+    pub max_output_bytes: u64,
+    pub max_memory_writes: u64,
+    pub max_cost_usd: f64,
+}
+
 /// Root application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -74,6 +106,12 @@ pub struct Config {
 
     #[serde(default = "default_false")]
     pub allow_dynamic_installs: bool,
+
+    #[serde(default)]
+    pub presets: std::collections::HashMap<String, BudgetPreset>,
+
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
 
     // Budget Envelope (Phase 1)
     #[serde(default = "default_max_runtime_seconds")]
@@ -134,6 +172,14 @@ fn default_docker_image() -> String {
 
 fn default_false() -> bool {
     false
+}
+
+fn default_workspace_root() -> String {
+    ".".to_string()
+}
+
+fn default_checkpoint_max_bytes() -> u64 {
+    100_000_000
 }
 
 fn default_network_mode() -> String {
@@ -224,6 +270,8 @@ impl Config {
             credential_pool: vec![],
             llm_fallback_provider: None,
             llm_fallback_api_key: None,
+            presets: std::collections::HashMap::new(),
+            workspace: WorkspaceConfig::default(),
         }
     }
 

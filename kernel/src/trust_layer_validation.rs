@@ -417,7 +417,10 @@ async fn test_auto_rollback_on_failure() {
         std::fs::remove_dir_all(&sandbox_dir).unwrap();
     }
     std::fs::create_dir_all(&sandbox_dir).unwrap();
+    std::fs::write(sandbox_dir.join("dummy.txt"), "hello").unwrap();
+    config.workspace.root = sandbox_dir.to_string_lossy().to_string();
     config.sandbox_dir = sandbox_dir.to_string_lossy().to_string();
+    config.workspace.checkpoint_enabled = true;
 
     let mcp_reg = std::sync::Arc::new(tokio::sync::Mutex::new(
         crate::mcp_registry::McpRegistry::new(),
@@ -430,12 +433,65 @@ async fn test_auto_rollback_on_failure() {
     // Rollback event should be in the DB
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let mut stmt = conn
-        .prepare("SELECT count(*) FROM events WHERE event_type = 'sandbox.rollback'")
+        .prepare("SELECT count(*) FROM events WHERE event_type = 'workspace.rollback.started'")
         .unwrap();
     let count: i64 = stmt.query_row([], |row| row.get(0)).unwrap();
-    assert!(count > 0, "Rollback event should be emitted");
+    assert_eq!(count, 1, "Rollback event should be emitted");
+}
 
-    let _ = fs::remove_file(&db_path);
+#[test]
+fn test_policy_simulation() {
+    use crate::sandbox::ProcessSandbox;
+    let mut config = Config::default();
+    let sandbox_dir = std::env::temp_dir().join("kerna_policy_test");
+    if sandbox_dir.exists() {
+        let _ = std::fs::remove_dir_all(&sandbox_dir);
+    }
+
+    config.workspace.root = sandbox_dir.to_string_lossy().to_string();
+    config.sandbox_dir = sandbox_dir.to_string_lossy().to_string();
+    let permissions = crate::permissions::PermissionManager::new(config.clone());
+
+    let sandbox = ProcessSandbox::new(
+        &config.sandbox_dir,
+        config.runtime_mode.clone(),
+        config.allow_dynamic_installs,
+        config.network_mode.clone(),
+        config.egress_proxy.clone(),
+    )
+    .unwrap();
+
+    // Test a valid command
+    let decision = sandbox
+        .simulate_command(
+            "run_command",
+            r#"{"command": "ls", "args": ["-la"]}"#,
+            &permissions,
+        )
+        .unwrap();
+    // Default permission for ls is deny unless configured, wait, default config is empty
+    // But let's just check it doesn't fail the workspace check
+    let has_global_violation = decision
+        .reasons
+        .iter()
+        .any(|r| r.contains("destructively outside"));
+    assert!(!has_global_violation);
+
+    // Test a destructive global command
+    let decision = sandbox
+        .simulate_command(
+            "run_command",
+            r#"{"command": "rm", "args": ["-rf", "/"]}"#,
+            &permissions,
+        )
+        .unwrap();
+    assert!(!decision.is_allowed);
+
+    let has_global_violation = decision
+        .reasons
+        .iter()
+        .any(|r| r.contains("destructively outside"));
+    assert!(has_global_violation);
 }
 
 #[tokio::test]
