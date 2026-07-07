@@ -462,15 +462,79 @@ impl TaskScheduler {
 
                         let tool_args: serde_json::Value = serde_json::from_str(tool_args_str).unwrap_or(json!({}));
 
-                        let is_mutating = tool_name == "run_command" || tool_name == "execute_code" || tool_name == "execute_wasm";
-                        if is_mutating {
-                            let _ = self.sandbox.snapshot();
+                        let mut is_checkpointable = false;
+                        if tool_name == "run_command" {
+                            if let Some(cmd) = tool_args.get("command").and_then(|v| v.as_str()) {
+                                let mut args_vec = Vec::new();
+                                if let Some(args_arr) = tool_args.get("args").and_then(|v| v.as_array()) {
+                                    for a in args_arr {
+                                        if let Some(s) = a.as_str() {
+                                            args_vec.push(s);
+                                        }
+                                    }
+                                }
+                                if self.config.workspace.checkpoint_enabled && self.sandbox.is_trusted_for_rollback(cmd, &args_vec) {
+                                    is_checkpointable = true;
+                                }
+                            }
+                        } else if tool_name == "execute_code" || tool_name == "execute_wasm" {
+                            is_checkpointable = self.config.workspace.checkpoint_enabled;
                         }
+
+                        if is_checkpointable {
+                            match self.sandbox.snapshot() {
+                                Ok(_) => {
+                                    event_seq += 1;
+                                    let _ = self.memory.record(Event {
+                                        event_id: uuid::Uuid::new_v4().to_string(),
+                                        task_id: task_id.to_string(),
+                                        session_id: self.session_id.clone(),
+                                        sequence: event_seq,
+                                        timestamp: chrono::Utc::now().to_rfc3339(),
+                                        event_type: "checkpoint.created".to_string(),
+                                        actor: "kerna".to_string(),
+                                        severity: "info".to_string(),
+                                        model: None,
+                                        tool: Some(tool_name.clone()),
+                                        policy_decision: None,
+                                        risk_score: None,
+                                        parent_event_id: Some(parent_evt_id.clone()),
+                                        correlation_id: Some(tc.id.clone()),
+                                        redaction_status: None,
+                                        budget_snapshot_json: Some(json!({})),
+                                        payload_json: json!({}),
+                                    });
+                                }
+                                Err(e) => {
+                                    println!("Snapshot failed: {}", e);
+                                    is_checkpointable = false; // Snapshot failed
+                                    event_seq += 1;
+                                    let _ = self.memory.record(Event {
+                                    event_id: uuid::Uuid::new_v4().to_string(),
+                                    task_id: task_id.to_string(),
+                                    session_id: self.session_id.clone(),
+                                    sequence: event_seq,
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                    event_type: "checkpoint.failed".to_string(),
+                                    actor: "kerna".to_string(),
+                                    severity: "warning".to_string(),
+                                    model: None,
+                                    tool: Some(tool_name.clone()),
+                                    policy_decision: None,
+                                    risk_score: None,
+                                    parent_event_id: Some(parent_evt_id.clone()),
+                                    correlation_id: Some(tc.id.clone()),
+                                    redaction_status: None,
+                                    budget_snapshot_json: Some(json!({})),
+                                    payload_json: json!({}),
+                                });
+                            }
+                        }
+                    }
 
                         let result = self.execute_tool(tool_name, &tool_args).await;
 
-                        if is_mutating && result.is_err() {
-                            let _ = self.sandbox.rollback();
+                        if is_checkpointable && result.is_err() {
                             event_seq += 1;
                             let _ = self.memory.record(Event {
                                 event_id: uuid::Uuid::new_v4().to_string(),
@@ -478,7 +542,7 @@ impl TaskScheduler {
                                 session_id: self.session_id.clone(),
                                 sequence: event_seq,
                                 timestamp: chrono::Utc::now().to_rfc3339(),
-                                event_type: "sandbox.rollback".to_string(),
+                                event_type: "workspace.rollback.started".to_string(),
                                 actor: "kerna".to_string(),
                                 severity: "warning".to_string(),
                                 model: None,
@@ -488,8 +552,56 @@ impl TaskScheduler {
                                 parent_event_id: Some(parent_evt_id.clone()),
                                 correlation_id: Some(tc.id.clone()),
                                 redaction_status: None,
+                                budget_snapshot_json: Some(json!({})),
+                                payload_json: json!({}),
+                            });
+
+                            let rollback_event = if self.sandbox.rollback().is_ok() {
+                                "workspace.rollback.completed"
+                            } else {
+                                "workspace.rollback.failed"
+                            };
+
+                            event_seq += 1;
+                            let _ = self.memory.record(Event {
+                                event_id: uuid::Uuid::new_v4().to_string(),
+                                task_id: task_id.to_string(),
+                                session_id: self.session_id.clone(),
+                                sequence: event_seq,
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                event_type: rollback_event.to_string(),
+                                actor: "kerna".to_string(),
+                                severity: "warning".to_string(),
+                                model: None,
+                                tool: Some(tool_name.clone()),
+                                policy_decision: None,
+                                risk_score: None,
+                                parent_event_id: Some(parent_evt_id.clone()),
+                                correlation_id: Some(tc.id.clone()),
+                                redaction_status: None,
+                                budget_snapshot_json: Some(json!({})),
+                                payload_json: json!({}),
+                            });
+                        } else if is_checkpointable && result.is_ok() {
+                            event_seq += 1;
+                            let _ = self.memory.record(Event {
+                                event_id: uuid::Uuid::new_v4().to_string(),
+                                task_id: task_id.to_string(),
+                                session_id: self.session_id.clone(),
+                                sequence: event_seq,
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                event_type: "checkpoint.discarded".to_string(),
+                                actor: "kerna".to_string(),
+                                severity: "info".to_string(),
+                                model: None,
+                                tool: Some(tool_name.clone()),
+                                policy_decision: None,
+                                risk_score: None,
+                                parent_event_id: Some(parent_evt_id.clone()),
+                                correlation_id: Some(tc.id.clone()),
+                                redaction_status: None,
                                 budget_snapshot_json: Some(budget.get_snapshot_json()),
-                                payload_json: json!({"reason": "tool_execution_failed"}),
+                                payload_json: json!({"reason": "tool_execution_succeeded"}),
                             });
                         }
 
@@ -912,7 +1024,8 @@ impl TaskScheduler {
                     // For rollback test
                     (
                         "run_command".to_string(),
-                        "{\"command\": \"exit\", \"args\": [\"1\"]}".to_string(),
+                        "{\"command\": \"rm\", \"args\": [\"does_not_exist_file_12345.txt\"]}"
+                            .to_string(),
                     )
                 } else if last_user_msg.contains("Please delegate") {
                     // For subagent test
