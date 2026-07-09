@@ -10,17 +10,15 @@ AI agents today can think, but they lack a secure, observable runtime. Kerna pro
 kerna run "Research YC companies hiring AI engineers"
 ```
 
-Every run is persistent, strictly sandboxed, and transparent.
+Every run is persistent, transparent, and bounded by strict policies.
 
 ---
 
 ## Why Kerna is different
 
-Most agent frameworks help you build agents.
+Most agent frameworks help you build agents. Kerna helps you run agents securely.
 
-Kerna helps you run agents safely.
-
-It adds budgets, plugin risk cards, structured traces, persistent task memory, and fail-closed permissions around any model or MCP tool.
+It adds budgets, dynamic provider routing, plugin risk cards, structured traces, and fail-closed permission policies around any model or MCP tool.
 
 ---
 
@@ -30,79 +28,47 @@ Every single action, token, cost, tool call, failure, and permission check is re
 **Every task is reproducible.**
 
 ```bash
-kerna explain <task_id>
+kerna trace last
 ```
-Output:
-> I searched memory. I found no related context. I opened the browser. I retrieved 5 articles. I ranked them. I generated the summary. I finished.
 
-You can easily export entire task lifecycle traces to markdown for debugging or GitHub issues:
+You can easily inspect task lifecycle traces to debug policies and constraints:
 ```bash
-kerna export <task_id> --format md --out trace.md
+kerna inspect last
 ```
 
 ## Features
 
-- **Embedded Memory**: Built-in SQLite persistent task and episodic memory. Context is automatically injected between sessions.
-- **Fail-Closed Runtime Checks**: Strict trust boundaries. Agents cannot access your network, files, or terminal unless the MCP plugin is explicitly granted access in its `manifest.toml`.
-- **Execution Guardrails**: Hard execution budgets (`max_tool_calls`, `max_runtime_seconds`, `max_llm_calls`, `max_cost_usd`) prevent runaway loops.
-- **MCP Extensibility**: Native support for the Model Context Protocol. Easily write plugins in Python, JS, or Go to give Kerna access to your unique systems.
-- **Self-Correction Scheduler**: Built-in loops and retry mechanics if an API call fails or a browser element moves.
-
-## Performance Tests
-
-Kerna is designed to be extremely lightweight infrastructure, not a bloated Electron app.
-
-| Metric | Measurement |
-|---|---|
-| Binary Size | ~6.1 MB |
-| Cold Start Boot | ~38 ms |
-| Memory Query (Vector Search) | ~4.5 ms |
-| Inspect / Export task | ~12 ms |
-| Idle Memory Consumption | ~14 MB |
-
-### Workflow Latency
-Developers care about workflow. Kerna's overhead inside the autonomous loop is near zero:
-
-`Planning (<1ms) → Tool Execution (Sub-process bound) → Permission Check (<0.1ms) → Retry (0ms) → Memory Log (0.2ms) → Export (12ms)`
+- **Embedded Memory**: Built-in SQLite persistent task and episodic memory.
+- **Fail-Closed Runtime Checks**: Strict trust boundaries. Agents cannot access your tools unless explicitly granted via policy or CLI overrides. Kerna operates in user-space (it is *not* a cryptographically isolated hypervisor), but heavily bounds agent action via application-level policy checks.
+- **BYOK Provider Routing**: Bring Your Own Key architecture allows you to route tasks dynamically (e.g. `local-only`, `cheap`, `private`) preventing secret leakage.
+- **Execution Guardrails**: Hard execution budgets (`max_tool_calls`, `max_runtime_seconds`, `max_llm_calls`) prevent runaway loops.
+- **MCP Extensibility**: Native support for the Model Context Protocol, with strict fast-path tool filtering (`allow_tools`, `deny_tools`) and Risk Cards.
 
 ## Getting Started
 
-1. Initialize Kerna to configure your preferred LLM provider:
+1. Initialize Kerna and configure your baseline settings:
 ```bash
-kerna init
+kerna init --quick
 ```
-2. Spawn the interactive shell:
+
+2. Add a model provider (BYOK):
 ```bash
-kerna
+kerna provider add openai --provider-type openai --api-key-env OPENAI_API_KEY
 ```
-3. Type a task:
+
+3. Check your system health:
+```bash
+kerna doctor
+```
+
+4. Run a supervised task:
 ```text
-kerna> Create a new React component for a weather widget...
+kerna run "Write a Python script to calculate fibonacci"
 ```
 
-See the `docs/` folder for Architecture, Permissions, and Plugin Development guides. See `examples/` for boilerplate configs and custom MCP servers.
+5. Simulate a dangerous action to see the Policy Engine block it:
+```bash
+kerna policy simulate "shell.exec" "{\"command\": \"rm -rf /\"}"
+```
 
----
-
-## Roadmap
-
-**v0.1.0 (Current)**
-- Core Agent Runtime
-- SQLite Memory Engine
-- MCP Plugin Support
-- Observability (Inspect, Explain, Export)
-
-**v0.2.0**
-- Event Bus Architecture 
-- `kerna trace` timeline renderer
-- Metrics API
-
-**v0.3.0**
-- Stable Plugin SDK
-- Plugin Registry
-- Deterministic Mode (`--deterministic`)
-
-**v1.0.0**
-- Cloud Sync
-- Team Workspaces & Shared Memory
-- Distributed Runtime
+See the `docs/` folder for guides on the Security Model, Policy Engine, and BYOK Providers.

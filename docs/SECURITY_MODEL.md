@@ -39,6 +39,13 @@ Every tool execution follows a strictly ordered pipeline:
 
 This pipeline ensures 100% observability and non-repudiation. All events are synced to a durable SQLite store.
 
+### 4. Provider Routing & Privacy Boundaries
+With BYOK (Bring Your Own Key) architecture, Kerna routes LLM tasks dynamically based on privacy requirements:
+- **`model_routes`**: Alias aliases like `cheap` or `smart` to specific providers.
+- **`privacy_routes`**: Ensures sensitive tasks (e.g. `local_only`) never leave the machine by binding them to local models (e.g. `ollama`).
+
+This prevents accidental secret leakage by ensuring high-risk data is only processed by trusted providers.
+
 ## Known Threat Vectors & Mitigations
 
 | Threat | Mitigation |

@@ -1,54 +1,29 @@
-# Kerna Event Schema & Sinking
+# The Kerna Event Schema
 
-Kerna's observability layer guarantees that every action taken by the agent, plugin, or system is durably recorded before it has side effects.
+Kerna ensures 100% observability into the agent execution loop through a deterministic, strictly ordered event pipeline. Every action the agent takes, and every decision the runtime makes, is recorded as an `EventTrace`.
 
-## Event Taxonomy
+## Lifecycle of a Tool Call
 
-All events follow a unified schema. Events are divided into namespaces:
+When an agent decides to use an MCP tool, Kerna emits the following events in order:
 
-### `tool.*` (Execution Events)
-- `tool.call.requested`: Emitted when the LLM asks to use a tool.
-- `tool.policy.checked`: Emitted after policy evaluation. If rejected, the task may abort.
-- `tool.call.started`: Emitted immediately prior to launching the MCP process or sending the request.
-- `tool.call.completed`: Emitted when the tool returns successfully, containing truncated output.
-- `tool.call.failed`: Emitted on timeouts, parser errors, or non-zero exit codes.
+1. **`tool.call.requested`**: The raw intention from the LLM. Includes the tool name and proposed arguments.
+2. **`tool.policy.checked`**: The result of the Policy Engine evaluation. Contains the decision (`allow`, `deny`, `require_confirmation`) and the reason.
+3. **`budget.checked`**: Verifies that the task has not exceeded its configured limits (`max_tool_calls`, `max_cost_usd`, etc.).
+4. **`tool.call.started`**: Emitted immediately before control is handed over to the MCP sub-process.
+5. **`tool.call.completed`** / **`tool.call.failed`**: Emitted when the MCP tool returns its result or crashes. Contains execution duration and the final payload.
 
-### `budget.*` (Constraint Events)
-- `budget.checked`: Emitted to confirm a budget check passed.
-- `budget.exceeded`: Emitted when a budget threshold is violated (aborts task).
+## Accessing Traces
 
-### `memory.*` (State Events)
-- `memory.read`: Emitted when retrieving memories.
-- `memory.write`: Emitted when writing durable facts to the SQLite database.
-- `memory.write.skipped`: Emitted if memory writes exceed budget.
+You can inspect the event trace for any task using its Task ID:
 
-## Required Event Fields
-
-```json
-{
-  "event_id": "evt_...",
-  "task_id": "task_...",
-  "session_id": "ses_...",
-  "timestamp": "2024-05-18T10:00:00Z",
-  "event_type": "tool.call.requested",
-  "sequence": 1,
-  "severity": "info",
-  "redaction_status": "none",
-  "actor": "llm",
-  "model": "claude-3-haiku",
-  "tool": "mcp:filesystem/read",
-  "policy_decision": "allow",
-  "risk_score": 0.0,
-  "budget_snapshot_json": "{...}",
-  "payload_json": "{...}"
-}
+```bash
+kerna inspect <task_id>
 ```
 
-## Redaction Rules
+Or quickly view the trace for the most recent run:
 
-To comply with enterprise requirements, Kerna redacts sensitive data before writing to the database:
-1. **API Keys**: Filtered from `payload_json` if detected (e.g. `sk-...`).
-2. **PII**: Configurable regex-based filtering can be applied via Kerna Config.
-3. **Payload Truncation**: Tool outputs are hard-capped by `config.max_output_bytes`.
+```bash
+kerna trace last
+```
 
-Events modified by these rules have their `redaction_status` set to `redacted`.
+The output gives you a comprehensive, chronological view of exactly what happened, and more importantly, *why* certain actions were blocked or allowed by the Trust Layer.
