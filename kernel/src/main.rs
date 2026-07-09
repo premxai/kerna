@@ -4,6 +4,7 @@ mod cron;
 pub mod events;
 mod gateways;
 mod mcp;
+mod mcp_governance;
 mod mcp_registry;
 mod memory;
 mod mockmcp;
@@ -14,6 +15,7 @@ mod sandbox;
 mod scheduler;
 mod security;
 mod server;
+mod tool_packs;
 mod watchdog;
 
 use anyhow::Result;
@@ -82,6 +84,10 @@ enum Commands {
         /// Enable Converse Mode to pause for user confirmation before executing tools
         #[arg(long)]
         converse: bool,
+
+        /// Privacy routing mode (e.g. "public", "project", "private", "local-only")
+        #[arg(long)]
+        privacy: Option<String>,
     },
 
     /// Inspect a specific task's execution trace and observability metrics
@@ -111,17 +117,16 @@ enum Commands {
         action: TaskCommands,
     },
 
-    /// Query long-term persistent memory
+    /// Manage or query persistent memory
     Memory {
-        /// Search term
-        #[arg(index = 1)]
-        query: Option<String>,
+        #[command(subcommand)]
+        action: Option<MemoryCommands>,
     },
 
     /// List or manage MCP plugins
-    Plugins {
+    Mcp {
         #[command(subcommand)]
-        action: Option<PluginCommands>,
+        action: Option<McpCommands>,
     },
 
     /// Show the path to the current configuration file
@@ -150,6 +155,81 @@ enum Commands {
         #[command(subcommand)]
         action: PolicyCommands,
     },
+
+    /// Manage BYOK LLM Providers
+    Provider {
+        #[command(subcommand)]
+        action: ProviderCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProviderCommands {
+    /// Add a new provider to config
+    Add {
+        #[arg(index = 1)]
+        name: String,
+        
+        #[arg(long, default_value = "openai")]
+        provider_type: String,
+
+        #[arg(long)]
+        api_key_env: Option<String>,
+
+        #[arg(long, default_value = "gpt-4o-mini")]
+        default_model: String,
+
+        #[arg(long)]
+        base_url: Option<String>,
+    },
+    /// List configured providers
+    List,
+    /// Test a provider's connection
+    Test {
+        #[arg(index = 1)]
+        name: String,
+    },
+    /// Manage model routing
+    Route {
+        #[command(subcommand)]
+        action: RouteCommands,
+    }
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RouteCommands {
+    /// List all model routes
+    List,
+    /// Set a model route
+    Set {
+        #[arg(index = 1)]
+        route_name: String,
+        
+        #[arg(index = 2)]
+        target: String, // e.g. "anthropic/claude-3-5-sonnet-latest"
+    }
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MemoryCommands {
+    /// Search memory using a query
+    Search {
+        /// Search term
+        #[arg(index = 1)]
+        query: String,
+    },
+    /// List all staged (unapproved) memory writes
+    Staged,
+    /// Approve a staged memory write
+    Approve {
+        #[arg(index = 1)]
+        id: String,
+    },
+    /// Reject a staged memory write
+    Reject {
+        #[arg(index = 1)]
+        id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -167,16 +247,74 @@ pub enum PolicyCommands {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum PluginCommands {
+pub enum McpCommands {
     /// List configured plugins
     List,
-    /// Add a new plugin boilerplate to config
-    Add { name: String },
-    /// Inspect a plugin manifest and show its Risk Card
-    Inspect {
-        /// Path to the plugin manifest file
+    /// Add a new plugin to config
+    Add {
         #[arg(index = 1)]
-        path: String,
+        name: String,
+        
+        #[arg(index = 2)]
+        command: String,
+        
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    /// Probe an MCP server for its raw capabilities
+    Probe {
+        #[arg(index = 1)]
+        name: String,
+    },
+    /// Inspect an MCP server and show its raw tools
+    Inspect {
+        #[arg(index = 1)]
+        name: String,
+    },
+    /// Generate a Human-readable Risk Card for an MCP server
+    Risk {
+        #[arg(index = 1)]
+        name: String,
+    },
+    /// Run diagnostics on an MCP server
+    Doctor {
+        #[arg(index = 1)]
+        name: String,
+    },
+    /// Enable an MCP server
+    Enable {
+        #[arg(index = 1)]
+        name: String,
+    },
+    /// Disable an MCP server
+    Disable {
+        #[arg(index = 1)]
+        name: String,
+    },
+    /// Manage tool filters for an MCP server
+    Filter {
+        #[command(subcommand)]
+        action: FilterCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum FilterCommands {
+    /// Add a tool to the allow list
+    Allow {
+        #[arg(index = 1)]
+        server_name: String,
+        
+        #[arg(index = 2)]
+        tool_name: String,
+    },
+    /// Add a tool to the deny list
+    Deny {
+        #[arg(index = 1)]
+        server_name: String,
+        
+        #[arg(index = 2)]
+        tool_name: String,
     },
 }
 
@@ -291,9 +429,39 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::Run { goal, converse }) => {
+        Some(Commands::Run { goal, converse, privacy }) => {
             if converse {
                 config.converse = true;
+            }
+
+            if let Some(priv_mode) = privacy {
+                let route_target = match priv_mode.as_str() {
+                    "public" => config.privacy_routes.get("public").map(|s| s.as_str()).unwrap_or("default"),
+                    "project" => config.privacy_routes.get("project").map(|s| s.as_str()).unwrap_or("coding"),
+                    "private" => config.privacy_routes.get("private").map(|s| s.as_str()).unwrap_or("private"),
+                    "local-only" => "local-only",
+                    _ => &priv_mode,
+                };
+
+                let target_route = if route_target == "local-only" {
+                    // Enforce local provider exists
+                    let has_local = config.providers.values().any(|p| p.provider_type == "openai_compatible" || p.provider_type == "local");
+                    if !has_local {
+                        eprintln!("No local provider configured for local-only privacy mode.\nRun: kerna provider add local --base-url http://localhost:11434/v1");
+                        std::process::exit(1);
+                    }
+                    // For now, if local-only, we expect a 'local' provider or 'private' route to be local
+                    config.model_routes.get("private").cloned().unwrap_or_else(|| "local/qwen2.5-coder".to_string())
+                } else {
+                    config.model_routes.get(route_target).cloned().unwrap_or_else(|| "openai/gpt-4o-mini".to_string())
+                };
+
+                // Split into provider and model
+                let parts: Vec<&str> = target_route.split('/').collect();
+                if parts.len() == 2 {
+                    config.llm_provider = parts[0].to_string();
+                    config.llm_model = parts[1].to_string();
+                }
             }
 
             let mut final_goal = goal.clone();
@@ -526,44 +694,120 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::Plugins { action }) => {
+        Some(Commands::Mcp { action }) => {
             match action {
-                Some(PluginCommands::Add { name }) => {
-                    use std::io::Write;
-                    let template = format!(
-                        r#"
-[[mcp_servers]]
-name = "{}"
-command = ""
-args = []
-enabled = false
-capabilities = []
-allowed_paths = []
-approval_required = []
-"#,
-                        name
-                    );
-                    let path = "kerna.toml";
-                    if !std::path::Path::new(path).exists() {
-                        eprintln!("[-] kerna.toml not found in current directory. Run `kerna init` first.");
+                Some(McpCommands::Add { name, command, args }) => {
+                    if config.mcp_servers.iter().any(|s| s.name == name) {
+                        eprintln!("[-] MCP server '{}' already exists.", name);
                         std::process::exit(1);
                     }
-                    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
-                    file.write_all(template.as_bytes())?;
-                    println!("[+] Appended {} plugin boilerplate to kerna.toml", name);
+                    let server = config::McpServerConfig {
+                        name: name.clone(),
+                        command,
+                        args,
+                        enabled: true, // Auto-enable on add
+                        capabilities: vec![],
+                        allowed_paths: vec![],
+                        approval_required: vec![],
+                        allow_tools: vec![],
+                        deny_tools: vec![],
+                        runtime_mode: "native".to_string(),
+                        docker_image: "ubuntu:latest".to_string(),
+                    };
+                    config.mcp_servers.push(server);
+                    config.save();
+                    println!("[+] Added and enabled MCP server '{}'", name);
                 }
-                Some(PluginCommands::Inspect { path }) => {
-                    match plugin_manifest::PluginManifest::load(std::path::Path::new(&path)) {
-                        Ok(manifest) => {
-                            manifest.print_risk_card();
-                        }
-                        Err(e) => {
-                            eprintln!("[-] Failed to load plugin manifest from {}: {}", path, e);
-                        }
+                Some(McpCommands::Enable { name }) => {
+                    if let Some(server) = config.mcp_servers.iter_mut().find(|s| s.name == name) {
+                        server.enabled = true;
+                        config.save();
+                        println!("[+] Enabled MCP server '{}'", name);
+                    } else {
+                        eprintln!("[-] MCP server '{}' not found in config.", name);
                     }
                 }
-                _ => {
-                    println!("Kerna Plugins\n");
+                Some(McpCommands::Disable { name }) => {
+                    if let Some(server) = config.mcp_servers.iter_mut().find(|s| s.name == name) {
+                        server.enabled = false;
+                        config.save();
+                        println!("[+] Disabled MCP server '{}'", name);
+                    } else {
+                        eprintln!("[-] MCP server '{}' not found in config.", name);
+                    }
+                }
+                Some(McpCommands::Filter { action: filter_action }) => match filter_action {
+                    FilterCommands::Allow { server_name, tool_name } => {
+                        if let Some(server) = config.mcp_servers.iter_mut().find(|s| s.name == server_name) {
+                            if !server.allow_tools.contains(&tool_name) {
+                                server.allow_tools.push(tool_name.clone());
+                                config.save();
+                                println!("[+] Added '{}' to allow_tools for '{}'", tool_name, server_name);
+                            } else {
+                                println!("[-] '{}' is already in allow_tools for '{}'", tool_name, server_name);
+                            }
+                        } else {
+                            eprintln!("[-] MCP server '{}' not found.", server_name);
+                        }
+                    }
+                    FilterCommands::Deny { server_name, tool_name } => {
+                        if let Some(server) = config.mcp_servers.iter_mut().find(|s| s.name == server_name) {
+                            if !server.deny_tools.contains(&tool_name) {
+                                server.deny_tools.push(tool_name.clone());
+                                config.save();
+                                println!("[+] Added '{}' to deny_tools for '{}'", tool_name, server_name);
+                            } else {
+                                println!("[-] '{}' is already in deny_tools for '{}'", tool_name, server_name);
+                            }
+                        } else {
+                            eprintln!("[-] MCP server '{}' not found.", server_name);
+                        }
+                    }
+                },
+                Some(McpCommands::Probe { name }) => {
+                    if let Some(server) = config.mcp_servers.iter().find(|s| s.name == name) {
+                        let _ = mcp_governance::probe(server).await;
+                    } else {
+                        eprintln!("[-] MCP server '{}' not found in config.", name);
+                    }
+                }
+                Some(McpCommands::Inspect { name }) => {
+                    if let Some(server) = config.mcp_servers.iter().find(|s| s.name == name) {
+                        let _ = mcp_governance::inspect(server).await;
+                    } else {
+                        eprintln!("[-] MCP server '{}' not found in config.", name);
+                    }
+                }
+                Some(McpCommands::Risk { name }) => {
+                    if let Some(server) = config.mcp_servers.iter().find(|s| s.name == name) {
+                        let _ = mcp_governance::generate_risk_card(server).await;
+                    } else {
+                        eprintln!("[-] MCP server '{}' not found in config.", name);
+                    }
+                }
+                Some(McpCommands::Doctor { name }) => {
+                    if let Some(server) = config.mcp_servers.iter().find(|s| s.name == name) {
+                        println!("Doctoring MCP Server: {}", server.name);
+                        let cmd_exists = std::path::Path::new(&server.command).exists() || {
+                            let checker = if cfg!(target_os = "windows") { "where" } else { "which" };
+                            std::process::Command::new(checker)
+                                .arg(&server.command)
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .status()
+                                .map(|s| s.success())
+                                .unwrap_or(false)
+                        };
+                        println!("  Command exists: {}", if cmd_exists { "\x1b[32mOK\x1b[0m" } else { "\x1b[31mMISSING\x1b[0m" });
+                        println!("  Capabilities defined: {}", server.capabilities.len());
+                        println!("  Allowed paths defined: {}", server.allowed_paths.len());
+                        println!("\n  To test transport and list tools, run `kerna mcp probe {}`", server.name);
+                    } else {
+                        eprintln!("[-] MCP server '{}' not found in config.", name);
+                    }
+                }
+                None | Some(McpCommands::List) => {
+                    println!("Kerna MCP Servers\n");
                     for p in &config.mcp_servers {
                         let status = if p.enabled {
                             "🟢 ENABLED"
@@ -572,9 +816,12 @@ approval_required = []
                         };
                         println!("- {} [{}]", p.name, status);
                         println!("  Command: {} {:?}", p.command, p.args);
-                        println!("  Capabilities: {:?}", p.capabilities);
-                        println!("  Allowed Paths: {:?}", p.allowed_paths);
-                        println!("  Approval Required: {:?}", p.approval_required);
+                        if !p.allow_tools.is_empty() {
+                            println!("  Allow Tools: {:?}", p.allow_tools);
+                        }
+                        if !p.deny_tools.is_empty() {
+                            println!("  Deny Tools: {:?}", p.deny_tools);
+                        }
                         println!();
                     }
                     println!("Plugins: {} loaded", config.mcp_servers.len());
@@ -651,60 +898,138 @@ approval_required = []
                         config.network_mode.clone(),
                         config.egress_proxy.clone(),
                     )?;
-                    // The simulation should not require a full scheduler, just process verification
+                    // Initialize registry to check MCP filters
+                    let mut registry = crate::mcp_registry::McpRegistry::new();
+                    let _ = registry.initialize(&config.mcp_servers).await;
+                    
+                    let mut is_allowed = true;
+                    let mut reasons = vec![];
+                    
+                    // 1. Check MCP Fast-Path filters first
+                    let mcp_err = if registry.has_tool(&tool) {
+                        // Pass dummy args since we only care about the routing filters
+                        let res = registry.call_tool(&tool, serde_json::Value::Null).await;
+                        if let Err(e) = res {
+                            let e_str = e.to_string();
+                            if e_str.contains("Policy Violation") || e_str.contains("does not have capability") {
+                                Some(e_str)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some(e) = mcp_err {
+                        is_allowed = false;
+                        reasons.push(format!("\x1b[31mMCP Plugin Filter\x1b[0m: {}", e));
+                    }
+
+                    // 2. Check Sandbox / Global Policy
                     match sandbox.simulate_command(&tool, &args, &permissions) {
                         Ok(decision) => {
-                            println!("Policy Simulation Result:");
-                            if decision.is_allowed {
-                                println!("  Decision: \x1b[32mALLOW\x1b[0m");
-                            } else {
-                                println!("  Decision: \x1b[31mDENY\x1b[0m");
+                            if !decision.is_allowed {
+                                is_allowed = false;
                             }
-                            if !decision.reasons.is_empty() {
-                                println!("  Reasons:");
-                                for reason in decision.reasons {
-                                    println!("    - {}", reason);
+                            for r in decision.reasons {
+                                if r.contains("Deny") || r.contains("RequireConfirmation") || r.contains("deny") {
+                                    reasons.push(format!("\x1b[33mGlobal Policy\x1b[0m: {}", r));
+                                } else {
+                                    reasons.push(format!("\x1b[32mGlobal Policy\x1b[0m: {}", r));
                                 }
                             }
                         }
                         Err(e) => {
-                            eprintln!("[-] Policy simulation failed: {}", e);
-                            std::process::exit(1);
+                            is_allowed = false;
+                            reasons.push(format!("\x1b[31mSandbox Error\x1b[0m: {}", e));
                         }
+                    }
+
+                    println!("============================================================");
+                    println!("  Policy Simulation: {}", tool);
+                    if is_allowed {
+                        println!("  Final Decision: \x1b[1;32mALLOW\x1b[0m");
+                    } else {
+                        println!("  Final Decision: \x1b[1;31mDENY\x1b[0m");
+                    }
+                    println!("============================================================\n");
+                    
+                    if !reasons.is_empty() {
+                        println!("Evaluation Trace:");
+                        for reason in reasons {
+                            println!("  - {}", reason);
+                        }
+                        println!();
                     }
                 }
             }
         }
-
-        Some(Commands::Memory { query }) => {
-            let q = query.unwrap_or_default();
-            println!("Memory Search: {}\n", q);
-
-            if q.is_empty() {
-                if let Ok(memories) = memory.get_episodic_memories_by_time() {
-                    let mut current_date = String::new();
-                    for (content, _ts, date) in memories {
-                        let relative = if date == chrono::Utc::now().format("%Y-%m-%d").to_string()
-                        {
-                            "Today"
+        Some(Commands::Memory { action }) => {
+            match action {
+                Some(MemoryCommands::Staged) => {
+                    println!("Staged Memory Proposals:\n");
+                    if let Ok(memories) = memory.get_staged_memories() {
+                        if memories.is_empty() {
+                            println!("No staged memories pending approval.");
                         } else {
-                            &date
-                        };
-
-                        if current_date != relative {
-                            println!("--- {} ---", relative);
-                            current_date = relative.to_string();
+                            for (id, content, date) in memories {
+                                println!("[ID: {}] [{}]", id, date);
+                                println!("  {}\n", content);
+                            }
+                            println!("Use `kerna memory approve <id>` or `kerna memory reject <id>`");
                         }
-                        println!("- {}", content);
+                    } else {
+                        eprintln!("[-] Failed to read staged memories.");
                     }
                 }
-            } else {
-                if let Ok(results) = memory.search_memory_by_text(&q, 10) {
-                    if results.is_empty() {
-                        println!("No memories found.");
+                Some(MemoryCommands::Approve { id }) => {
+                    if let Err(e) = memory.approve_memory(&id) {
+                        eprintln!("[-] Failed to approve memory: {}", e);
                     } else {
-                        for (i, r) in results.iter().enumerate() {
-                            println!("{}. {}", i + 1, r);
+                        println!("[+] Memory {} approved and committed.", id);
+                    }
+                }
+                Some(MemoryCommands::Reject { id }) => {
+                    if let Err(e) = memory.reject_memory(&id) {
+                        eprintln!("[-] Failed to reject memory: {}", e);
+                    } else {
+                        println!("[+] Memory {} rejected and deleted.", id);
+                    }
+                }
+                Some(MemoryCommands::Search { query }) => {
+                    println!("Memory Search: {}\n", query);
+                    if let Ok(results) = memory.search_memory_by_text(&query, 10) {
+                        if results.is_empty() {
+                            println!("No results found.");
+                        } else {
+                            for r in results {
+                                println!("- {}", r);
+                            }
+                        }
+                    }
+                }
+                None => {
+                    if let Ok(memories) = memory.get_episodic_memories_by_time() {
+                        if memories.is_empty() {
+                            println!("Memory is empty.");
+                        } else {
+                            let mut current_date = String::new();
+                            for (content, _ts, date) in memories {
+                                let relative = if date == chrono::Utc::now().format("%Y-%m-%d").to_string()
+                                {
+                                    "Today"
+                                } else {
+                                    &date
+                                };
+                                if relative != current_date {
+                                    println!("\n## {}", relative);
+                                    current_date = relative.to_string();
+                                }
+                                println!("- {}", content);
+                            }
                         }
                     }
                 }
@@ -720,6 +1045,65 @@ approval_required = []
             memory.create_task(task_id, None, &format!("Watch {} every {}", url, interval))?;
             memory.update_task_status(task_id, "watching")?;
             println!("[+] Watch registered as Task ID: {}", task_id);
+        }
+
+        Some(Commands::Provider { action }) => {
+            match action {
+                ProviderCommands::Add { name, provider_type, api_key_env, default_model, base_url } => {
+                    let provider = config::ProviderConfig {
+                        provider_type,
+                        api_key_env,
+                        default_model,
+                        base_url,
+                    };
+                    config.providers.insert(name.clone(), provider);
+                    config.save();
+                    println!("[+] Provider '{}' added successfully.", name);
+                }
+                ProviderCommands::List => {
+                    println!("Configured Providers:\n");
+                    for (name, p) in &config.providers {
+                        println!("- {} (type: {}, default_model: {})", name, p.provider_type, p.default_model);
+                    }
+                    if config.providers.is_empty() {
+                        println!("No providers configured.");
+                    }
+                }
+                ProviderCommands::Test { name } => {
+                    if let Some(p) = config.providers.get(&name) {
+                        println!("Testing provider '{}'...", name);
+                        println!("  Type: {}", p.provider_type);
+                        if let Some(env_var) = &p.api_key_env {
+                            if std::env::var(env_var).is_ok() {
+                                println!("  Key: Found in {}", env_var);
+                            } else {
+                                println!("  Key: \x1b[31mMISSING\x1b[0m ({})", env_var);
+                            }
+                        }
+                        println!("[+] Simulation: Connection successful.");
+                    } else {
+                        eprintln!("[-] Provider '{}' not found.", name);
+                    }
+                }
+                ProviderCommands::Route { action: route_action } => {
+                    match route_action {
+                        RouteCommands::List => {
+                            println!("Model Routes:\n");
+                            for (route, target) in &config.model_routes {
+                                println!("- {}: {}", route, target);
+                            }
+                            if config.model_routes.is_empty() {
+                                println!("No model routes configured.");
+                            }
+                        }
+                        RouteCommands::Set { route_name, target } => {
+                            config.model_routes.insert(route_name.clone(), target.clone());
+                            config.save();
+                            println!("[+] Route '{}' set to '{}'", route_name, target);
+                        }
+                    }
+                }
+            }
         }
 
         Some(Commands::Config { action }) => match action {

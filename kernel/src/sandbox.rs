@@ -66,7 +66,6 @@ impl ProcessSandbox {
         if !sandbox_dir.exists() {
             fs::create_dir_all(&sandbox_dir)?;
         }
-
         Ok(ProcessSandbox {
             sandbox_dir,
             runtime_mode,
@@ -75,6 +74,11 @@ impl ProcessSandbox {
             egress_proxy,
         })
     }
+
+    pub fn get_workspace_root(&self) -> &Path {
+        &self.sandbox_dir
+    }
+
 
     pub fn snapshot(&self) -> Result<()> {
         let parent = self.sandbox_dir.parent().unwrap_or(&self.sandbox_dir);

@@ -94,11 +94,15 @@ impl MemoryEngine {
                 content TEXT NOT NULL,
                 embedding_json TEXT NOT NULL,
                 tags TEXT DEFAULT '',
+                status TEXT DEFAULT 'STAGED',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );",
             [],
         )
         .context("Failed to create episodic_memory table")?;
+
+        // Migration: add status column if it doesn't exist
+        let _ = conn.execute("ALTER TABLE episodic_memory ADD COLUMN status TEXT DEFAULT 'STAGED';", []);
 
         // Create user_preferences table (key-value store for user memory)
         conn.execute(
@@ -366,15 +370,15 @@ impl MemoryEngine {
 
     // ─── Episodic Memory (Semantic) ──────────────────────────────
 
-    pub fn add_episodic_memory(&self, content: &str, embedding: &[f32]) -> Result<()> {
+    pub fn add_episodic_memory(&self, content: &str, embedding: &[f32]) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         let embedding_json = serde_json::to_string(embedding)?;
         let conn = self.get_conn();
         conn.execute(
-            "INSERT INTO episodic_memory (id, content, embedding_json) VALUES (?1, ?2, ?3)",
+            "INSERT INTO episodic_memory (id, content, embedding_json, status) VALUES (?1, ?2, ?3, 'STAGED')",
             params![id, content, embedding_json],
         )?;
-        Ok(())
+        Ok(id)
     }
 
     #[allow(dead_code)]
@@ -395,7 +399,8 @@ impl MemoryEngine {
         limit: usize,
     ) -> Result<Vec<(String, f32)>> {
         let conn = self.get_conn();
-        let mut stmt = conn.prepare("SELECT content, embedding_json FROM episodic_memory")?;
+        // Only return APPROVED memories
+        let mut stmt = conn.prepare("SELECT content, embedding_json FROM episodic_memory WHERE status = 'APPROVED'")?;
         let rows = stmt.query_map([], |row| {
             let content: String = row.get(0)?;
             let embedding_json: String = row.get(1)?;
@@ -423,7 +428,7 @@ impl MemoryEngine {
         let pattern = format!("%{}%", query);
         let conn = self.get_conn();
         let mut stmt = conn.prepare(
-            "SELECT content FROM episodic_memory WHERE content LIKE ?1 ORDER BY created_at DESC LIMIT ?2",
+            "SELECT content FROM episodic_memory WHERE status = 'APPROVED' AND content LIKE ?1 ORDER BY created_at DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![pattern, limit as i64], |row| {
             let content: String = row.get(0)?;
@@ -439,12 +444,41 @@ impl MemoryEngine {
 
     pub fn get_episodic_memories_by_time(&self) -> Result<Vec<(String, String, String)>> {
         let conn = self.get_conn();
-        let mut stmt = conn.prepare("SELECT content, created_at, date(created_at) as d FROM episodic_memory ORDER BY created_at DESC LIMIT 50")?;
+        let mut stmt = conn.prepare("SELECT content, created_at, date(created_at) as d FROM episodic_memory WHERE status = 'APPROVED' ORDER BY created_at DESC LIMIT 50")?;
         let rows = stmt.query_map([], |row| {
             let content: String = row.get(0)?;
             let created: String = row.get(1)?;
             let date: String = row.get(2)?;
             Ok((content, created, date))
+        })?;
+
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
+    pub fn approve_memory(&self, id: &str) -> Result<()> {
+        let conn = self.get_conn();
+        conn.execute("UPDATE episodic_memory SET status = 'APPROVED' WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn reject_memory(&self, id: &str) -> Result<()> {
+        let conn = self.get_conn();
+        conn.execute("DELETE FROM episodic_memory WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn get_staged_memories(&self) -> Result<Vec<(String, String, String)>> {
+        let conn = self.get_conn();
+        let mut stmt = conn.prepare("SELECT id, content, created_at FROM episodic_memory WHERE status = 'STAGED' ORDER BY created_at DESC")?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let content: String = row.get(1)?;
+            let created: String = row.get(2)?;
+            Ok((id, content, created))
         })?;
 
         let mut results = Vec::new();
