@@ -100,7 +100,7 @@ pub struct BudgetPreset {
 pub struct Config {
     pub llm_provider: String,
     
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, default)]
     pub llm_api_key: String,
     
     pub llm_model: String,
@@ -236,12 +236,16 @@ fn default_max_memory_writes() -> u64 {
 
 impl Config {
     pub fn load() -> Self {
+        let mut config = Self::default();
+
         // 1. Try to load from kerna.toml if it exists
         let toml_path = "kerna.toml";
         if Path::new(toml_path).exists() {
             match fs::read_to_string(toml_path) {
                 Ok(content) => match toml::from_str::<Config>(&content) {
-                    Ok(config) => return config,
+                    Ok(c) => {
+                        config = c;
+                    }
                     Err(e) => {
                         eprintln!("[-] Fatal: Failed to parse kerna.toml: {}", e);
                         std::process::exit(1);
@@ -254,57 +258,34 @@ impl Config {
             }
         }
 
-        // 2. Fall back to environment variables with sensible defaults
-        let llm_provider = env::var("KERNA_LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string());
+        // 2. Fall back to environment variables for critical missing fields
+        if config.llm_provider.is_empty() {
+            config.llm_provider = env::var("KERNA_LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string());
+        }
 
-        let llm_api_key = env::var("KERNA_LLM_API_KEY")
-            .or_else(|_| env::var("OPENAI_API_KEY"))
-            .or_else(|_| env::var("ANTHROPIC_API_KEY"))
-            .unwrap_or_default();
+        if config.llm_api_key.is_empty() {
+            config.llm_api_key = env::var("KERNA_LLM_API_KEY")
+                .or_else(|_| env::var("OPENAI_API_KEY"))
+                .or_else(|_| env::var("ANTHROPIC_API_KEY"))
+                .unwrap_or_default();
+        }
 
-        let llm_model =
-            env::var("KERNA_LLM_MODEL").unwrap_or_else(|_| match llm_provider.as_str() {
+        if config.llm_model.is_empty() {
+            config.llm_model = env::var("KERNA_LLM_MODEL").unwrap_or_else(|_| match config.llm_provider.as_str() {
                 "anthropic" => "claude-sonnet-4-20250514".to_string(),
                 _ => "gpt-4o-mini".to_string(),
             });
-
-        let db_path = env::var("KERNA_DB_PATH").unwrap_or_else(|_| "kerna.db".to_string());
-        let sandbox_dir = env::var("KERNA_SANDBOX_DIR").unwrap_or_else(|_| "sandbox".to_string());
-
-        Config {
-            llm_provider,
-            llm_api_key,
-            llm_model,
-            db_path,
-            sandbox_dir,
-            memory_backend: "sqlite".to_string(),
-            allowed_directories: vec![],
-            mcp_servers: vec![],
-            schedules: vec![],
-            permissions: vec![],
-            max_retries: 3,
-            max_tool_rounds: 15,
-            runtime_mode: "native".to_string(),
-            allow_dynamic_installs: false,
-            max_runtime_seconds: 300,
-            max_tool_calls: 25,
-            max_llm_calls: 10,
-            max_cost_usd: 0.25,
-            max_output_bytes: 50000,
-            max_memory_writes: 20,
-            network_mode: "none".to_string(),
-            egress_proxy: None,
-            enable_supervisor: false,
-            converse: false,
-            credential_pool: vec![],
-            llm_fallback_provider: None,
-            llm_fallback_api_key: None,
-            presets: std::collections::HashMap::new(),
-            workspace: WorkspaceConfig::default(),
-            providers: std::collections::HashMap::new(),
-            model_routes: std::collections::HashMap::new(),
-            privacy_routes: std::collections::HashMap::new(),
         }
+
+        if config.db_path.is_empty() {
+            config.db_path = env::var("KERNA_DB_PATH").unwrap_or_else(|_| "kerna.db".to_string());
+        }
+        
+        if config.sandbox_dir.is_empty() {
+            config.sandbox_dir = env::var("KERNA_SANDBOX_DIR").unwrap_or_else(|_| "sandbox".to_string());
+        }
+
+        config
     }
 
     pub fn save(&self) {
