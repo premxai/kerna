@@ -71,6 +71,9 @@ enum Commands {
 
     /// Run the MockMCP deterministic integration test server
     Mockmcp {
+        #[arg(index = 1)]
+        action: Option<String>,
+
         #[arg(long, default_value = "normal")]
         mode: String,
     },
@@ -258,7 +261,6 @@ pub enum McpCommands {
         #[arg(index = 2)]
         command: String,
         
-        #[arg(last = true)]
         args: Vec<String>,
     },
     /// Probe an MCP server for its raw capabilities
@@ -422,7 +424,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::Mockmcp { mode }) => {
+        Some(Commands::Mockmcp { action: _, mode }) => {
             let mut server = mockmcp::MockMcpServer::new(&mode);
             if let Err(e) = server.run().await {
                 eprintln!("[-] MockMCP failed: {}", e);
