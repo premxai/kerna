@@ -24,6 +24,12 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub approval_required: Vec<String>,
 
+    #[serde(default)]
+    pub allow_tools: Vec<String>,
+
+    #[serde(default)]
+    pub deny_tools: Vec<String>,
+
     #[serde(default = "default_runtime_mode")]
     pub runtime_mode: String,
 
@@ -45,6 +51,16 @@ pub struct ScheduleConfig {
 pub struct PermissionRule {
     pub tool: String,
     pub action: String, // "auto_approve" | "require_confirmation" | "deny"
+}
+
+/// Configuration for an LLM provider (BYOK)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    #[serde(rename = "type")]
+    pub provider_type: String, // "openai", "anthropic", "openai_compatible"
+    pub api_key_env: Option<String>,
+    pub default_model: String,
+    pub base_url: Option<String>,
 }
 
 /// Workspace configuration for bounding checkpoints and execution.
@@ -83,8 +99,21 @@ pub struct BudgetPreset {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     pub llm_provider: String,
+    
+    #[serde(skip_serializing)]
     pub llm_api_key: String,
+    
     pub llm_model: String,
+
+    #[serde(default)]
+    pub providers: std::collections::HashMap<String, ProviderConfig>,
+
+    #[serde(default)]
+    pub model_routes: std::collections::HashMap<String, String>,
+
+    #[serde(default)]
+    pub privacy_routes: std::collections::HashMap<String, String>,
+
     pub db_path: String,
     pub sandbox_dir: String,
     pub memory_backend: String, // "sqlite" | "mem0" | "chroma" | "qdrant"
@@ -143,7 +172,7 @@ pub struct Config {
     #[serde(default)]
     pub llm_fallback_provider: Option<String>,
 
-    #[serde(default)]
+    #[serde(skip_serializing, default)]
     pub llm_fallback_api_key: Option<String>,
 
     #[serde(default)]
@@ -272,6 +301,15 @@ impl Config {
             llm_fallback_api_key: None,
             presets: std::collections::HashMap::new(),
             workspace: WorkspaceConfig::default(),
+            providers: std::collections::HashMap::new(),
+            model_routes: std::collections::HashMap::new(),
+            privacy_routes: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn save(&self) {
+        if let Ok(toml) = toml::to_string(self) {
+            let _ = fs::write("kerna.toml", toml);
         }
     }
 
@@ -313,4 +351,55 @@ mod tests {
         assert_eq!(conf.capabilities.len(), 1);
         assert_eq!(conf.allowed_paths[0], "/tmp");
     }
+
+    #[test]
+    fn test_provider_config_parses_correctly() {
+        let toml_str = r#"
+        llm_provider = "openai"
+        llm_api_key = "123"
+        llm_model = "gpt-4"
+        db_path = ""
+        sandbox_dir = ""
+        memory_backend = ""
+        
+        [providers.local]
+        type = "openai_compatible"
+        api_key_env = "LOCAL_API_KEY"
+        default_model = "qwen"
+        base_url = "http://localhost"
+        
+        [model_routes]
+        cheap = "local/qwen"
+        
+        [privacy_routes]
+        local_only = "cheap"
+        "#;
+        
+        let result: Result<Config, _> = toml::from_str(toml_str);
+        if let Err(e) = &result {
+            println!("Parse error: {}", e);
+        }
+        assert!(result.is_ok());
+        let conf = result.unwrap();
+        assert_eq!(conf.providers.len(), 1);
+        assert_eq!(conf.providers["local"].provider_type, "openai_compatible");
+        assert_eq!(conf.model_routes["cheap"], "local/qwen");
+        assert_eq!(conf.privacy_routes["local_only"], "cheap");
+    }
+    
+    #[test]
+    fn test_raw_api_keys_are_never_written_to_kerna_toml() {
+        let mut conf = Config::default();
+        conf.llm_api_key = "secret_sk_123456789".to_string();
+        conf.llm_fallback_api_key = Some("fallback_sk_987".to_string());
+        
+        let toml_str = toml::to_string(&conf).unwrap();
+        
+        // Assert the raw string keys do NOT appear anywhere in the output
+        assert!(!toml_str.contains("secret_sk"));
+        assert!(!toml_str.contains("fallback_sk"));
+        assert!(!toml_str.contains("llm_api_key"));
+        assert!(!toml_str.contains("llm_fallback_api_key"));
+    }
 }
+

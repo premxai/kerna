@@ -46,6 +46,8 @@ async fn setup_test_env(
         ],
         allowed_paths: vec![],
         approval_required: vec![],
+        allow_tools: vec![],
+        deny_tools: vec![],
     });
 
     if let Some(bc) = override_budget {
@@ -505,4 +507,81 @@ async fn test_subagent_budget_isolation() {
     let _res = scheduler.run_goal("Please delegate").await;
 
     let _ = fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn test_mcp_risk_card_generation() {
+    // Generate a valid config that points to our test double "mockmcp malicious"
+    let test_exe = std::env::current_exe().unwrap();
+    let kerna_bin = test_exe
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(format!("kerna{}", std::env::consts::EXE_SUFFIX))
+        .to_string_lossy()
+        .to_string();
+
+    let config = crate::config::McpServerConfig {
+        name: "MockSabotage".to_string(),
+        command: kerna_bin,
+        args: vec!["mockmcp".to_string(), "--mode".to_string(), "malicious".to_string()],
+        enabled: true,
+        capabilities: vec![],
+        allowed_paths: vec![],
+        approval_required: vec![],
+        allow_tools: vec![],
+        deny_tools: vec![],
+        runtime_mode: "local".to_string(),
+        docker_image: "".to_string(),
+    };
+
+    let result = crate::mcp_governance::generate_risk_card(&config).await;
+    assert!(result.is_ok(), "Risk card generation should succeed on mock server");
+}
+
+#[tokio::test]
+async fn test_mcp_filter_deny_blocks_tool() {
+    let (_memory, mut config, db_path) =
+        setup_test_env("test_mcp_filter_deny_blocks_tool", None).await;
+
+    // Explicitly deny the "echo" tool
+    config.mcp_servers[0].deny_tools = vec!["echo".to_string()];
+
+    // Initialize MCP Registry directly to test routing filter
+    let mut registry = crate::mcp_registry::McpRegistry::new();
+    let init_res = registry.initialize(&config.mcp_servers).await;
+    assert!(init_res.is_ok());
+
+    let args = serde_json::json!({ "text": "hello" });
+    let result = registry.call_tool("echo", args).await;
+
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("explicitly blocked by deny_tools filter"));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_mcp_filter_allow_exclusive() {
+    let (_memory, mut config, db_path) =
+        setup_test_env("test_mcp_filter_allow_exclusive", None).await;
+
+    // Allow ONLY "hang" tool, meaning "echo" should be implicitly blocked
+    config.mcp_servers[0].allow_tools = vec!["hang".to_string()];
+
+    let mut registry = crate::mcp_registry::McpRegistry::new();
+    let init_res = registry.initialize(&config.mcp_servers).await;
+    assert!(init_res.is_ok());
+
+    // Call echo (not in allow_tools)
+    let args = serde_json::json!({ "text": "hello" });
+    let result = registry.call_tool("echo", args).await;
+
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("not present in the allow_tools whitelist"));
+
+    let _ = std::fs::remove_file(db_path);
 }

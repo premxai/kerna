@@ -133,22 +133,9 @@ impl TaskScheduler {
 
             // Add built-in sandbox tools
             let mut all_tools = tool_defs;
-            all_tools.push(json!({
-            "type": "function",
-            "function": {
-                "name": "run_command",
-                "description": "Execute a command in the sandboxed terminal. Use this for file operations, scripts, and system tasks.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string", "description": "The command to run" },
-                        "args": { "type": "array", "items": { "type": "string" }, "description": "Command arguments" }
-                    },
-                    "required": ["command"]
-                }
-            }
-        }));
-
+            all_tools.extend(crate::tool_packs::get_tool_definitions());
+            
+            // Delegate task is not in packs yet, so add it here temporarily
             all_tools.push(json!({
             "type": "function",
             "function": {
@@ -160,36 +147,6 @@ impl TaskScheduler {
                         "goal": { "type": "string", "description": "The specific goal for the subagent to complete" }
                     },
                     "required": ["goal"]
-                }
-            }
-        }));
-
-            all_tools.push(json!({
-            "type": "function",
-            "function": {
-                "name": "execute_code",
-                "description": "Execute a block of Python code in the sandbox. The stdout of the script will be returned.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "code": { "type": "string", "description": "Python code to execute" }
-                    },
-                    "required": ["code"]
-                }
-            }
-        }));
-
-            all_tools.push(json!({
-            "type": "function",
-            "function": {
-                "name": "execute_wasm",
-                "description": "Execute a WASM module. The path should point to a valid .wasm file in the workspace.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "wasm_path": { "type": "string", "description": "Path to the .wasm file" }
-                    },
-                    "required": ["wasm_path"]
                 }
             }
         }));
@@ -736,7 +693,8 @@ impl TaskScheduler {
                         println!("⚠️ Memory write skipped (Budget exceeded)");
                     } else {
                         // TODO: Replace dummy embedding with actual embedding model call
-                        self.memory.add_episodic_memory(&memory_content, &[0.1, 0.2, 0.3])?;
+                        let mem_id = self.memory.add_episodic_memory(&memory_content, &[0.1, 0.2, 0.3])?;
+                        println!("⚠️ Memory proposal STAGED for approval (ID: {})", mem_id);
 
                         event_seq += 1;
                         let _ = self.memory.record(Event {
@@ -745,7 +703,7 @@ impl TaskScheduler {
                             session_id: self.session_id.clone(),
                             sequence: event_seq,
                             timestamp: chrono::Utc::now().to_rfc3339(),
-                            event_type: "memory.write.completed".to_string(),
+                            event_type: "memory.write.staged".to_string(),
                             actor: "kerna".to_string(),
                             severity: "info".to_string(),
                             model: None,
@@ -756,7 +714,7 @@ impl TaskScheduler {
                             correlation_id: None,
                             redaction_status: None,
                             budget_snapshot_json: Some(budget.get_snapshot_json()),
-                            payload_json: json!({ "content_len": memory_content.len() }),
+                            payload_json: json!({ "content_len": memory_content.len(), "memory_id": mem_id }),
                         });
                     }
 
@@ -830,18 +788,6 @@ impl TaskScheduler {
 
         // Built-in tools
         match tool_name {
-            "run_command" => {
-                let cmd = args["command"]
-                    .as_str()
-                    .ok_or_else(|| anyhow!("Missing 'command' argument"))?;
-                let args_arr: Vec<&str> = args["args"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-                    .unwrap_or_default();
-
-                let output = self.sandbox.run_command(cmd, &args_arr, 30).await?;
-                Ok(json!({ "output": output }))
-            }
             "delegate_task" => {
                 let sub_goal = args["goal"]
                     .as_str()
@@ -867,49 +813,10 @@ impl TaskScheduler {
                     json!({ "status": "Subagent completed task", "sub_task_id": sub_task_id.to_string() }),
                 )
             }
-            "execute_code" => {
-                let code = args["code"]
-                    .as_str()
-                    .ok_or_else(|| anyhow!("Missing 'code' argument"))?;
-
-                // Write the code to a temporary file in the sandbox and execute it via python3
-                let script_path =
-                    std::path::Path::new(&self.config.sandbox_dir).join("temp_exec.py");
-                std::fs::write(&script_path, code)?;
-
-                let output = self
-                    .sandbox
-                    .run_command("python3", &["temp_exec.py"], 60)
-                    .await;
-                let _ = std::fs::remove_file(script_path); // Cleanup
-
-                match output {
-                    Ok(out) => Ok(json!({ "output": out })),
-                    Err(e) => Err(anyhow!("Python execution failed: {}", e)),
-                }
+            _ => {
+                // Try tool packs
+                crate::tool_packs::execute_tool(tool_name, args, &self.sandbox).await
             }
-            "execute_wasm" => {
-                let wasm_path_str = args["wasm_path"]
-                    .as_str()
-                    .ok_or_else(|| anyhow!("Missing 'wasm_path' argument"))?;
-
-                let wasm_path = std::path::Path::new(&self.config.sandbox_dir).join(wasm_path_str);
-                if !wasm_path.exists() {
-                    return Err(anyhow!(
-                        "WASM file not found at path: {}",
-                        wasm_path.display()
-                    ));
-                }
-
-                let wasm_sandbox = crate::sandbox::WasmSandbox::new()?;
-                let output = wasm_sandbox.run_wasm_module(&wasm_path);
-
-                match output {
-                    Ok(out) => Ok(json!({ "output": out })),
-                    Err(e) => Err(anyhow!("WASM execution failed: {}", e)),
-                }
-            }
-            _ => Err(anyhow!("Unknown tool: {}", tool_name)),
         }
     }
 
@@ -1286,8 +1193,9 @@ impl TaskScheduler {
         }
 
         let memory_content = format!("Goal: {}. Completed via offline fallback.", goal);
-        self.memory
+        let mem_id = self.memory
             .add_episodic_memory(&memory_content, &[0.1, 0.2, 0.3])?;
+        println!("⚠️ Memory proposal STAGED for approval (ID: {})", mem_id);
 
         Ok(())
     }
