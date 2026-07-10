@@ -134,7 +134,7 @@ impl TaskScheduler {
             // Add built-in sandbox tools
             let mut all_tools = tool_defs;
             all_tools.extend(crate::tool_packs::get_tool_definitions());
-            
+
             // Delegate task is not in packs yet, so add it here temporarily
             all_tools.push(json!({
             "type": "function",
@@ -1193,7 +1193,8 @@ impl TaskScheduler {
         }
 
         let memory_content = format!("Goal: {}. Completed via offline fallback.", goal);
-        let mem_id = self.memory
+        let mem_id = self
+            .memory
             .add_episodic_memory(&memory_content, &[0.1, 0.2, 0.3])?;
         println!("⚠️ Memory proposal STAGED for approval (ID: {})", mem_id);
 

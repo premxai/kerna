@@ -172,7 +172,7 @@ pub enum ProviderCommands {
     Add {
         #[arg(index = 1)]
         name: String,
-        
+
         #[arg(long, default_value = "openai")]
         provider_type: String,
 
@@ -196,7 +196,7 @@ pub enum ProviderCommands {
     Route {
         #[command(subcommand)]
         action: RouteCommands,
-    }
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -207,10 +207,10 @@ pub enum RouteCommands {
     Set {
         #[arg(index = 1)]
         route_name: String,
-        
+
         #[arg(index = 2)]
         target: String, // e.g. "anthropic/claude-3-5-sonnet-latest"
-    }
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -257,10 +257,10 @@ pub enum McpCommands {
     Add {
         #[arg(index = 1)]
         name: String,
-        
+
         #[arg(index = 2)]
         command: String,
-        
+
         args: Vec<String>,
     },
     /// Probe an MCP server for its raw capabilities
@@ -306,7 +306,7 @@ pub enum FilterCommands {
     Allow {
         #[arg(index = 1)]
         server_name: String,
-        
+
         #[arg(index = 2)]
         tool_name: String,
     },
@@ -314,7 +314,7 @@ pub enum FilterCommands {
     Deny {
         #[arg(index = 1)]
         server_name: String,
-        
+
         #[arg(index = 2)]
         tool_name: String,
     },
@@ -431,31 +431,57 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::Run { goal, converse, privacy }) => {
+        Some(Commands::Run {
+            goal,
+            converse,
+            privacy,
+        }) => {
             if converse {
                 config.converse = true;
             }
 
             if let Some(priv_mode) = privacy {
                 let route_target = match priv_mode.as_str() {
-                    "public" => config.privacy_routes.get("public").map(|s| s.as_str()).unwrap_or("default"),
-                    "project" => config.privacy_routes.get("project").map(|s| s.as_str()).unwrap_or("coding"),
-                    "private" => config.privacy_routes.get("private").map(|s| s.as_str()).unwrap_or("private"),
+                    "public" => config
+                        .privacy_routes
+                        .get("public")
+                        .map(|s| s.as_str())
+                        .unwrap_or("default"),
+                    "project" => config
+                        .privacy_routes
+                        .get("project")
+                        .map(|s| s.as_str())
+                        .unwrap_or("coding"),
+                    "private" => config
+                        .privacy_routes
+                        .get("private")
+                        .map(|s| s.as_str())
+                        .unwrap_or("private"),
                     "local-only" => "local-only",
                     _ => &priv_mode,
                 };
 
                 let target_route = if route_target == "local-only" {
                     // Enforce local provider exists
-                    let has_local = config.providers.values().any(|p| p.provider_type == "openai_compatible" || p.provider_type == "local");
+                    let has_local = config.providers.values().any(|p| {
+                        p.provider_type == "openai_compatible" || p.provider_type == "local"
+                    });
                     if !has_local {
                         eprintln!("No local provider configured for local-only privacy mode.\nRun: kerna provider add local --base-url http://localhost:11434/v1");
                         std::process::exit(1);
                     }
                     // For now, if local-only, we expect a 'local' provider or 'private' route to be local
-                    config.model_routes.get("private").cloned().unwrap_or_else(|| "local/qwen2.5-coder".to_string())
+                    config
+                        .model_routes
+                        .get("private")
+                        .cloned()
+                        .unwrap_or_else(|| "local/qwen2.5-coder".to_string())
                 } else {
-                    config.model_routes.get(route_target).cloned().unwrap_or_else(|| "openai/gpt-4o-mini".to_string())
+                    config
+                        .model_routes
+                        .get(route_target)
+                        .cloned()
+                        .unwrap_or_else(|| "openai/gpt-4o-mini".to_string())
                 };
 
                 // Split into provider and model
@@ -698,7 +724,11 @@ async fn main() -> Result<()> {
 
         Some(Commands::Mcp { action }) => {
             match action {
-                Some(McpCommands::Add { name, command, args }) => {
+                Some(McpCommands::Add {
+                    name,
+                    command,
+                    args,
+                }) => {
                     if config.mcp_servers.iter().any(|s| s.name == name) {
                         eprintln!("[-] MCP server '{}' already exists.", name);
                         std::process::exit(1);
@@ -738,28 +768,56 @@ async fn main() -> Result<()> {
                         eprintln!("[-] MCP server '{}' not found in config.", name);
                     }
                 }
-                Some(McpCommands::Filter { action: filter_action }) => match filter_action {
-                    FilterCommands::Allow { server_name, tool_name } => {
-                        if let Some(server) = config.mcp_servers.iter_mut().find(|s| s.name == server_name) {
+                Some(McpCommands::Filter {
+                    action: filter_action,
+                }) => match filter_action {
+                    FilterCommands::Allow {
+                        server_name,
+                        tool_name,
+                    } => {
+                        if let Some(server) = config
+                            .mcp_servers
+                            .iter_mut()
+                            .find(|s| s.name == server_name)
+                        {
                             if !server.allow_tools.contains(&tool_name) {
                                 server.allow_tools.push(tool_name.clone());
                                 config.save();
-                                println!("[+] Added '{}' to allow_tools for '{}'", tool_name, server_name);
+                                println!(
+                                    "[+] Added '{}' to allow_tools for '{}'",
+                                    tool_name, server_name
+                                );
                             } else {
-                                println!("[-] '{}' is already in allow_tools for '{}'", tool_name, server_name);
+                                println!(
+                                    "[-] '{}' is already in allow_tools for '{}'",
+                                    tool_name, server_name
+                                );
                             }
                         } else {
                             eprintln!("[-] MCP server '{}' not found.", server_name);
                         }
                     }
-                    FilterCommands::Deny { server_name, tool_name } => {
-                        if let Some(server) = config.mcp_servers.iter_mut().find(|s| s.name == server_name) {
+                    FilterCommands::Deny {
+                        server_name,
+                        tool_name,
+                    } => {
+                        if let Some(server) = config
+                            .mcp_servers
+                            .iter_mut()
+                            .find(|s| s.name == server_name)
+                        {
                             if !server.deny_tools.contains(&tool_name) {
                                 server.deny_tools.push(tool_name.clone());
                                 config.save();
-                                println!("[+] Added '{}' to deny_tools for '{}'", tool_name, server_name);
+                                println!(
+                                    "[+] Added '{}' to deny_tools for '{}'",
+                                    tool_name, server_name
+                                );
                             } else {
-                                println!("[-] '{}' is already in deny_tools for '{}'", tool_name, server_name);
+                                println!(
+                                    "[-] '{}' is already in deny_tools for '{}'",
+                                    tool_name, server_name
+                                );
                             }
                         } else {
                             eprintln!("[-] MCP server '{}' not found.", server_name);
@@ -791,7 +849,11 @@ async fn main() -> Result<()> {
                     if let Some(server) = config.mcp_servers.iter().find(|s| s.name == name) {
                         println!("Doctoring MCP Server: {}", server.name);
                         let cmd_exists = std::path::Path::new(&server.command).exists() || {
-                            let checker = if cfg!(target_os = "windows") { "where" } else { "which" };
+                            let checker = if cfg!(target_os = "windows") {
+                                "where"
+                            } else {
+                                "which"
+                            };
                             std::process::Command::new(checker)
                                 .arg(&server.command)
                                 .stdout(std::process::Stdio::null())
@@ -800,10 +862,20 @@ async fn main() -> Result<()> {
                                 .map(|s| s.success())
                                 .unwrap_or(false)
                         };
-                        println!("  Command exists: {}", if cmd_exists { "\x1b[32mOK\x1b[0m" } else { "\x1b[31mMISSING\x1b[0m" });
+                        println!(
+                            "  Command exists: {}",
+                            if cmd_exists {
+                                "\x1b[32mOK\x1b[0m"
+                            } else {
+                                "\x1b[31mMISSING\x1b[0m"
+                            }
+                        );
                         println!("  Capabilities defined: {}", server.capabilities.len());
                         println!("  Allowed paths defined: {}", server.allowed_paths.len());
-                        println!("\n  To test transport and list tools, run `kerna mcp probe {}`", server.name);
+                        println!(
+                            "\n  To test transport and list tools, run `kerna mcp probe {}`",
+                            server.name
+                        );
                     } else {
                         eprintln!("[-] MCP server '{}' not found in config.", name);
                     }
@@ -903,17 +975,19 @@ async fn main() -> Result<()> {
                     // Initialize registry to check MCP filters
                     let mut registry = crate::mcp_registry::McpRegistry::new();
                     let _ = registry.initialize(&config.mcp_servers).await;
-                    
+
                     let mut is_allowed = true;
                     let mut reasons = vec![];
-                    
+
                     // 1. Check MCP Fast-Path filters first
                     let mcp_err = if registry.has_tool(&tool) {
                         // Pass dummy args since we only care about the routing filters
                         let res = registry.call_tool(&tool, serde_json::Value::Null).await;
                         if let Err(e) = res {
                             let e_str = e.to_string();
-                            if e_str.contains("Policy Violation") || e_str.contains("does not have capability") {
+                            if e_str.contains("Policy Violation")
+                                || e_str.contains("does not have capability")
+                            {
                                 Some(e_str)
                             } else {
                                 None
@@ -937,7 +1011,10 @@ async fn main() -> Result<()> {
                                 is_allowed = false;
                             }
                             for r in decision.reasons {
-                                if r.contains("Deny") || r.contains("RequireConfirmation") || r.contains("deny") {
+                                if r.contains("Deny")
+                                    || r.contains("RequireConfirmation")
+                                    || r.contains("deny")
+                                {
                                     reasons.push(format!("\x1b[33mGlobal Policy\x1b[0m: {}", r));
                                 } else {
                                     reasons.push(format!("\x1b[32mGlobal Policy\x1b[0m: {}", r));
@@ -958,7 +1035,7 @@ async fn main() -> Result<()> {
                         println!("  Final Decision: \x1b[1;31mDENY\x1b[0m");
                     }
                     println!("============================================================\n");
-                    
+
                     if !reasons.is_empty() {
                         println!("Evaluation Trace:");
                         for reason in reasons {
@@ -969,74 +1046,72 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Some(Commands::Memory { action }) => {
-            match action {
-                Some(MemoryCommands::Staged) => {
-                    println!("Staged Memory Proposals:\n");
-                    if let Ok(memories) = memory.get_staged_memories() {
-                        if memories.is_empty() {
-                            println!("No staged memories pending approval.");
-                        } else {
-                            for (id, content, date) in memories {
-                                println!("[ID: {}] [{}]", id, date);
-                                println!("  {}\n", content);
-                            }
-                            println!("Use `kerna memory approve <id>` or `kerna memory reject <id>`");
+        Some(Commands::Memory { action }) => match action {
+            Some(MemoryCommands::Staged) => {
+                println!("Staged Memory Proposals:\n");
+                if let Ok(memories) = memory.get_staged_memories() {
+                    if memories.is_empty() {
+                        println!("No staged memories pending approval.");
+                    } else {
+                        for (id, content, date) in memories {
+                            println!("[ID: {}] [{}]", id, date);
+                            println!("  {}\n", content);
                         }
+                        println!("Use `kerna memory approve <id>` or `kerna memory reject <id>`");
+                    }
+                } else {
+                    eprintln!("[-] Failed to read staged memories.");
+                }
+            }
+            Some(MemoryCommands::Approve { id }) => {
+                if let Err(e) = memory.approve_memory(&id) {
+                    eprintln!("[-] Failed to approve memory: {}", e);
+                } else {
+                    println!("[+] Memory {} approved and committed.", id);
+                }
+            }
+            Some(MemoryCommands::Reject { id }) => {
+                if let Err(e) = memory.reject_memory(&id) {
+                    eprintln!("[-] Failed to reject memory: {}", e);
+                } else {
+                    println!("[+] Memory {} rejected and deleted.", id);
+                }
+            }
+            Some(MemoryCommands::Search { query }) => {
+                println!("Memory Search: {}\n", query);
+                if let Ok(results) = memory.search_memory_by_text(&query, 10) {
+                    if results.is_empty() {
+                        println!("No results found.");
                     } else {
-                        eprintln!("[-] Failed to read staged memories.");
-                    }
-                }
-                Some(MemoryCommands::Approve { id }) => {
-                    if let Err(e) = memory.approve_memory(&id) {
-                        eprintln!("[-] Failed to approve memory: {}", e);
-                    } else {
-                        println!("[+] Memory {} approved and committed.", id);
-                    }
-                }
-                Some(MemoryCommands::Reject { id }) => {
-                    if let Err(e) = memory.reject_memory(&id) {
-                        eprintln!("[-] Failed to reject memory: {}", e);
-                    } else {
-                        println!("[+] Memory {} rejected and deleted.", id);
-                    }
-                }
-                Some(MemoryCommands::Search { query }) => {
-                    println!("Memory Search: {}\n", query);
-                    if let Ok(results) = memory.search_memory_by_text(&query, 10) {
-                        if results.is_empty() {
-                            println!("No results found.");
-                        } else {
-                            for r in results {
-                                println!("- {}", r);
-                            }
-                        }
-                    }
-                }
-                None => {
-                    if let Ok(memories) = memory.get_episodic_memories_by_time() {
-                        if memories.is_empty() {
-                            println!("Memory is empty.");
-                        } else {
-                            let mut current_date = String::new();
-                            for (content, _ts, date) in memories {
-                                let relative = if date == chrono::Utc::now().format("%Y-%m-%d").to_string()
-                                {
-                                    "Today"
-                                } else {
-                                    &date
-                                };
-                                if relative != current_date {
-                                    println!("\n## {}", relative);
-                                    current_date = relative.to_string();
-                                }
-                                println!("- {}", content);
-                            }
+                        for r in results {
+                            println!("- {}", r);
                         }
                     }
                 }
             }
-        }
+            None => {
+                if let Ok(memories) = memory.get_episodic_memories_by_time() {
+                    if memories.is_empty() {
+                        println!("Memory is empty.");
+                    } else {
+                        let mut current_date = String::new();
+                        for (content, _ts, date) in memories {
+                            let relative =
+                                if date == chrono::Utc::now().format("%Y-%m-%d").to_string() {
+                                    "Today"
+                                } else {
+                                    &date
+                                };
+                            if relative != current_date {
+                                println!("\n## {}", relative);
+                                current_date = relative.to_string();
+                            }
+                            println!("- {}", content);
+                        }
+                    }
+                }
+            }
+        },
 
         Some(Commands::Watch { url, interval }) => {
             println!("[*] Watchdog mode: monitoring {}", url);
@@ -1049,64 +1124,73 @@ async fn main() -> Result<()> {
             println!("[+] Watch registered as Task ID: {}", task_id);
         }
 
-        Some(Commands::Provider { action }) => {
-            match action {
-                ProviderCommands::Add { name, provider_type, api_key_env, default_model, base_url } => {
-                    let provider = config::ProviderConfig {
-                        provider_type,
-                        api_key_env,
-                        default_model,
-                        base_url,
-                    };
-                    config.providers.insert(name.clone(), provider);
-                    config.save();
-                    println!("[+] Provider '{}' added successfully.", name);
+        Some(Commands::Provider { action }) => match action {
+            ProviderCommands::Add {
+                name,
+                provider_type,
+                api_key_env,
+                default_model,
+                base_url,
+            } => {
+                let provider = config::ProviderConfig {
+                    provider_type,
+                    api_key_env,
+                    default_model,
+                    base_url,
+                };
+                config.providers.insert(name.clone(), provider);
+                config.save();
+                println!("[+] Provider '{}' added successfully.", name);
+            }
+            ProviderCommands::List => {
+                println!("Configured Providers:\n");
+                for (name, p) in &config.providers {
+                    println!(
+                        "- {} (type: {}, default_model: {})",
+                        name, p.provider_type, p.default_model
+                    );
                 }
-                ProviderCommands::List => {
-                    println!("Configured Providers:\n");
-                    for (name, p) in &config.providers {
-                        println!("- {} (type: {}, default_model: {})", name, p.provider_type, p.default_model);
-                    }
-                    if config.providers.is_empty() {
-                        println!("No providers configured.");
-                    }
-                }
-                ProviderCommands::Test { name } => {
-                    if let Some(p) = config.providers.get(&name) {
-                        println!("Testing provider '{}'...", name);
-                        println!("  Type: {}", p.provider_type);
-                        if let Some(env_var) = &p.api_key_env {
-                            if std::env::var(env_var).is_ok() {
-                                println!("  Key: Found in {}", env_var);
-                            } else {
-                                println!("  Key: \x1b[31mMISSING\x1b[0m ({})", env_var);
-                            }
-                        }
-                        println!("[+] Simulation: Connection successful.");
-                    } else {
-                        eprintln!("[-] Provider '{}' not found.", name);
-                    }
-                }
-                ProviderCommands::Route { action: route_action } => {
-                    match route_action {
-                        RouteCommands::List => {
-                            println!("Model Routes:\n");
-                            for (route, target) in &config.model_routes {
-                                println!("- {}: {}", route, target);
-                            }
-                            if config.model_routes.is_empty() {
-                                println!("No model routes configured.");
-                            }
-                        }
-                        RouteCommands::Set { route_name, target } => {
-                            config.model_routes.insert(route_name.clone(), target.clone());
-                            config.save();
-                            println!("[+] Route '{}' set to '{}'", route_name, target);
-                        }
-                    }
+                if config.providers.is_empty() {
+                    println!("No providers configured.");
                 }
             }
-        }
+            ProviderCommands::Test { name } => {
+                if let Some(p) = config.providers.get(&name) {
+                    println!("Testing provider '{}'...", name);
+                    println!("  Type: {}", p.provider_type);
+                    if let Some(env_var) = &p.api_key_env {
+                        if std::env::var(env_var).is_ok() {
+                            println!("  Key: Found in {}", env_var);
+                        } else {
+                            println!("  Key: \x1b[31mMISSING\x1b[0m ({})", env_var);
+                        }
+                    }
+                    println!("[+] Simulation: Connection successful.");
+                } else {
+                    eprintln!("[-] Provider '{}' not found.", name);
+                }
+            }
+            ProviderCommands::Route {
+                action: route_action,
+            } => match route_action {
+                RouteCommands::List => {
+                    println!("Model Routes:\n");
+                    for (route, target) in &config.model_routes {
+                        println!("- {}: {}", route, target);
+                    }
+                    if config.model_routes.is_empty() {
+                        println!("No model routes configured.");
+                    }
+                }
+                RouteCommands::Set { route_name, target } => {
+                    config
+                        .model_routes
+                        .insert(route_name.clone(), target.clone());
+                    config.save();
+                    println!("[+] Route '{}' set to '{}'", route_name, target);
+                }
+            },
+        },
 
         Some(Commands::Config { action }) => match action {
             Some(ConfigCommands::Path) => {

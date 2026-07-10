@@ -1,6 +1,6 @@
-use serde_json::{json, Value};
-use anyhow::{Result, anyhow};
 use crate::sandbox::ProcessSandbox;
+use anyhow::{anyhow, Result};
+use serde_json::{json, Value};
 
 pub fn get_tool_definitions() -> Vec<Value> {
     vec![
@@ -62,7 +62,6 @@ pub fn get_tool_definitions() -> Vec<Value> {
                 }
             }
         }),
-        
         // Shell Pack
         json!({
             "type": "function",
@@ -79,7 +78,6 @@ pub fn get_tool_definitions() -> Vec<Value> {
                 }
             }
         }),
-        
         // Artifact Pack
         json!({
             "type": "function",
@@ -106,14 +104,20 @@ pub async fn execute_tool(
 ) -> Result<Value> {
     match tool_name {
         "fs.read" => {
-            let path_str = args["path"].as_str().ok_or_else(|| anyhow!("Missing path"))?;
+            let path_str = args["path"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing path"))?;
             let path = std::path::Path::new(&sandbox.get_workspace_root()).join(path_str);
             let content = std::fs::read_to_string(path)?;
             Ok(json!({ "content": content }))
         }
         "fs.write" => {
-            let path_str = args["path"].as_str().ok_or_else(|| anyhow!("Missing path"))?;
-            let content = args["content"].as_str().ok_or_else(|| anyhow!("Missing content"))?;
+            let path_str = args["path"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing path"))?;
+            let content = args["content"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing content"))?;
             let path = std::path::Path::new(&sandbox.get_workspace_root()).join(path_str);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -122,7 +126,9 @@ pub async fn execute_tool(
             Ok(json!({ "status": "success" }))
         }
         "fs.list" => {
-            let path_str = args["path"].as_str().ok_or_else(|| anyhow!("Missing path"))?;
+            let path_str = args["path"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing path"))?;
             let path = std::path::Path::new(&sandbox.get_workspace_root()).join(path_str);
             let mut entries = Vec::new();
             if path.is_dir() {
@@ -134,7 +140,9 @@ pub async fn execute_tool(
             Ok(json!({ "entries": entries }))
         }
         "fs.delete" => {
-            let path_str = args["path"].as_str().ok_or_else(|| anyhow!("Missing path"))?;
+            let path_str = args["path"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing path"))?;
             let path = std::path::Path::new(&sandbox.get_workspace_root()).join(path_str);
             if path.is_dir() {
                 std::fs::remove_dir_all(path)?;
@@ -144,7 +152,9 @@ pub async fn execute_tool(
             Ok(json!({ "status": "deleted" }))
         }
         "shell.exec" => {
-            let cmd = args["command"].as_str().ok_or_else(|| anyhow!("Missing command"))?;
+            let cmd = args["command"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing command"))?;
             let args_arr: Vec<&str> = args["args"]
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
@@ -153,10 +163,16 @@ pub async fn execute_tool(
             Ok(json!({ "output": output }))
         }
         "artifact.write_markdown" => {
-            let title = args["title"].as_str().ok_or_else(|| anyhow!("Missing title"))?;
-            let content = args["content"].as_str().ok_or_else(|| anyhow!("Missing content"))?;
+            let title = args["title"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing title"))?;
+            let content = args["content"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing content"))?;
             let safe_title = title.replace(" ", "_").to_lowercase() + ".md";
-            let path = std::path::Path::new(&sandbox.get_workspace_root()).join("artifacts").join(&safe_title);
+            let path = std::path::Path::new(&sandbox.get_workspace_root())
+                .join("artifacts")
+                .join(&safe_title);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }

@@ -79,7 +79,6 @@ impl ProcessSandbox {
         &self.sandbox_dir
     }
 
-
     pub fn snapshot(&self) -> Result<()> {
         let parent = self.sandbox_dir.parent().unwrap_or(&self.sandbox_dir);
         let name = self

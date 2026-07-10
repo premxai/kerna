@@ -148,7 +148,9 @@ impl McpRegistry {
 
         if let Some(config) = self.server_configs.get(&server_name) {
             // 1. Enforce deny_tools instantly
-            if config.deny_tools.contains(&tool_name.to_string()) || config.deny_tools.contains(&"*".to_string()) {
+            if config.deny_tools.contains(&tool_name.to_string())
+                || config.deny_tools.contains(&"*".to_string())
+            {
                 return Err(anyhow!(
                     "Policy Violation: Tool '{}' on server '{}' is explicitly blocked by deny_tools filter.",
                     tool_name,
@@ -157,9 +159,9 @@ impl McpRegistry {
             }
 
             // 2. Enforce allow_tools instantly
-            if !config.allow_tools.is_empty() 
+            if !config.allow_tools.is_empty()
                 && !config.allow_tools.contains(&tool_name.to_string())
-                && !config.allow_tools.contains(&"*".to_string()) 
+                && !config.allow_tools.contains(&"*".to_string())
             {
                 return Err(anyhow!(
                     "Policy Violation: Tool '{}' on server '{}' is not present in the allow_tools whitelist.",

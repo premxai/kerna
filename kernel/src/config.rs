@@ -99,10 +99,10 @@ pub struct BudgetPreset {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     pub llm_provider: String,
-    
+
     #[serde(skip_serializing, default)]
     pub llm_api_key: String,
-    
+
     pub llm_model: String,
 
     #[serde(default)]
@@ -260,7 +260,8 @@ impl Config {
 
         // 2. Fall back to environment variables for critical missing fields
         if config.llm_provider.is_empty() {
-            config.llm_provider = env::var("KERNA_LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string());
+            config.llm_provider =
+                env::var("KERNA_LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string());
         }
 
         if config.llm_api_key.is_empty() {
@@ -271,18 +272,21 @@ impl Config {
         }
 
         if config.llm_model.is_empty() {
-            config.llm_model = env::var("KERNA_LLM_MODEL").unwrap_or_else(|_| match config.llm_provider.as_str() {
-                "anthropic" => "claude-sonnet-4-20250514".to_string(),
-                _ => "gpt-4o-mini".to_string(),
+            config.llm_model = env::var("KERNA_LLM_MODEL").unwrap_or_else(|_| {
+                match config.llm_provider.as_str() {
+                    "anthropic" => "claude-sonnet-4-20250514".to_string(),
+                    _ => "gpt-4o-mini".to_string(),
+                }
             });
         }
 
         if config.db_path.is_empty() {
             config.db_path = env::var("KERNA_DB_PATH").unwrap_or_else(|_| "kerna.db".to_string());
         }
-        
+
         if config.sandbox_dir.is_empty() {
-            config.sandbox_dir = env::var("KERNA_SANDBOX_DIR").unwrap_or_else(|_| "sandbox".to_string());
+            config.sandbox_dir =
+                env::var("KERNA_SANDBOX_DIR").unwrap_or_else(|_| "sandbox".to_string());
         }
 
         config
@@ -355,7 +359,7 @@ mod tests {
         [privacy_routes]
         local_only = "cheap"
         "#;
-        
+
         let result: Result<Config, _> = toml::from_str(toml_str);
         if let Err(e) = &result {
             println!("Parse error: {}", e);
@@ -367,15 +371,15 @@ mod tests {
         assert_eq!(conf.model_routes["cheap"], "local/qwen");
         assert_eq!(conf.privacy_routes["local_only"], "cheap");
     }
-    
+
     #[test]
     fn test_raw_api_keys_are_never_written_to_kerna_toml() {
         let mut conf = Config::default();
         conf.llm_api_key = "secret_sk_123456789".to_string();
         conf.llm_fallback_api_key = Some("fallback_sk_987".to_string());
-        
+
         let toml_str = toml::to_string(&conf).unwrap();
-        
+
         // Assert the raw string keys do NOT appear anywhere in the output
         assert!(!toml_str.contains("secret_sk"));
         assert!(!toml_str.contains("fallback_sk"));
@@ -383,4 +387,3 @@ mod tests {
         assert!(!toml_str.contains("llm_fallback_api_key"));
     }
 }
-

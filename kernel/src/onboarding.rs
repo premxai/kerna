@@ -1,6 +1,6 @@
 use crate::config::{BudgetPreset, Config, PermissionRule};
-use console::{style, Term};
-use dialoguer::{theme::ColorfulTheme, Confirm, Select};
+use console::style;
+use dialoguer::{theme::ColorfulTheme, Select};
 use std::collections::HashMap;
 use std::fs;
 
@@ -12,8 +12,6 @@ pub fn run_onboarding(
     provider_flag: Option<String>,
     model_flag: Option<String>,
 ) {
-    let term = Term::stdout();
-
     if no_setup {
         // Just return, user requested no setup
         return;

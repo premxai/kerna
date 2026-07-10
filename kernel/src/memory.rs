@@ -102,7 +102,10 @@ impl MemoryEngine {
         .context("Failed to create episodic_memory table")?;
 
         // Migration: add status column if it doesn't exist
-        let _ = conn.execute("ALTER TABLE episodic_memory ADD COLUMN status TEXT DEFAULT 'STAGED';", []);
+        let _ = conn.execute(
+            "ALTER TABLE episodic_memory ADD COLUMN status TEXT DEFAULT 'STAGED';",
+            [],
+        );
 
         // Create user_preferences table (key-value store for user memory)
         conn.execute(
@@ -400,7 +403,9 @@ impl MemoryEngine {
     ) -> Result<Vec<(String, f32)>> {
         let conn = self.get_conn();
         // Only return APPROVED memories
-        let mut stmt = conn.prepare("SELECT content, embedding_json FROM episodic_memory WHERE status = 'APPROVED'")?;
+        let mut stmt = conn.prepare(
+            "SELECT content, embedding_json FROM episodic_memory WHERE status = 'APPROVED'",
+        )?;
         let rows = stmt.query_map([], |row| {
             let content: String = row.get(0)?;
             let embedding_json: String = row.get(1)?;
@@ -461,7 +466,10 @@ impl MemoryEngine {
 
     pub fn approve_memory(&self, id: &str) -> Result<()> {
         let conn = self.get_conn();
-        conn.execute("UPDATE episodic_memory SET status = 'APPROVED' WHERE id = ?1", params![id])?;
+        conn.execute(
+            "UPDATE episodic_memory SET status = 'APPROVED' WHERE id = ?1",
+            params![id],
+        )?;
         Ok(())
     }
 

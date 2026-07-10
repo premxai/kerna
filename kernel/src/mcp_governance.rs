@@ -1,83 +1,70 @@
-use anyhow::Result;
 use crate::config::McpServerConfig;
 use crate::mcp::McpClient;
+use anyhow::Result;
 use std::time::Duration;
 use tokio::time::timeout;
 
 pub async fn probe(server_config: &McpServerConfig) -> Result<()> {
     println!("[*] Probing MCP Server: {}", server_config.name);
-    
+
     // Convert Vec<String> to Vec<&str>
     let args: Vec<&str> = server_config.args.iter().map(|s| s.as_str()).collect();
-    
+
     // We will use local runtime mode for probing, but sandbox is preferred.
     // For now we'll just run it locally since we're just inspecting.
-    let mut client = McpClient::spawn(
-        &server_config.command,
-        &args,
-        "local",
-        "",
-        "none",
-        None,
-    )?;
+    let mut client = McpClient::spawn(&server_config.command, &args, "local", "", "none", None)?;
 
     timeout(Duration::from_secs(5), client.initialize()).await??;
     println!("[+] Connection successful");
     println!("    Transport: stdio");
-    println!("    Command: {} {:?}", server_config.command, server_config.args);
-    
+    println!(
+        "    Command: {} {:?}",
+        server_config.command, server_config.args
+    );
+
     let tools = timeout(Duration::from_secs(5), client.list_tools()).await??;
     println!("[+] Discovered {} tools", tools.len());
-    
+
     Ok(())
 }
 
 pub async fn inspect(server_config: &McpServerConfig) -> Result<()> {
     println!("[*] Inspecting MCP Server: {}", server_config.name);
-    
+
     let args: Vec<&str> = server_config.args.iter().map(|s| s.as_str()).collect();
-    let mut client = McpClient::spawn(
-        &server_config.command,
-        &args,
-        "local",
-        "",
-        "none",
-        None,
-    )?;
+    let mut client = McpClient::spawn(&server_config.command, &args, "local", "", "none", None)?;
 
     timeout(Duration::from_secs(5), client.initialize()).await??;
     let tools = timeout(Duration::from_secs(5), client.list_tools()).await??;
-    
+
     println!("[+] Raw Tools Extracted:");
     for tool in tools {
-        println!("  - {}: {:?}", tool.name, tool.description.unwrap_or_default());
+        println!(
+            "  - {}: {:?}",
+            tool.name,
+            tool.description.unwrap_or_default()
+        );
     }
-    
+
     Ok(())
 }
 
 pub async fn generate_risk_card(server_config: &McpServerConfig) -> Result<()> {
     let args: Vec<&str> = server_config.args.iter().map(|s| s.as_str()).collect();
-    let mut client = match McpClient::spawn(
-        &server_config.command,
-        &args,
-        "local",
-        "",
-        "none",
-        None,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            println!("\n[-] Failed to spawn plugin: {}", e);
-            return Err(e);
-        }
-    };
+    let mut client =
+        match McpClient::spawn(&server_config.command, &args, "local", "", "none", None) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("\n[-] Failed to spawn plugin: {}", e);
+                return Err(e);
+            }
+        };
 
     if let Err(e) = timeout(Duration::from_secs(5), client.initialize()).await {
         println!("\n[-] Failed to initialize plugin: {}", e);
         return Err(anyhow::anyhow!("Init timeout"));
     }
-    
+
     let tools = match timeout(Duration::from_secs(5), client.list_tools()).await {
         Ok(Ok(t)) => t,
         _ => {
@@ -85,38 +72,59 @@ pub async fn generate_risk_card(server_config: &McpServerConfig) -> Result<()> {
             return Err(anyhow::anyhow!("List tools timeout"));
         }
     };
-    
+
     let mut auto_allow = Vec::new();
     let mut require_approval = Vec::new();
     let mut deny = Vec::new();
-    
+
     for tool in &tools {
         let name_lower = tool.name.to_lowercase();
-        
+
         // 1. Explicit Config Overrides
-        if server_config.deny_tools.contains(&tool.name) || server_config.deny_tools.contains(&"*".to_string()) {
+        if server_config.deny_tools.contains(&tool.name)
+            || server_config.deny_tools.contains(&"*".to_string())
+        {
             deny.push(format!("{} (explicitly blocked by deny_tools)", tool.name));
             continue;
         }
-        if !server_config.allow_tools.is_empty() && !server_config.allow_tools.contains(&tool.name) && !server_config.allow_tools.contains(&"*".to_string()) {
-            deny.push(format!("{} (implicitly blocked by allow_tools whitelist)", tool.name));
+        if !server_config.allow_tools.is_empty()
+            && !server_config.allow_tools.contains(&tool.name)
+            && !server_config.allow_tools.contains(&"*".to_string())
+        {
+            deny.push(format!(
+                "{} (implicitly blocked by allow_tools whitelist)",
+                tool.name
+            ));
             continue;
         }
-        if server_config.approval_required.contains(&tool.name) || server_config.approval_required.contains(&"*".to_string()) {
+        if server_config.approval_required.contains(&tool.name)
+            || server_config.approval_required.contains(&"*".to_string())
+        {
             require_approval.push(format!("{} (explicitly requires approval)", tool.name));
             continue;
         }
 
         // 2. Basic heuristic risk scoring
-        if name_lower.contains("delete") || name_lower.contains("drop") || name_lower.contains("remove") || name_lower.contains("destroy") || name_lower.contains("kill") {
+        if name_lower.contains("delete")
+            || name_lower.contains("drop")
+            || name_lower.contains("remove")
+            || name_lower.contains("destroy")
+            || name_lower.contains("kill")
+        {
             require_approval.push(format!("{} (heuristic: dangerous action)", tool.name));
-        } else if name_lower.contains("create") || name_lower.contains("write") || name_lower.contains("update") || name_lower.contains("insert") || name_lower.contains("post") || name_lower.contains("execute") {
+        } else if name_lower.contains("create")
+            || name_lower.contains("write")
+            || name_lower.contains("update")
+            || name_lower.contains("insert")
+            || name_lower.contains("post")
+            || name_lower.contains("execute")
+        {
             require_approval.push(format!("{} (heuristic: mutating action)", tool.name));
         } else {
             auto_allow.push(tool.name.clone());
         }
     }
-    
+
     let (risk_level_text, risk_color) = if !deny.is_empty() {
         ("High", "\x1b[31m") // Red
     } else if !require_approval.is_empty() {
@@ -130,12 +138,18 @@ pub async fn generate_risk_card(server_config: &McpServerConfig) -> Result<()> {
     println!("  Risk Card: {} MCP", server_config.name);
     println!("  Risk Level: {}{}{}", risk_color, risk_level_text, reset);
     println!("============================================================\n");
-    
+
     println!("Security Scan Summary:");
     println!("  - Tools discovered: {}", tools.len());
-    println!("  - Explicit Deny rules: {}", server_config.deny_tools.len());
-    println!("  - Explicit Allow rules: {}\n", server_config.allow_tools.len());
-    
+    println!(
+        "  - Explicit Deny rules: {}",
+        server_config.deny_tools.len()
+    );
+    println!(
+        "  - Explicit Allow rules: {}\n",
+        server_config.allow_tools.len()
+    );
+
     if !auto_allow.is_empty() {
         println!("🟢 Auto-allow (Read-only / Safe):");
         for t in auto_allow {
@@ -143,7 +157,7 @@ pub async fn generate_risk_card(server_config: &McpServerConfig) -> Result<()> {
         }
         println!();
     }
-    
+
     if !require_approval.is_empty() {
         println!("🟡 Require Approval (Mutating / Dangerous):");
         for t in require_approval {
@@ -151,7 +165,7 @@ pub async fn generate_risk_card(server_config: &McpServerConfig) -> Result<()> {
         }
         println!();
     }
-    
+
     if !deny.is_empty() {
         println!("🔴 Deny by Default (Blocked):");
         for t in deny {
@@ -159,7 +173,6 @@ pub async fn generate_risk_card(server_config: &McpServerConfig) -> Result<()> {
         }
         println!();
     }
-    
+
     Ok(())
 }
-

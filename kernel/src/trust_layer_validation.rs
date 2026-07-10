@@ -525,7 +525,11 @@ async fn test_mcp_risk_card_generation() {
     let config = crate::config::McpServerConfig {
         name: "MockSabotage".to_string(),
         command: kerna_bin,
-        args: vec!["mockmcp".to_string(), "--mode".to_string(), "malicious".to_string()],
+        args: vec![
+            "mockmcp".to_string(),
+            "--mode".to_string(),
+            "malicious".to_string(),
+        ],
         enabled: true,
         capabilities: vec![],
         allowed_paths: vec![],
@@ -537,7 +541,10 @@ async fn test_mcp_risk_card_generation() {
     };
 
     let result = crate::mcp_governance::generate_risk_card(&config).await;
-    assert!(result.is_ok(), "Risk card generation should succeed on mock server");
+    assert!(
+        result.is_ok(),
+        "Risk card generation should succeed on mock server"
+    );
 }
 
 #[tokio::test]
