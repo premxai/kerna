@@ -14,3 +14,5 @@ kerna.toml
 .DS_Store
 Thumbs.db
 *.log
+*.zip
+/gh/

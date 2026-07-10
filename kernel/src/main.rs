@@ -11,6 +11,7 @@ mod mockmcp;
 mod onboarding;
 mod permissions;
 pub mod plugin_manifest;
+pub mod providers;
 mod sandbox;
 mod scheduler;
 mod security;
@@ -67,6 +68,15 @@ enum Commands {
     Serve {
         #[arg(short, long, default_value = "8080")]
         port: u16,
+
+        /// Address to bind. Defaults to loopback; use 0.0.0.0 to expose on the
+        /// network (requires --token).
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+
+        /// Bearer token required on requests. Mandatory when binding a non-loopback address.
+        #[arg(long)]
+        token: Option<String>,
     },
 
     /// Run the MockMCP deterministic integration test server
@@ -164,6 +174,24 @@ enum Commands {
         #[command(subcommand)]
         action: ProviderCommands,
     },
+
+    /// Manage LLM API keys (guided setup; keys live in environment variables)
+    Keys {
+        #[command(subcommand)]
+        action: KeysCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum KeysCommands {
+    /// Show setup instructions for a provider's API key and optionally validate it
+    Add {
+        /// Provider name (built-in preset or a configured provider)
+        #[arg(index = 1)]
+        provider: String,
+    },
+    /// List every known provider and whether its API key is set
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -173,14 +201,14 @@ pub enum ProviderCommands {
         #[arg(index = 1)]
         name: String,
 
-        #[arg(long, default_value = "openai")]
-        provider_type: String,
+        #[arg(long)]
+        provider_type: Option<String>,
 
         #[arg(long)]
         api_key_env: Option<String>,
 
-        #[arg(long, default_value = "gpt-4o-mini")]
-        default_model: String,
+        #[arg(long)]
+        default_model: Option<String>,
 
         #[arg(long)]
         base_url: Option<String>,
@@ -344,6 +372,88 @@ enum TaskCommands {
     },
 }
 
+/// Lightweight live check that an API key reaches the provider. Uses a cheap
+/// read-only endpoint (`GET /models` for OpenAI-compatible hosts, a 1-token
+/// message for Anthropic). Returns the model name on success.
+async fn validate_key(config: &Config, provider: &str, key: &str) -> Result<String> {
+    use providers::WireProtocol;
+    let resolved = providers::resolve(config, provider, None, key)?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+
+    match resolved.protocol {
+        WireProtocol::Mock => Ok("mock".to_string()),
+        WireProtocol::OpenAiCompat => {
+            let url = format!("{}/models", resolved.base_url.trim_end_matches('/'));
+            let resp = client
+                .get(&url)
+                .bearer_auth(&resolved.api_key)
+                .send()
+                .await?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                return Err(anyhow::anyhow!("401 Unauthorized — key rejected"));
+            }
+            if !resp.status().is_success() {
+                return Err(anyhow::anyhow!("HTTP {}", resp.status()));
+            }
+            Ok(resolved.model)
+        }
+        WireProtocol::Anthropic => {
+            let url = format!("{}/v1/messages", resolved.base_url.trim_end_matches('/'));
+            let body = serde_json::json!({
+                "model": resolved.model,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hi"}]
+            });
+            let resp = client
+                .post(&url)
+                .header("x-api-key", &resolved.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+                .send()
+                .await?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                return Err(anyhow::anyhow!("401 Unauthorized — key rejected"));
+            }
+            if !resp.status().is_success() {
+                return Err(anyhow::anyhow!("HTTP {}", resp.status()));
+            }
+            Ok(resolved.model)
+        }
+    }
+}
+
+/// Resolve a task-id argument, expanding the `last` alias to the most recently
+/// created task. Exits with a friendly message if there is nothing to resolve.
+fn resolve_task_id(memory: &MemoryEngine, arg: &str) -> String {
+    if arg == "last" {
+        match memory.get_last_task_id() {
+            Ok(Some(id)) => id,
+            _ => {
+                eprintln!("[-] No tasks recorded yet. Run `kerna run <goal>` first.");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        arg.to_string()
+    }
+}
+
+/// Whether a command needs live MCP plugins spawned into the shared registry.
+/// `mcp probe/inspect/risk/doctor` spawn their own short-lived clients, so they
+/// don't need the shared registry pre-initialized.
+fn command_needs_mcp(command: &Option<Commands>) -> bool {
+    matches!(
+        command,
+        Some(Commands::Run { .. })
+            | Some(Commands::Serve { .. })
+            | Some(Commands::Daemon)
+            | Some(Commands::Top)
+            | Some(Commands::Watch { .. })
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // We rely on the local ctrl_c wait in Daemon instead of global exit(0)
@@ -357,8 +467,11 @@ async fn main() -> Result<()> {
     // Initialize MCP Registry
     let mcp_registry = Arc::new(Mutex::new(McpRegistry::new()));
 
-    // Spawn registered MCP servers
-    if !config.mcp_servers.is_empty() {
+    // Only spawn MCP plugins for commands that actually invoke live tools.
+    // Read-only/observability commands (trace, inspect, task, memory, config,
+    // policy, provider, keys, doctor) operate purely on SQLite + config and must
+    // not pay the cost — or print the banner — of booting every plugin.
+    if !config.mcp_servers.is_empty() && command_needs_mcp(&cli.command) {
         let mut registry = mcp_registry.lock().await;
         if let Err(e) = registry.initialize(&config.mcp_servers).await {
             eprintln!("[!] Plugin initialization warning: {}", e);
@@ -413,13 +526,25 @@ async fn main() -> Result<()> {
             println!("\n[+] Daemon stopped cleanly.");
         }
 
-        Some(Commands::Serve { port }) => {
+        Some(Commands::Serve { port, bind, token }) => {
+            let is_loopback = bind == "127.0.0.1" || bind == "localhost" || bind == "::1";
+            if !is_loopback && token.is_none() {
+                eprintln!(
+                    "[-] Refusing to bind non-loopback address '{}' without authentication.\n    Pass --token <secret> to require a bearer token, or bind 127.0.0.1 for local-only use.",
+                    bind
+                );
+                std::process::exit(1);
+            }
+            if token.is_none() {
+                println!("[i] No --token set: this server is loopback-only and unauthenticated.");
+            }
             let state = server::AppState {
                 config: config.clone(),
                 memory: memory.clone(),
                 mcp_registry: mcp_registry.clone(),
+                auth_token: token,
             };
-            if let Err(e) = server::start_server(state, port).await {
+            if let Err(e) = server::start_server(state, &bind, port).await {
                 eprintln!("[-] Server failed: {}", e);
             }
         }
@@ -490,6 +615,30 @@ async fn main() -> Result<()> {
                     config.llm_provider = parts[0].to_string();
                     config.llm_model = parts[1].to_string();
                 }
+
+                // Fail-closed guarantee: `local-only` must resolve to a loopback
+                // endpoint. Refuse to run if data could leave the machine.
+                if priv_mode == "local-only" {
+                    match providers::resolve(
+                        &config,
+                        &config.llm_provider,
+                        Some(&config.llm_model),
+                        &config.llm_api_key,
+                    ) {
+                        Ok(resolved) if resolved.is_local() => {}
+                        Ok(resolved) => {
+                            eprintln!(
+                                "[-] Privacy violation: --privacy local-only resolved to a non-local endpoint ({}).\n    Configure a local provider (e.g. `kerna provider add ollama --base-url http://localhost:11434/v1`).",
+                                resolved.base_url
+                            );
+                            std::process::exit(1);
+                        }
+                        Err(e) => {
+                            eprintln!("[-] Cannot enforce local-only privacy: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
             }
 
             let mut final_goal = goal.clone();
@@ -541,6 +690,7 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::Inspect { task_id }) => {
+            let task_id = resolve_task_id(&memory, &task_id);
             match memory.get_task_observability(&task_id) {
                 Ok((goal, status, _created, dur, llm, cost, _tokens, retries)) => {
                     println!("Goal:\n{}\n", goal);
@@ -613,6 +763,7 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::Explain { task_id }) => {
+            let task_id = resolve_task_id(&memory, &task_id);
             println!("Reasoning Chain for Task {}:\n", task_id);
             if let Ok(logs) = memory.get_task_logs(&task_id) {
                 if logs.is_empty() {
@@ -655,6 +806,7 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::Trace { task_id }) => {
+            let task_id = resolve_task_id(&memory, &task_id);
             println!("Event Trace for Task {}:\n", task_id);
             if let Ok(events) = memory.get_events(&task_id) {
                 if events.is_empty() {
@@ -917,14 +1069,47 @@ async fn main() -> Result<()> {
                 Err(e) => println!("Database: ERROR ({})", e),
             }
 
+            // Active provider + per-provider key status.
             println!(
-                "LLM Key: {}",
+                "Active provider: {} (model: {})",
+                config.llm_provider, config.llm_model
+            );
+            println!(
+                "  Active key: {}",
                 if config.llm_api_key.is_empty() {
-                    "MISSING"
+                    "\x1b[31mMISSING\x1b[0m"
                 } else {
-                    "OK"
+                    "\x1b[32mOK\x1b[0m"
                 }
             );
+
+            let mut key_names: Vec<String> = config.providers.keys().cloned().collect();
+            if !key_names.contains(&config.llm_provider) && config.llm_provider != "mock" {
+                key_names.push(config.llm_provider.clone());
+            }
+            if !key_names.is_empty() {
+                println!("Configured provider keys:");
+                for name in &key_names {
+                    let env_var = providers::api_key_env_for(&config, name);
+                    let local = providers::preset_info(name)
+                        .map(|p| {
+                            let l = p.base_url.to_lowercase();
+                            l.contains("://localhost") || l.contains("://127.0.0.1")
+                        })
+                        .unwrap_or(false);
+                    let status = if local {
+                        "\x1b[32mlocal (no key needed)\x1b[0m".to_string()
+                    } else if std::env::var(&env_var)
+                        .map(|v| !v.trim().is_empty())
+                        .unwrap_or(false)
+                    {
+                        "\x1b[32mset\x1b[0m".to_string()
+                    } else {
+                        format!("\x1b[31mmissing\x1b[0m ({})", env_var)
+                    };
+                    println!("  - {:<12} {}", name, status);
+                }
+            }
 
             let mut valid_plugins = 0;
             for server in &config.mcp_servers {
@@ -1132,27 +1317,61 @@ async fn main() -> Result<()> {
                 default_model,
                 base_url,
             } => {
+                // Pre-fill from the built-in preset when flags are omitted, so
+                // `kerna provider add ollama` works with zero extra arguments.
+                let preset = providers::preset_info(&name);
                 let provider = config::ProviderConfig {
-                    provider_type,
-                    api_key_env,
-                    default_model,
-                    base_url,
+                    provider_type: provider_type
+                        .or_else(|| preset.as_ref().map(|p| p.provider_type.clone()))
+                        .unwrap_or_else(|| "openai_compatible".to_string()),
+                    api_key_env: api_key_env
+                        .or_else(|| preset.as_ref().map(|p| p.api_key_env.clone())),
+                    default_model: default_model
+                        .or_else(|| preset.as_ref().map(|p| p.default_model.clone()))
+                        .unwrap_or_default(),
+                    base_url: base_url.or_else(|| preset.as_ref().map(|p| p.base_url.clone())),
                 };
+                let key_env = provider
+                    .api_key_env
+                    .clone()
+                    .unwrap_or_else(|| "KERNA_LLM_API_KEY".to_string());
                 config.providers.insert(name.clone(), provider);
                 config.save();
-                println!("[+] Provider '{}' added successfully.", name);
+                println!("[+] Provider '{}' added.", name);
+                println!("    Set the API key with:  kerna keys add {}", name);
+                println!("    (reads environment variable {})", key_env);
             }
             ProviderCommands::List => {
                 println!("Configured Providers:\n");
                 for (name, p) in &config.providers {
+                    let env = p.api_key_env.as_deref().unwrap_or("KERNA_LLM_API_KEY");
+                    let is_local = p
+                        .base_url
+                        .as_deref()
+                        .map(|u| {
+                            let l = u.to_lowercase();
+                            l.contains("://localhost") || l.contains("://127.0.0.1")
+                        })
+                        .unwrap_or(false);
+                    let status = if is_local {
+                        "\x1b[32mlocal (no key needed)\x1b[0m"
+                    } else if std::env::var(env).is_ok() {
+                        "\x1b[32mkey set\x1b[0m"
+                    } else {
+                        "\x1b[31mkey missing\x1b[0m"
+                    };
                     println!(
-                        "- {} (type: {}, default_model: {})",
-                        name, p.provider_type, p.default_model
+                        "- {} (type: {}, model: {}, {})",
+                        name, p.provider_type, p.default_model, status
                     );
                 }
                 if config.providers.is_empty() {
-                    println!("No providers configured.");
+                    println!("No custom providers configured.");
                 }
+                println!(
+                    "\nBuilt-in presets available: {}",
+                    providers::builtin_names().join(", ")
+                );
             }
             ProviderCommands::Test { name } => {
                 if let Some(p) = config.providers.get(&name) {
@@ -1191,6 +1410,120 @@ async fn main() -> Result<()> {
                 }
             },
         },
+
+        Some(Commands::Keys { action }) => {
+            match action {
+                KeysCommands::Add { provider } => {
+                    let env_var = providers::api_key_env_for(&config, &provider);
+                    let is_known = config.providers.contains_key(&provider)
+                        || providers::preset_info(&provider).is_some()
+                        || provider == "mock";
+
+                    if !is_known {
+                        eprintln!(
+                            "[-] Unknown provider '{}'. Built-in presets: {}.",
+                            provider,
+                            providers::builtin_names().join(", ")
+                        );
+                        eprintln!(
+                        "    Add a custom provider first: kerna provider add {} --base-url <url>",
+                        provider
+                    );
+                        std::process::exit(1);
+                    }
+
+                    // Local runtimes (Ollama) need no key.
+                    let local = providers::preset_info(&provider)
+                        .map(|p| {
+                            let l = p.base_url.to_lowercase();
+                            l.contains("://localhost") || l.contains("://127.0.0.1")
+                        })
+                        .unwrap_or(false);
+                    if local {
+                        println!(
+                            "Provider '{}' runs locally and needs no API key. You're ready to go:",
+                            provider
+                        );
+                        println!("  kerna run \"Summarize README.md\" --privacy local-only");
+                        return Ok(());
+                    }
+
+                    println!(
+                        "Set your {} API key via the {} environment variable.\n",
+                        provider, env_var
+                    );
+                    println!("  PowerShell (current session):");
+                    println!("    $env:{} = \"<your-key>\"", env_var);
+                    println!("  PowerShell (persist for future sessions):");
+                    println!("    setx {} \"<your-key>\"", env_var);
+                    println!("  bash / zsh:");
+                    println!("    export {}=<your-key>\n", env_var);
+                    println!("Kerna never writes your key to disk — it is read from the environment at run time.\n");
+
+                    match std::env::var(&env_var) {
+                        Ok(key) if !key.trim().is_empty() => {
+                            println!(
+                                "[✓] {} is currently set in this shell. Validating...",
+                                env_var
+                            );
+                            match validate_key(&config, &provider, &key).await {
+                                Ok(model) => {
+                                    println!(
+                                        "[✓] Key works. Reached provider '{}' (model: {}).",
+                                        provider, model
+                                    )
+                                }
+                                Err(e) => {
+                                    println!("[!] Key is set but validation failed: {}", e);
+                                    println!("    Double-check the key value and the provider's base URL.");
+                                }
+                            }
+                        }
+                        _ => {
+                            println!(
+                            "[i] {} is not set in this shell yet. Set it with a command above, then re-run:",
+                            env_var
+                        );
+                            println!("    kerna keys add {}", provider);
+                        }
+                    }
+                }
+                KeysCommands::List => {
+                    println!("API key status:\n");
+                    // Union of configured providers and built-in presets.
+                    let mut names: Vec<String> = providers::builtin_names()
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+                    for name in config.providers.keys() {
+                        if !names.contains(name) {
+                            names.push(name.clone());
+                        }
+                    }
+                    for name in names {
+                        let env_var = providers::api_key_env_for(&config, &name);
+                        let local = providers::preset_info(&name)
+                            .map(|p| {
+                                let l = p.base_url.to_lowercase();
+                                l.contains("://localhost") || l.contains("://127.0.0.1")
+                            })
+                            .unwrap_or(false);
+                        let status = if local {
+                            "\x1b[32mlocal (no key needed)\x1b[0m".to_string()
+                        } else if std::env::var(&env_var)
+                            .map(|v| !v.trim().is_empty())
+                            .unwrap_or(false)
+                        {
+                            "\x1b[32mset\x1b[0m".to_string()
+                        } else {
+                            format!("\x1b[31mmissing\x1b[0m (set {})", env_var)
+                        };
+                        println!("  {:<12} {}", name, status);
+                    }
+                    println!("\nAdd a key with:  kerna keys add <provider>");
+                }
+            }
+        }
 
         Some(Commands::Config { action }) => match action {
             Some(ConfigCommands::Path) => {

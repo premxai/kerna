@@ -104,24 +104,66 @@ pub async fn generate_risk_card(server_config: &McpServerConfig) -> Result<()> {
             continue;
         }
 
-        // 2. Basic heuristic risk scoring
-        if name_lower.contains("delete")
-            || name_lower.contains("drop")
-            || name_lower.contains("remove")
-            || name_lower.contains("destroy")
-            || name_lower.contains("kill")
-        {
+        // 2. Heuristic risk scoring. Fail-closed: a tool is auto-allowed ONLY
+        //    when its name clearly denotes a read-only operation. Anything
+        //    dangerous, sensitive, mutating, OR unrecognized requires review.
+        //    Heuristics may only raise risk, never lower it.
+        let has = |needles: &[&str]| needles.iter().any(|n| name_lower.contains(n));
+
+        let dangerous = has(&[
+            "delete", "drop", "remove", "destroy", "kill", "shell", "exec", "sudo", "format",
+        ]);
+        let sensitive = has(&[
+            "secret",
+            "credential",
+            "password",
+            "token",
+            "apikey",
+            "api_key",
+            "network",
+            "upload",
+            "exfil",
+            "probe",
+            "env",
+        ]);
+        let mutating = has(&[
+            "create", "write", "update", "insert", "post", "put", "modify", "send", "move",
+            "rename", "install", "email",
+        ]);
+        let read_only = has(&[
+            "get",
+            "list",
+            "read",
+            "search",
+            "find",
+            "describe",
+            "view",
+            "show",
+            "status",
+            "ping",
+            "echo",
+            "query",
+            "count",
+            "fetch_metadata",
+        ]);
+
+        if dangerous {
             require_approval.push(format!("{} (heuristic: dangerous action)", tool.name));
-        } else if name_lower.contains("create")
-            || name_lower.contains("write")
-            || name_lower.contains("update")
-            || name_lower.contains("insert")
-            || name_lower.contains("post")
-            || name_lower.contains("execute")
-        {
+        } else if sensitive {
+            require_approval.push(format!(
+                "{} (heuristic: touches secrets/network — review)",
+                tool.name
+            ));
+        } else if mutating {
             require_approval.push(format!("{} (heuristic: mutating action)", tool.name));
-        } else {
+        } else if read_only {
             auto_allow.push(tool.name.clone());
+        } else {
+            // Unknown capability — do not trust by default.
+            require_approval.push(format!(
+                "{} (unrecognized capability — requires review)",
+                tool.name
+            ));
         }
     }
 

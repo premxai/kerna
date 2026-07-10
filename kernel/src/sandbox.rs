@@ -13,7 +13,48 @@ pub enum CommandClass {
     DangerousGlobal,
 }
 
+/// Returns true if `path` escapes the workspace: an absolute Unix path,
+/// a parent-directory traversal, a Windows drive-letter path (e.g. `C:\`),
+/// or a UNC path (`\\server\share`).
+pub fn is_out_of_workspace_path(path: &str) -> bool {
+    if path.starts_with('/') || path.contains("..") {
+        return true;
+    }
+    // UNC path, e.g. \\server\share
+    if path.starts_with("\\\\") {
+        return true;
+    }
+    // Windows drive-letter absolute path, e.g. C:\ or C:/
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return true;
+    }
+    false
+}
+
 pub fn classify_command(cmd: &str, args: &[&str]) -> CommandClass {
+    // Interpreter/shell wrappers can run arbitrary code that evades per-command
+    // classification (e.g. `bash -c "rm -rf /"`). Treat the inline-code forms as
+    // dangerous outright.
+    let shell_wrappers = ["bash", "sh", "zsh", "dash", "powershell", "pwsh", "cmd"];
+    if shell_wrappers.contains(&cmd)
+        && (args.contains(&"-c")
+            || args.contains(&"-Command")
+            || args.contains(&"/C")
+            || args.contains(&"/c"))
+    {
+        return CommandClass::DangerousGlobal;
+    }
+    if (cmd == "python" || cmd == "python3" || cmd == "node" || cmd == "ruby" || cmd == "perl")
+        && args.contains(&"-c")
+    {
+        return CommandClass::DangerousGlobal;
+    }
+
     let dangerous = ["rm", "sudo", "curl", "wget", "npm", "chmod", "chown", "su"];
     if dangerous.contains(&cmd) {
         if cmd == "rm" && args.contains(&"-rf") && (args.contains(&"/") || args.contains(&"~")) {
@@ -147,10 +188,18 @@ impl ProcessSandbox {
 
     pub async fn run_command(&self, cmd: &str, args: &[&str], timeout_sec: u64) -> Result<String> {
         if !self.allow_dynamic_installs {
-            let is_install = (cmd == "npm" && args.contains(&"install"))
-                || (cmd == "pip" && args.contains(&"install"))
+            let is_install = ((cmd == "npm" || cmd == "pnpm" || cmd == "yarn")
+                && args.contains(&"install"))
+                || ((cmd == "pip" || cmd == "pip3") && args.contains(&"install"))
+                || (cmd == "python" && args.contains(&"-m") && args.contains(&"pip"))
                 || (cmd == "cargo" && args.contains(&"install"))
-                || cmd == "apt-get";
+                || (cmd == "gem" && args.contains(&"install"))
+                || (cmd == "go" && args.contains(&"install"))
+                || cmd == "apt-get"
+                || cmd == "apt"
+                || cmd == "brew"
+                || cmd == "winget"
+                || cmd == "choco";
             if is_install {
                 return Err(anyhow!("Security policy violation: dynamic package installations are disabled via config."));
             }
@@ -254,10 +303,8 @@ impl ProcessSandbox {
                             .get("args")
                             .and_then(|v| v.as_array())
                             .map(|arr| {
-                                arr.iter().any(|arg| {
-                                    arg.as_str().unwrap_or("").starts_with("/")
-                                        || arg.as_str().unwrap_or("").contains("..")
-                                })
+                                arr.iter()
+                                    .any(|arg| is_out_of_workspace_path(arg.as_str().unwrap_or("")))
                             })
                             .unwrap_or(false);
 
@@ -358,6 +405,46 @@ impl WasmSandbox {
 mod tests {
     use super::*;
     use std::env;
+
+    #[test]
+    fn test_shell_wrapper_classification() {
+        // Inline-code shell wrappers can smuggle destructive commands.
+        assert_eq!(
+            classify_command("bash", &["-c", "rm -rf /"]),
+            CommandClass::DangerousGlobal
+        );
+        assert_eq!(
+            classify_command("powershell", &["-Command", "Remove-Item C:\\ -Recurse"]),
+            CommandClass::DangerousGlobal
+        );
+        assert_eq!(
+            classify_command("cmd", &["/C", "del /f /q C:\\"]),
+            CommandClass::DangerousGlobal
+        );
+        assert_eq!(
+            classify_command("python", &["-c", "import os; os.system('rm -rf /')"]),
+            CommandClass::DangerousGlobal
+        );
+        // A plain read-only command is still safe.
+        assert_eq!(classify_command("ls", &["-la"]), CommandClass::SafeReadOnly);
+    }
+
+    #[test]
+    fn test_out_of_workspace_path_detection() {
+        // Unix absolute + traversal (previously covered)
+        assert!(is_out_of_workspace_path("/etc/passwd"));
+        assert!(is_out_of_workspace_path("../secret"));
+        // Windows drive-letter absolute paths (previously missed → fail-open)
+        assert!(is_out_of_workspace_path("C:\\Windows\\System32"));
+        assert!(is_out_of_workspace_path("C:/Windows/System32"));
+        assert!(is_out_of_workspace_path("D:\\data"));
+        // UNC paths
+        assert!(is_out_of_workspace_path("\\\\server\\share"));
+        // In-workspace relative paths remain allowed
+        assert!(!is_out_of_workspace_path("build/output.txt"));
+        assert!(!is_out_of_workspace_path("./notes.md"));
+        assert!(!is_out_of_workspace_path("file.txt"));
+    }
 
     #[tokio::test]
     async fn test_package_manager_blocking() {

@@ -50,7 +50,7 @@ This prevents accidental secret leakage by ensuring high-risk data is only proce
 
 | Threat | Mitigation |
 |--------|------------|
-| Prompt Injection | Separated execution planes; injected commands still hit budget and capability checks. |
+| Prompt Injection | Separated execution planes; injected commands still hit budget and capability checks. **Note:** the `PromptInjectionDetector` is a lightweight string heuristic, not a robust classifier — it catches common phrasings and must not be relied on as a primary control. The real defense is the fail-closed permission + budget layer that every tool call passes through regardless of what the model was told. |
 | Tool Output Poisoning | LLMs process tool outputs, but Kerna enforces limits on output size (`max_output_bytes`) and limits follow-up actions. |
 | Infinite Loops | Strictly bounded by `max_tool_calls` and `max_llm_calls`. |
 | Unintended File Modification | Sandbox restrictions, allowed path enforcement, and explicit approval requirements. |

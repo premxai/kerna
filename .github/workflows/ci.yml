@@ -47,3 +47,13 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
       working-directory: ./kernel
+
+    - name: Smoke test (Linux/macOS)
+      if: runner.os != 'Windows'
+      run: bash scripts/smoke_test.sh
+      shell: bash
+
+    - name: Smoke test (Windows)
+      if: runner.os == 'Windows'
+      run: pwsh -File scripts/smoke_test.ps1
+      shell: pwsh

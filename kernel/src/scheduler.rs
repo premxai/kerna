@@ -79,6 +79,7 @@ impl TaskScheduler {
         goal: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Uuid>> + Send + 'a>> {
         Box::pin(async move {
+            let task_started_at = std::time::Instant::now();
             let task_id = Uuid::new_v4();
             self.memory
                 .create_task(task_id, self.session_id.as_deref(), goal)?;
@@ -166,6 +167,8 @@ impl TaskScheduler {
                 max_memory_writes: self.config.max_memory_writes,
             };
             let mut budget = BudgetTracker::new(budget_config);
+            let mut total_tokens_used: u64 = 0;
+            let mut total_cost_usd: f64 = 0.0;
 
             // === AGENTIC LOOP ===
             let loop_result: Result<()> = tokio::select! {
@@ -213,8 +216,12 @@ impl TaskScheduler {
                     }
                 };
 
-                // Update budget
-                let cost_increment = (tokens_used as f64) * 0.00001; // basic mock pricing
+                // Update budget with real token usage and model-based pricing.
+                let cost_increment =
+                    crate::providers::estimate_cost_usd(&self.config.llm_model, tokens_used)
+                        .unwrap_or(0.0);
+                total_tokens_used += tokens_used;
+                total_cost_usd += cost_increment;
                 if let Err(e) = budget.record_llm_call(cost_increment) {
                     let _ = self.memory.log_message(task_id, "ERROR", &e.to_string());
                     let _ = self.memory.update_task_status(task_id, "failed");
@@ -719,6 +726,7 @@ impl TaskScheduler {
                     }
 
                     self.memory.log_message(task_id, "INFO", content)?;
+                    let _ = self.memory.set_task_result(task_id, content);
                     break;
                 } else {
                     println!("✓ Finished (Empty response)\n");
@@ -743,26 +751,16 @@ impl TaskScheduler {
                 return Err(e);
             }
 
-            // Calculate observability metrics
-            // TODO: Use real task start time and parse actual tokens from LLM response
-            let duration_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64
-                - (round * 5) as i64; // Mock duration: 5 seconds per round
-
-            let dur = if duration_secs < 0 { 2 } else { duration_secs };
-
-            // Mock token usage based on rounds
-            let tokens_used = (round * 450) as i64;
-            let cost = (tokens_used as f64) * 0.00001; // Mock pricing
+            // Calculate observability metrics from real accumulated usage.
+            let duration_secs = task_started_at.elapsed().as_secs() as i64;
+            let dur = if duration_secs < 0 { 0 } else { duration_secs };
 
             self.memory.update_task_observability(
                 task_id,
                 dur,
                 &self.config.llm_model,
-                cost,
-                tokens_used,
+                total_cost_usd,
+                total_tokens_used as i64,
                 round.saturating_sub(1) as i64,
             )?;
             self.memory.update_task_status(task_id, "completed")?;
@@ -826,22 +824,28 @@ impl TaskScheduler {
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
     ) -> Result<(ChatMessage, u64)> {
-        if self.config.llm_api_key.is_empty() {
-            return Err(anyhow!("No LLM API key configured"));
-        }
+        let provider_name = self.config.llm_provider.clone();
+        let model = self.config.llm_model.clone();
 
+        // Try the primary key, then any credentials in the rotation pool.
         let mut keys = vec![self.config.llm_api_key.clone()];
         keys.extend(self.config.credential_pool.clone());
 
-        let primary_provider = &self.config.llm_provider;
-
-        let mut last_error = anyhow!("Unknown error");
+        let mut last_error = anyhow!("No credentials attempted");
 
         for key in &keys {
-            match self
-                .execute_llm_call(primary_provider, key, messages, tools)
-                .await
-            {
+            let resolved =
+                match crate::providers::resolve(&self.config, &provider_name, Some(&model), key) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // Resolution failures (unknown provider, missing key) are not
+                        // fixed by trying a different key — surface immediately.
+                        last_error = e;
+                        break;
+                    }
+                };
+
+            match self.execute_resolved(&resolved, messages, tools).await {
                 Ok(res) => return Ok(res),
                 Err(e) => {
                     let err_str = e.to_string();
@@ -866,9 +870,8 @@ impl TaskScheduler {
                 "[!] Primary LLM failed. Trying fallback provider: {}",
                 fb_prov
             );
-            return self
-                .execute_llm_call(fb_prov, fb_key, messages, tools)
-                .await;
+            let resolved = crate::providers::resolve(&self.config, fb_prov, None, fb_key)?;
+            return self.execute_resolved(&resolved, messages, tools).await;
         }
 
         Err(anyhow!(
@@ -877,10 +880,26 @@ impl TaskScheduler {
         ))
     }
 
-    async fn execute_llm_call(
+    /// Dispatch a resolved provider to the correct wire implementation.
+    async fn execute_resolved(
         &self,
-        provider: &str,
-        api_key: &str,
+        resolved: &crate::providers::ResolvedProvider,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> Result<(ChatMessage, u64)> {
+        use crate::providers::WireProtocol;
+        match resolved.protocol {
+            WireProtocol::Mock => call_mock(messages),
+            WireProtocol::OpenAiCompat => self.call_openai_compat(resolved, messages, tools).await,
+            WireProtocol::Anthropic => self.call_anthropic(resolved, messages, tools).await,
+        }
+    }
+
+    /// OpenAI-compatible `/chat/completions` wire format (OpenAI, OpenRouter,
+    /// Ollama, Groq, Together, DeepSeek, Mistral, xAI, Venice, ...).
+    async fn call_openai_compat(
+        &self,
+        resolved: &crate::providers::ResolvedProvider,
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
     ) -> Result<(ChatMessage, u64)> {
@@ -888,267 +907,174 @@ impl TaskScheduler {
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
 
-        match provider {
-            "mock" => {
-                // If the last message is a successful tool result, finish the mock interaction
-                if let Some(last_msg) = messages.last() {
-                    if last_msg.role == "tool" {
-                        let content = last_msg.content.as_deref().unwrap_or("");
-                        if !content.contains("Error:") && !content.contains("Supervisor rejected") {
-                            return Ok((
-                                ChatMessage {
-                                    role: "assistant".to_string(),
-                                    content: Some("Mock finished".to_string()),
-                                    tool_calls: None,
-                                    tool_call_id: None,
-                                },
-                                10,
-                            ));
-                        }
-                    }
-                }
+        let url = format!(
+            "{}/chat/completions",
+            resolved.base_url.trim_end_matches('/')
+        );
 
-                // Determine mock behavior based on goal (last user message)
-                let last_user_msg = messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == "user")
-                    .and_then(|m| m.content.as_deref())
-                    .unwrap_or("");
-                let (cmd, args) = if last_user_msg.contains("echo") {
-                    ("echo".to_string(), "{}".to_string())
-                } else if last_user_msg.contains("hang") {
-                    ("hang".to_string(), "{}".to_string())
-                } else if last_user_msg.contains("huge_output") {
-                    ("huge_output".to_string(), "{}".to_string())
-                } else if last_user_msg.contains("invalid_json") {
-                    ("invalid_json".to_string(), "{}".to_string())
-                } else if last_user_msg.contains("fail_once_then_pass") {
-                    ("fail_once_then_pass".to_string(), "{}".to_string())
-                } else if last_user_msg.contains("malicious") {
-                    ("malicious".to_string(), "{}".to_string())
-                } else if last_user_msg.contains("Please fail") {
-                    // For rollback test
-                    (
-                        "run_command".to_string(),
-                        "{\"command\": \"rm\", \"args\": [\"does_not_exist_file_12345.txt\"]}"
-                            .to_string(),
-                    )
-                } else if last_user_msg.contains("Please delegate") {
-                    // For subagent test
-                    (
-                        "delegate_task".to_string(),
-                        "{\"goal\": \"subtask\"}".to_string(),
-                    )
-                } else if last_user_msg.contains("memory_writes") {
-                    return Ok((
-                        ChatMessage {
-                            role: "assistant".to_string(),
-                            content: Some("I am attempting to write to memory now.".to_string()),
-                            tool_calls: None,
-                            tool_call_id: None,
-                        },
-                        10,
-                    ));
-                } else {
-                    return Ok((
-                        ChatMessage {
-                            role: "assistant".to_string(),
-                            content: Some("Mock finished".to_string()),
-                            tool_calls: None,
-                            tool_call_id: None,
-                        },
-                        10,
-                    ));
-                };
-
-                // Create a mock tool call
-                let tc = ToolCallRequest {
-                    id: "call_mock".to_string(),
-                    call_type: "function".to_string(),
-                    function: FunctionCall {
-                        name: cmd,
-                        arguments: args,
-                    },
-                };
-
-                Ok((
-                    ChatMessage {
-                        role: "assistant".to_string(),
-                        content: None,
-                        tool_calls: Some(vec![tc]),
-                        tool_call_id: None,
-                    },
-                    10,
-                ))
-            }
-            "openai" | "venice" => {
-                let url = if provider == "venice" {
-                    "https://api.venice.ai/api/v1/chat/completions"
-                } else {
-                    "https://api.openai.com/v1/chat/completions"
-                };
-
-                let mut body = json!({
-                    "model": self.config.llm_model,
-                    "messages": messages,
-                });
-
-                if !tools.is_empty() {
-                    body["tools"] = json!(tools);
-                    body["tool_choice"] = json!("auto");
-                }
-
-                let response = client
-                    .post(url)
-                    .bearer_auth(api_key)
-                    .json(&body)
-                    .send()
-                    .await?;
-
-                let status = response.status();
-                if !status.is_success() {
-                    let err_text = response.text().await.unwrap_or_default();
-                    if status == reqwest::StatusCode::UNAUTHORIZED {
-                        return Err(anyhow!("401 Unauthorized: Check your LLM API key."));
-                    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                        return Err(anyhow!("429 Rate Limited: Please slow down."));
-                    } else {
-                        return Err(anyhow!("HTTP Error {}: {}", status, err_text));
-                    }
-                }
-                let res_json: serde_json::Value = response.json().await?;
-
-                if let Some(err) = res_json.get("error") {
-                    return Err(anyhow!("API Error: {}", err));
-                }
-
-                let choice = &res_json["choices"][0]["message"];
-                let content = choice["content"].as_str().map(|s| s.to_string());
-
-                let tool_calls: Option<Vec<ToolCallRequest>> =
-                    choice["tool_calls"].as_array().map(|tcs| {
-                        tcs.iter()
-                            .filter_map(|tc| serde_json::from_value(tc.clone()).ok())
-                            .collect()
-                    });
-
-                let total_tokens = res_json["usage"]["total_tokens"].as_u64().unwrap_or(0);
-
-                Ok((
-                    ChatMessage {
-                        role: "assistant".to_string(),
-                        content,
-                        tool_calls,
-                        tool_call_id: None,
-                    },
-                    total_tokens,
-                ))
-            }
-            "anthropic" => {
-                let mut anthropic_messages = Vec::new();
-                let mut system_prompt = String::new();
-
-                for msg in messages {
-                    if msg.role == "system" {
-                        system_prompt = msg.content.clone().unwrap_or_default();
-                    } else if msg.role == "user" || msg.role == "assistant" {
-                        anthropic_messages.push(json!({
-                            "role": msg.role,
-                            "content": msg.content.clone().unwrap_or_default()
-                        }));
-                    }
-                }
-
-                let mut body = json!({
-                    "model": self.config.llm_model,
-                    "max_tokens": 4096,
-                    "system": system_prompt,
-                    "messages": anthropic_messages,
-                });
-
-                if !tools.is_empty() {
-                    let anthropic_tools: Vec<_> = tools
-                        .iter()
-                        .map(|t| {
-                            json!({
-                                "name": t["function"]["name"],
-                                "description": t["function"]["description"],
-                                "input_schema": t["function"]["parameters"]
-                            })
-                        })
-                        .collect();
-                    body["tools"] = json!(anthropic_tools);
-                }
-
-                let response = client
-                    .post("https://api.anthropic.com/v1/messages")
-                    .header("x-api-key", api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .json(&body)
-                    .send()
-                    .await?;
-
-                let status = response.status();
-                if !status.is_success() {
-                    let err_text = response.text().await.unwrap_or_default();
-                    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                        return Err(anyhow!("429 Rate Limited: Please slow down."));
-                    }
-                    return Err(anyhow!("Anthropic HTTP Error {}: {}", status, err_text));
-                }
-
-                let res_json: serde_json::Value = response.json().await?;
-
-                if let Some(err) = res_json.get("error") {
-                    return Err(anyhow!("Anthropic API Error: {}", err));
-                }
-
-                let content_blocks = res_json["content"].as_array().cloned().unwrap_or_default();
-
-                let mut text_content: Option<String> = None;
-                let mut tool_calls_vec: Vec<ToolCallRequest> = Vec::new();
-
-                for block in &content_blocks {
-                    match block["type"].as_str() {
-                        Some("text") => {
-                            text_content = block["text"].as_str().map(|s| s.to_string());
-                        }
-                        Some("tool_use") => {
-                            tool_calls_vec.push(ToolCallRequest {
-                                id: block["id"].as_str().unwrap_or("unknown").to_string(),
-                                call_type: "function".to_string(),
-                                function: FunctionCall {
-                                    name: block["name"].as_str().unwrap_or("unknown").to_string(),
-                                    arguments: block["input"].to_string(),
-                                },
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-
-                let tool_calls = if tool_calls_vec.is_empty() {
-                    None
-                } else {
-                    Some(tool_calls_vec)
-                };
-
-                let total_tokens = res_json["usage"]["input_tokens"].as_u64().unwrap_or(0)
-                    + res_json["usage"]["output_tokens"].as_u64().unwrap_or(0);
-
-                Ok((
-                    ChatMessage {
-                        role: "assistant".to_string(),
-                        content: text_content,
-                        tool_calls,
-                        tool_call_id: None,
-                    },
-                    total_tokens,
-                ))
-            }
-            _ => Err(anyhow!("Unsupported LLM provider: {}", provider)),
+        let mut body = json!({
+            "model": resolved.model,
+            "messages": messages,
+        });
+        if !tools.is_empty() {
+            body["tools"] = json!(tools);
+            body["tool_choice"] = json!("auto");
         }
+
+        let mut req = client.post(&url).json(&body);
+        if !resolved.api_key.is_empty() {
+            req = req.bearer_auth(&resolved.api_key);
+        }
+
+        let response = req.send().await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let err_text = response.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                return Err(anyhow!(
+                    "401 Unauthorized: check the API key for this provider."
+                ));
+            } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                return Err(anyhow!("429 Rate Limited: please slow down."));
+            } else {
+                return Err(anyhow!("HTTP Error {}: {}", status, err_text));
+            }
+        }
+
+        let res_json: serde_json::Value = response.json().await?;
+
+        if let Some(err) = res_json.get("error") {
+            return Err(anyhow!("API Error: {}", err));
+        }
+
+        let choice = &res_json["choices"][0]["message"];
+        let content = choice["content"].as_str().map(|s| s.to_string());
+
+        let tool_calls: Option<Vec<ToolCallRequest>> = choice["tool_calls"].as_array().map(|tcs| {
+            tcs.iter()
+                .filter_map(|tc| serde_json::from_value(tc.clone()).ok())
+                .collect()
+        });
+
+        let total_tokens = res_json["usage"]["total_tokens"].as_u64().unwrap_or(0);
+
+        Ok((
+            ChatMessage {
+                role: "assistant".to_string(),
+                content,
+                tool_calls,
+                tool_call_id: None,
+            },
+            total_tokens,
+        ))
+    }
+
+    /// Anthropic `/v1/messages` wire format, with correct multi-turn tool use:
+    /// assistant `tool_calls` become `tool_use` blocks and `tool`-role results
+    /// become `tool_result` blocks in the following user turn.
+    async fn call_anthropic(
+        &self,
+        resolved: &crate::providers::ResolvedProvider,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+    ) -> Result<(ChatMessage, u64)> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()?;
+
+        let (system_prompt, anthropic_messages) = convert_to_anthropic(messages);
+
+        let mut body = json!({
+            "model": resolved.model,
+            "max_tokens": 4096,
+            "system": system_prompt,
+            "messages": anthropic_messages,
+        });
+
+        if !tools.is_empty() {
+            let anthropic_tools: Vec<_> = tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "name": t["function"]["name"],
+                        "description": t["function"]["description"],
+                        "input_schema": t["function"]["parameters"]
+                    })
+                })
+                .collect();
+            body["tools"] = json!(anthropic_tools);
+        }
+
+        let url = format!("{}/v1/messages", resolved.base_url.trim_end_matches('/'));
+
+        let response = client
+            .post(&url)
+            .header("x-api-key", &resolved.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let err_text = response.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                return Err(anyhow!("401 Unauthorized: check your Anthropic API key."));
+            } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                return Err(anyhow!("429 Rate Limited: please slow down."));
+            }
+            return Err(anyhow!("Anthropic HTTP Error {}: {}", status, err_text));
+        }
+
+        let res_json: serde_json::Value = response.json().await?;
+
+        if let Some(err) = res_json.get("error") {
+            return Err(anyhow!("Anthropic API Error: {}", err));
+        }
+
+        let content_blocks = res_json["content"].as_array().cloned().unwrap_or_default();
+
+        let mut text_content: Option<String> = None;
+        let mut tool_calls_vec: Vec<ToolCallRequest> = Vec::new();
+
+        for block in &content_blocks {
+            match block["type"].as_str() {
+                Some("text") => {
+                    text_content = block["text"].as_str().map(|s| s.to_string());
+                }
+                Some("tool_use") => {
+                    tool_calls_vec.push(ToolCallRequest {
+                        id: block["id"].as_str().unwrap_or("unknown").to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: block["name"].as_str().unwrap_or("unknown").to_string(),
+                            arguments: block["input"].to_string(),
+                        },
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        let tool_calls = if tool_calls_vec.is_empty() {
+            None
+        } else {
+            Some(tool_calls_vec)
+        };
+
+        let total_tokens = res_json["usage"]["input_tokens"].as_u64().unwrap_or(0)
+            + res_json["usage"]["output_tokens"].as_u64().unwrap_or(0);
+
+        Ok((
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: text_content,
+                tool_calls,
+                tool_call_id: None,
+            },
+            total_tokens,
+        ))
     }
 
     /// Fallback demo when no LLM API key is configured.
@@ -1208,5 +1134,280 @@ fn truncate_str(s: &str, max_len: usize) -> String {
         format!("{}...", truncated)
     } else {
         s.to_string()
+    }
+}
+
+/// Flush any pending Anthropic `tool_result` blocks as a single user turn.
+fn flush_tool_results(pending: &mut Vec<serde_json::Value>, out: &mut Vec<serde_json::Value>) {
+    if !pending.is_empty() {
+        out.push(json!({ "role": "user", "content": std::mem::take(pending) }));
+    }
+}
+
+/// Convert Kerna's OpenAI-shaped message list into Anthropic's `(system, messages)`
+/// form. Assistant `tool_calls` become `tool_use` blocks; consecutive `tool`-role
+/// results are coalesced into one following user turn of `tool_result` blocks so
+/// the required user/assistant alternation is preserved.
+pub fn convert_to_anthropic(messages: &[ChatMessage]) -> (String, Vec<serde_json::Value>) {
+    let mut system_prompt = String::new();
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut pending_tool_results: Vec<serde_json::Value> = Vec::new();
+
+    for msg in messages {
+        match msg.role.as_str() {
+            "system" => {
+                if !system_prompt.is_empty() {
+                    system_prompt.push_str("\n\n");
+                }
+                system_prompt.push_str(msg.content.as_deref().unwrap_or(""));
+            }
+            "tool" => {
+                pending_tool_results.push(json!({
+                    "type": "tool_result",
+                    "tool_use_id": msg.tool_call_id.clone().unwrap_or_default(),
+                    "content": msg.content.clone().unwrap_or_default(),
+                }));
+            }
+            "user" => {
+                flush_tool_results(&mut pending_tool_results, &mut out);
+                out.push(json!({
+                    "role": "user",
+                    "content": msg.content.clone().unwrap_or_default()
+                }));
+            }
+            "assistant" => {
+                flush_tool_results(&mut pending_tool_results, &mut out);
+                if let Some(tcs) = &msg.tool_calls {
+                    let mut blocks: Vec<serde_json::Value> = Vec::new();
+                    if let Some(text) = &msg.content {
+                        if !text.is_empty() {
+                            blocks.push(json!({ "type": "text", "text": text }));
+                        }
+                    }
+                    for tc in tcs {
+                        let input: serde_json::Value =
+                            serde_json::from_str(&tc.function.arguments).unwrap_or(json!({}));
+                        blocks.push(json!({
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.function.name,
+                            "input": input,
+                        }));
+                    }
+                    out.push(json!({ "role": "assistant", "content": blocks }));
+                } else {
+                    out.push(json!({
+                        "role": "assistant",
+                        "content": msg.content.clone().unwrap_or_default()
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+    flush_tool_results(&mut pending_tool_results, &mut out);
+    (system_prompt, out)
+}
+
+/// In-process deterministic mock model used by tests and the zero-key demo.
+/// Chooses a MockMCP tool based on keywords in the latest user goal and returns
+/// a finishing message once a successful tool result comes back.
+fn call_mock(messages: &[ChatMessage]) -> Result<(ChatMessage, u64)> {
+    // If the last message is a successful tool result, finish the interaction.
+    if let Some(last_msg) = messages.last() {
+        if last_msg.role == "tool" {
+            let content = last_msg.content.as_deref().unwrap_or("");
+            if !content.contains("Error:") && !content.contains("Supervisor rejected") {
+                return Ok((
+                    ChatMessage {
+                        role: "assistant".to_string(),
+                        content: Some("Mock finished".to_string()),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    },
+                    10,
+                ));
+            }
+        }
+    }
+
+    let last_user_msg = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .and_then(|m| m.content.as_deref())
+        .unwrap_or("");
+
+    let (cmd, args) = if last_user_msg.contains("echo") {
+        ("echo".to_string(), "{}".to_string())
+    } else if last_user_msg.contains("hang") {
+        ("hang".to_string(), "{}".to_string())
+    } else if last_user_msg.contains("huge_output") {
+        ("huge_output".to_string(), "{}".to_string())
+    } else if last_user_msg.contains("invalid_json") {
+        ("invalid_json".to_string(), "{}".to_string())
+    } else if last_user_msg.contains("fail_once_then_pass") {
+        ("fail_once_then_pass".to_string(), "{}".to_string())
+    } else if last_user_msg.contains("malicious") {
+        ("malicious".to_string(), "{}".to_string())
+    } else if last_user_msg.contains("Please fail") {
+        (
+            "run_command".to_string(),
+            "{\"command\": \"rm\", \"args\": [\"does_not_exist_file_12345.txt\"]}".to_string(),
+        )
+    } else if last_user_msg.contains("Please delegate") {
+        (
+            "delegate_task".to_string(),
+            "{\"goal\": \"subtask\"}".to_string(),
+        )
+    } else if last_user_msg.contains("memory_writes") {
+        return Ok((
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some("I am attempting to write to memory now.".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            10,
+        ));
+    } else {
+        return Ok((
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some("Mock finished".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            10,
+        ));
+    };
+
+    let tc = ToolCallRequest {
+        id: "call_mock".to_string(),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: cmd,
+            arguments: args,
+        },
+    };
+
+    Ok((
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![tc]),
+            tool_call_id: None,
+        },
+        10,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(role: &str, content: Option<&str>) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: content.map(|s| s.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn anthropic_conversion_extracts_system_and_roles() {
+        let messages = vec![
+            msg("system", Some("You are Kerna.")),
+            msg("user", Some("do the thing")),
+        ];
+        let (system, out) = convert_to_anthropic(&messages);
+        assert_eq!(system, "You are Kerna.");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+    }
+
+    #[test]
+    fn anthropic_conversion_maps_tool_use_and_result() {
+        // assistant makes a tool call, then a tool result comes back.
+        let assistant = ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![ToolCallRequest {
+                id: "call_1".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "echo".to_string(),
+                    arguments: "{\"text\":\"hi\"}".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+        };
+        let tool_result = ChatMessage {
+            role: "tool".to_string(),
+            content: Some("hi".to_string()),
+            tool_calls: None,
+            tool_call_id: Some("call_1".to_string()),
+        };
+        let messages = vec![
+            msg("system", Some("sys")),
+            msg("user", Some("say hi")),
+            assistant,
+            tool_result,
+        ];
+        let (_system, out) = convert_to_anthropic(&messages);
+        // user, assistant(tool_use), user(tool_result)
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[1]["role"], "assistant");
+        assert_eq!(out[1]["content"][0]["type"], "tool_use");
+        assert_eq!(out[1]["content"][0]["id"], "call_1");
+        assert_eq!(out[2]["role"], "user");
+        assert_eq!(out[2]["content"][0]["type"], "tool_result");
+        assert_eq!(out[2]["content"][0]["tool_use_id"], "call_1");
+    }
+
+    #[test]
+    fn anthropic_coalesces_multiple_tool_results() {
+        // Two tool results after one assistant turn must land in ONE user turn.
+        let mk_tool = |id: &str| ChatMessage {
+            role: "tool".to_string(),
+            content: Some(format!("result {}", id)),
+            tool_calls: None,
+            tool_call_id: Some(id.to_string()),
+        };
+        let messages = vec![
+            msg("user", Some("go")),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![
+                    ToolCallRequest {
+                        id: "a".to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "t".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    },
+                    ToolCallRequest {
+                        id: "b".to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "t".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    },
+                ]),
+                tool_call_id: None,
+            },
+            mk_tool("a"),
+            mk_tool("b"),
+        ];
+        let (_s, out) = convert_to_anthropic(&messages);
+        // user, assistant, user(with 2 tool_result blocks)
+        assert_eq!(out.len(), 3);
+        let last = &out[2];
+        assert_eq!(last["role"], "user");
+        assert_eq!(last["content"].as_array().unwrap().len(), 2);
     }
 }

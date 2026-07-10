@@ -198,37 +198,66 @@ impl McpClient {
     }
 
     async fn send_request(&mut self, request: serde_json::Value) -> Result<serde_json::Value> {
+        let expected_id = request.get("id").cloned();
+
         let mut req_str = request.to_string();
         req_str.push('\n');
 
         self.stdin_writer.write_all(req_str.as_bytes()).await?;
         self.stdin_writer.flush().await?;
 
-        let mut line = String::new();
-        // Item 17: Limit response size to 5MB to prevent OOM
-        let mut handle = (&mut self.stdout_reader).take(5 * 1024 * 1024);
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            handle.read_line(&mut line),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => return Err(anyhow!("Failed to read from MCP server: {}", e)),
-            Err(_) => {
-                let _ = self.child.start_kill();
-                return Err(anyhow!("MCP server request timed out after 30 seconds"));
+        // Read lines until we get the JSON-RPC response whose `id` matches our
+        // request. Servers may interleave notifications (no `id`) or log lines;
+        // skip those. Bounded by both a line cap and an overall timeout so a
+        // chatty or hung server can't wedge us.
+        const MAX_LINES: usize = 100;
+        for _ in 0..MAX_LINES {
+            let mut line = String::new();
+            // Limit response size to 5MB to prevent OOM.
+            let mut handle = (&mut self.stdout_reader).take(5 * 1024 * 1024);
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                handle.read_line(&mut line),
+            )
+            .await
+            {
+                Ok(Ok(0)) => {
+                    return Err(anyhow!(
+                        "MCP server disconnected or returned empty response"
+                    ));
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => return Err(anyhow!("Failed to read from MCP server: {}", e)),
+                Err(_) => {
+                    let _ = self.child.start_kill();
+                    return Err(anyhow!("MCP server request timed out after 30 seconds"));
+                }
+            }
+
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // Ignore any non-JSON stdout noise the server may print.
+            let val: serde_json::Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // A response has an `id`; notifications do not. Match ours.
+            match (val.get("id"), &expected_id) {
+                (Some(got), Some(want)) if got == want => return Ok(val),
+                (Some(_), Some(_)) => continue, // response to a different request
+                (None, _) => continue,          // notification — skip
+                (Some(_), None) => return Ok(val),
             }
         }
 
-        if line.is_empty() {
-            return Err(anyhow!(
-                "MCP server disconnected or returned empty response"
-            ));
-        }
-
-        let val: serde_json::Value = serde_json::from_str(&line)?;
-        Ok(val)
+        Err(anyhow!(
+            "MCP server sent {} messages without a matching response id",
+            MAX_LINES
+        ))
     }
 
     fn next_id(&mut self) -> u64 {

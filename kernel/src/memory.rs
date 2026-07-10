@@ -73,6 +73,13 @@ impl MemoryEngine {
         )
         .context("Failed to create tasks table")?;
 
+        // Idempotent migration: add result_text to pre-existing databases.
+        // (CREATE TABLE IF NOT EXISTS won't add columns to an existing table.)
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN result_text TEXT DEFAULT ''",
+            [],
+        );
+
         // Create agent_logs table
         conn.execute(
             "CREATE TABLE IF NOT EXISTS agent_logs (
@@ -268,6 +275,27 @@ impl MemoryEngine {
         Ok(())
     }
 
+    /// Persist the task's final assistant answer for later retrieval (e.g. the API server).
+    pub fn set_task_result(&self, id: Uuid, result_text: &str) -> Result<()> {
+        let conn = self.get_conn();
+        conn.execute(
+            "UPDATE tasks SET result_text = ?1 WHERE id = ?2",
+            params![result_text, id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieve the persisted final answer for a task, if any.
+    pub fn get_task_result(&self, task_id: &str) -> Result<Option<String>> {
+        let conn = self.get_conn();
+        let mut stmt = conn.prepare("SELECT result_text FROM tasks WHERE id = ?1")?;
+        let result: rusqlite::Result<String> = stmt.query_row(params![task_id], |row| row.get(0));
+        match result {
+            Ok(s) if !s.is_empty() => Ok(Some(s)),
+            _ => Ok(None),
+        }
+    }
+
     pub fn update_task_observability(
         &self,
         id: Uuid,
@@ -311,6 +339,17 @@ impl MemoryEngine {
             tasks.push(r?);
         }
         Ok(tasks)
+    }
+
+    /// The most recently created task's id, if any. Powers the `last` alias.
+    pub fn get_last_task_id(&self) -> Result<Option<String>> {
+        let conn = self.get_conn();
+        let mut stmt = conn.prepare("SELECT id FROM tasks ORDER BY created_at DESC LIMIT 1")?;
+        let result: rusqlite::Result<String> = stmt.query_row([], |row| row.get(0));
+        match result {
+            Ok(id) => Ok(Some(id)),
+            Err(_) => Ok(None),
+        }
     }
 
     pub fn get_running_tasks(&self) -> Result<Vec<(String, String, i64, i64)>> {
