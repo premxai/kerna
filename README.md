@@ -149,6 +149,8 @@ kerna mcp risk search              # read the risk card before granting
 
 Every tool is fail-closed — a pack sets read tools to *require approval* and leaves the rest denied until you grant them. Connect any other MCP server too (`kerna mcp add fetch npx -y @modelcontextprotocol/server-fetch`), and Kerna governs it the same way.
 
+Not a developer? Start with the [everyday guide](docs/EVERYDAY.md). Want recurring routines (a daily digest, morning news)? `kerna routine add daily-digest` and run `kerna daemon`.
+
 Also included: `desktop` and `voice` reference plugins (need extra pip packages), and `mock`. Connect any other MCP server the same way — `kerna mcp add <name> <command> [args...]`:
 
 ```bash

@@ -199,6 +199,53 @@ enum Commands {
         #[command(subcommand)]
         action: PackCommands,
     },
+
+    /// Schedule recurring agent routines (daily digest, etc.) run by the daemon
+    Routine {
+        #[command(subcommand)]
+        action: RoutineCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RoutineCommands {
+    /// List scheduled routines
+    List,
+    /// Add a routine from a template, or a custom one with --cron and --goal
+    Add {
+        /// Template name (daily-digest, morning-news, weekly-review). Omit to use --cron/--goal.
+        #[arg(index = 1)]
+        template: Option<String>,
+        #[arg(long)]
+        cron: Option<String>,
+        #[arg(long)]
+        goal: Option<String>,
+    },
+    /// Remove a routine by its list index
+    Remove {
+        #[arg(index = 1)]
+        index: usize,
+    },
+}
+
+/// Built-in routine templates → (cron, goal). Cron is 6-field (sec min hour
+/// day month day-of-week), matching tokio-cron-scheduler.
+fn routine_template(name: &str) -> Option<(&'static str, &'static str)> {
+    match name {
+        "daily-digest" => Some((
+            "0 0 8 * * *",
+            "Summarize my unread emails and today's calendar, then list my top 3 priorities for the day.",
+        )),
+        "morning-news" => Some((
+            "0 0 7 * * *",
+            "Search the web for today's most important AI news and summarize the top 5 items with links.",
+        )),
+        "weekly-review" => Some((
+            "0 0 17 * * Fri",
+            "Review my notes from this week and write a short summary of what I worked on and what's next.",
+        )),
+        _ => None,
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -1769,6 +1816,66 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             },
+        },
+
+        Some(Commands::Routine { action }) => match action {
+            RoutineCommands::List => {
+                println!("Scheduled routines:\n");
+                if config.schedules.is_empty() {
+                    println!("  (none). Add one: kerna routine add daily-digest");
+                }
+                for (i, s) in config.schedules.iter().enumerate() {
+                    let state = if s.enabled { "on" } else { "off" };
+                    println!("  [{}] ({}) {}  →  {}", i, state, s.cron, s.goal);
+                }
+                if !config.schedules.is_empty() {
+                    println!("\nRoutines run when the daemon is active:  kerna daemon");
+                }
+            }
+            RoutineCommands::Add {
+                template,
+                cron,
+                goal,
+            } => {
+                let (cron_expr, goal_text) = if let Some(t) = template.as_deref() {
+                    match routine_template(t) {
+                        Some((c, g)) => (c.to_string(), g.to_string()),
+                        None => {
+                            eprintln!(
+                                "[-] Unknown template '{}'. Available: daily-digest, morning-news, weekly-review.\n    Or add a custom routine: kerna routine add --cron \"0 8 * * *\" --goal \"...\"",
+                                t
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                } else if let (Some(c), Some(g)) = (cron.clone(), goal.clone()) {
+                    (c, g)
+                } else {
+                    eprintln!("[-] Provide a template name, or both --cron and --goal.");
+                    std::process::exit(1);
+                };
+                config.schedules.push(config::ScheduleConfig {
+                    cron: cron_expr.clone(),
+                    goal: goal_text.clone(),
+                    enabled: true,
+                });
+                config.save();
+                println!("[+] Added routine ({}): {}", cron_expr, goal_text);
+                println!("    It runs when the daemon is active:  kerna daemon");
+            }
+            RoutineCommands::Remove { index } => {
+                if index < config.schedules.len() {
+                    let removed = config.schedules.remove(index);
+                    config.save();
+                    println!("[+] Removed routine: {}", removed.goal);
+                } else {
+                    eprintln!(
+                        "[-] No routine at index {} (see: kerna routine list).",
+                        index
+                    );
+                    std::process::exit(1);
+                }
+            }
         },
 
         Some(Commands::Config { action }) => match action {
