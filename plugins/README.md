@@ -4,29 +4,34 @@ Kerna owns no domain logic — every capability is an MCP plugin spawned as an i
 
 Nothing loads automatically: Kerna is fail-closed, so you add the plugins you want and grant each tool explicitly.
 
-## Starter pack (zero dependencies — Python standard library only)
+## Tool packs (fastest way to get useful tools)
+
+A pack installs a curated set of plugins in one command, declares any secrets, and applies fail-closed permissions (read tools become `require_confirmation`; nothing is auto-approved).
+
+```bash
+kerna pack list                    # productivity, dev
+kerna pack install productivity    # search + notes + web
+kerna secrets add search           # set the search API key it needs
+kerna mcp risk search              # read the risk card
+```
+
+| Pack | Plugins |
+|------|---------|
+| **productivity** | search, notes, web |
+| **dev** | files, git, http |
+
+## Zero-dependency plugins (Python standard library only)
 
 | Plugin | Tools | Notes |
 |--------|-------|-------|
 | **files** | `read_file`, `write_file`, `list_dir`, `search_text` | Confined to the workspace; can't escape the sandbox boundary. |
 | **web** | `fetch_url`, `read_page_text` | http/https only, size- and time-bounded. `read_page_text` strips HTML. |
 | **git** | `git_status`, `git_branch`, `git_log`, `git_diff` | Read-only git — never mutates the repo or touches the network. |
+| **search** | `web_search` | Web search via Tavily. Needs `TAVILY_API_KEY` (free at tavily.com). |
+| **notes** | `add_note`, `list_notes`, `read_note`, `search_notes` | Markdown notes in a workspace `notes/` folder — nothing leaves your machine. |
+| **http** | `http_get`, `http_post_json` | Generic REST/JSON caller. Optional `KERNA_HTTP_ALLOWLIST` restricts hosts. |
 
-Add all three at once:
-
-```bash
-# from your project directory — form is: kerna mcp add <name> <command> [args...]
-kerna mcp add files python "<KERNA_DIR>/plugins/files_mcp/mcp_server.py"
-kerna mcp add web   python "<KERNA_DIR>/plugins/web_mcp/mcp_server.py"
-kerna mcp add git   python "<KERNA_DIR>/plugins/git_mcp/mcp_server.py"
-```
-
-Or run the one-shot helper (from the Kerna repo root):
-
-```bash
-./scripts/add_starter_plugins.sh      # macOS/Linux
-scripts\add_starter_plugins.ps1       # Windows
-```
+Add one manually with `kerna mcp add <name> <command> [args...]`, e.g. `kerna mcp add files python "<KERNA_DIR>/plugins/files_mcp/mcp_server.py"`.
 
 Then inspect and grant:
 
@@ -34,6 +39,18 @@ Then inspect and grant:
 kerna mcp list
 kerna mcp risk files          # read the risk card before granting anything
 ```
+
+## Wrapped official servers (need Node/npx)
+
+The whole public MCP ecosystem works — connect any server and Kerna governs it:
+
+```bash
+kerna mcp add fetch  npx -y @modelcontextprotocol/server-fetch
+kerna mcp add github npx -y @modelcontextprotocol/server-github   # then: kerna secrets add github
+kerna mcp add slack  npx -y @modelcontextprotocol/server-slack
+```
+
+Set each server's token with `kerna secrets add <name>` (declare the env var names under `secrets = [...]` on its `[[mcp_servers]]` entry), then risk-check and grant.
 
 Grant the tools you want in `kerna.toml` (fail-closed — everything else stays denied):
 

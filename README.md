@@ -133,21 +133,21 @@ kerna trace last
 
 ## Tools & MCP plugins
 
-Kerna owns *no* domain logic — every capability is an MCP plugin spawned as an isolated child process. A **zero-dependency starter pack** ships in [`plugins/`](plugins/) so you have useful tools on day one:
-
-| Plugin | Tools |
-|--------|-------|
-| **files** | `read_file`, `write_file`, `list_dir`, `search_text` (confined to the workspace) |
-| **web** | `fetch_url`, `read_page_text` (http/https, bounded, HTML stripped) |
-| **git** | `git_status`, `git_branch`, `git_log`, `git_diff` (read-only) |
-
-Add all three at once (from the repo root), then risk-check and grant:
+Kerna owns *no* domain logic — every capability is an MCP plugin spawned as an isolated child process. Ready-made, zero-dependency plugins ship in [`plugins/`](plugins/), grouped into one-command **packs**:
 
 ```bash
-./scripts/add_starter_plugins.sh     # or scripts\add_starter_plugins.ps1 on Windows
-kerna mcp list                       # confirm they loaded
-kerna mcp risk files                 # read the risk card before granting anything
+kerna pack list                    # productivity, dev
+kerna pack install productivity    # search + notes + web, fail-closed
+kerna secrets add search           # set the API key it needs (guided)
+kerna mcp risk search              # read the risk card before granting
 ```
+
+| Pack | Plugins (tools) |
+|------|------|
+| **productivity** | search (`web_search`), notes (`add_note`/`search_notes`/…), web (`fetch_url`/`read_page_text`) |
+| **dev** | files (`read_file`/`write_file`/…), git (read-only), http (`http_get`/`http_post_json`) |
+
+Every tool is fail-closed — a pack sets read tools to *require approval* and leaves the rest denied until you grant them. Connect any other MCP server too (`kerna mcp add fetch npx -y @modelcontextprotocol/server-fetch`), and Kerna governs it the same way.
 
 Also included: `desktop` and `voice` reference plugins (need extra pip packages), and `mock`. Connect any other MCP server the same way — `kerna mcp add <name> <command> [args...]`:
 

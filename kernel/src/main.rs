@@ -11,6 +11,7 @@ mod mcp_registry;
 mod memory;
 mod mockmcp;
 mod onboarding;
+mod packs;
 mod permissions;
 pub mod plugin_manifest;
 pub mod providers;
@@ -191,6 +192,24 @@ enum Commands {
     Secrets {
         #[command(subcommand)]
         action: SecretsCommands,
+    },
+
+    /// Install curated tool packs (e.g. productivity, dev)
+    Pack {
+        #[command(subcommand)]
+        action: PackCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PackCommands {
+    /// List available tool packs
+    List,
+    /// Install a pack's plugins (fail-closed; you still grant each tool)
+    Install {
+        /// Pack name (e.g. productivity, dev)
+        #[arg(index = 1)]
+        name: String,
     },
 }
 
@@ -1692,6 +1711,65 @@ async fn main() -> Result<()> {
                 }
             }
         }
+
+        Some(Commands::Pack { action }) => match action {
+            PackCommands::List => {
+                println!("Available tool packs:\n");
+                let packs = packs::list_packs();
+                if packs.is_empty() {
+                    println!(
+                        "  (none found in {}). Set KERNA_PLUGINS_DIR if you installed the binary standalone.",
+                        packs::plugins_dir().join("packs").display()
+                    );
+                }
+                for (name, desc) in packs {
+                    println!("  {:<14} {}", name, desc);
+                }
+                println!("\nInstall with:  kerna pack install <name>");
+            }
+            PackCommands::Install { name } => match packs::load_pack(&name) {
+                Ok(pack) => {
+                    let report = packs::install(&mut config, &pack);
+                    config.save();
+                    println!(
+                        "[+] Installed pack '{}': {}",
+                        pack.pack.name, pack.pack.description
+                    );
+                    if !report.added.is_empty() {
+                        println!("    Added:   {}", report.added.join(", "));
+                    }
+                    if !report.skipped.is_empty() {
+                        println!(
+                            "    Skipped (already present): {}",
+                            report.skipped.join(", ")
+                        );
+                    }
+                    if !report.secrets_needed.is_empty() {
+                        println!("\n  Set these secrets before use:");
+                        for (plugin, env_var) in &report.secrets_needed {
+                            let set = std::env::var(env_var)
+                                .map(|v| !v.trim().is_empty())
+                                .unwrap_or(false);
+                            let status = if set {
+                                "\x1b[32mset\x1b[0m"
+                            } else {
+                                "\x1b[31mmissing\x1b[0m"
+                            };
+                            println!(
+                                "    {} → {} ({}); guide: kerna secrets add {}",
+                                plugin, env_var, status, plugin
+                            );
+                        }
+                    }
+                    println!("\n  Suggested tools are set to require_confirmation (fail-closed).");
+                    println!("  Review: kerna mcp list · kerna mcp risk <plugin>");
+                }
+                Err(e) => {
+                    eprintln!("[-] {}", e);
+                    std::process::exit(1);
+                }
+            },
+        },
 
         Some(Commands::Config { action }) => match action {
             Some(ConfigCommands::Path) => {

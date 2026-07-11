@@ -1,0 +1,26 @@
+# Kerna "productivity" pack — everyday tools for non-developers.
+# `kerna pack install productivity` registers these plugins. The `{plugins}`
+# token expands to Kerna's plugins directory. Read-only tools are suggested as
+# require_confirmation; anything that sends/writes stays denied until you grant it.
+[pack]
+name = "productivity"
+description = "Web search, notes, and web reading for everyday tasks."
+
+[[plugin]]
+name = "search"
+command = "python"
+args = ["{plugins}/search_mcp/mcp_server.py"]
+secrets = ["TAVILY_API_KEY"]
+suggest_confirm = ["web_search"]
+
+[[plugin]]
+name = "notes"
+command = "python"
+args = ["{plugins}/notes_mcp/mcp_server.py"]
+suggest_confirm = ["list_notes", "read_note", "search_notes", "add_note"]
+
+[[plugin]]
+name = "web"
+command = "python"
+args = ["{plugins}/web_mcp/mcp_server.py"]
+suggest_confirm = ["read_page_text", "fetch_url"]

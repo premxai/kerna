@@ -1,0 +1,22 @@
+# Kerna "dev" pack — tools for developers.
+[pack]
+name = "dev"
+description = "Files, git, and a generic HTTP/JSON caller for development."
+
+[[plugin]]
+name = "files"
+command = "python"
+args = ["{plugins}/files_mcp/mcp_server.py"]
+suggest_confirm = ["read_file", "list_dir", "search_text", "write_file"]
+
+[[plugin]]
+name = "git"
+command = "python"
+args = ["{plugins}/git_mcp/mcp_server.py"]
+suggest_confirm = ["git_status", "git_branch", "git_log", "git_diff"]
+
+[[plugin]]
+name = "http"
+command = "python"
+args = ["{plugins}/http_mcp/mcp_server.py"]
+suggest_confirm = ["http_get", "http_post_json"]
