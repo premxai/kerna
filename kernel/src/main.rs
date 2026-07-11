@@ -1,6 +1,7 @@
 pub mod budget;
 mod config;
 mod cron;
+pub mod embeddings;
 pub mod events;
 mod gateways;
 mod mcp;
@@ -1288,14 +1289,26 @@ async fn main() -> Result<()> {
             }
             Some(MemoryCommands::Search { query }) => {
                 println!("Memory Search: {}\n", query);
+                // Semantic search first (embedding cosine similarity), then fall
+                // back to lexical LIKE for anything the embedder ranks low.
+                let query_embedding = crate::embeddings::embed(&query);
+                let mut shown = std::collections::HashSet::new();
+                if let Ok(results) = memory.search_episodic_memory(&query_embedding, 10) {
+                    for (content, score) in results {
+                        if score > 0.10 && shown.insert(content.clone()) {
+                            println!("- ({:.2}) {}", score, content);
+                        }
+                    }
+                }
                 if let Ok(results) = memory.search_memory_by_text(&query, 10) {
-                    if results.is_empty() {
-                        println!("No results found.");
-                    } else {
-                        for r in results {
+                    for r in results {
+                        if shown.insert(r.clone()) {
                             println!("- {}", r);
                         }
                     }
+                }
+                if shown.is_empty() {
+                    println!("No results found.");
                 }
             }
             None => {
@@ -1848,11 +1861,11 @@ async fn main() -> Result<()> {
                         continue;
                     }
                     println!("\n[*] Searching memory for '{}'...\n", parts[1]);
-                    println!("Today:");
-                    let mock_query_embedding = vec![0.1, 0.2, 0.3];
-                    if let Ok(results) = memory.search_episodic_memory(&mock_query_embedding, 3) {
-                        for (content, _) in &results {
-                            println!("  - {}", content);
+                    println!("Most relevant:");
+                    let query_embedding = crate::embeddings::embed(parts[1]);
+                    if let Ok(results) = memory.search_episodic_memory(&query_embedding, 3) {
+                        for (content, score) in &results {
+                            println!("  - ({:.2}) {}", score, content);
                         }
                     }
                     println!();

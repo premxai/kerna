@@ -412,9 +412,12 @@ impl MemoryEngine {
 
     // ─── Episodic Memory (Semantic) ──────────────────────────────
 
-    pub fn add_episodic_memory(&self, content: &str, embedding: &[f32]) -> Result<String> {
+    /// Store a memory. The embedding is computed from the content with the
+    /// built-in local embedder — callers no longer pass a vector.
+    pub fn add_episodic_memory(&self, content: &str) -> Result<String> {
         let id = Uuid::new_v4().to_string();
-        let embedding_json = serde_json::to_string(embedding)?;
+        let embedding = crate::embeddings::embed(content);
+        let embedding_json = serde_json::to_string(&embedding)?;
         let conn = self.get_conn();
         conn.execute(
             "INSERT INTO episodic_memory (id, content, embedding_json, status) VALUES (?1, ?2, ?3, 'STAGED')",
@@ -424,9 +427,10 @@ impl MemoryEngine {
     }
 
     #[allow(dead_code)]
-    pub fn add_tagged_memory(&self, content: &str, embedding: &[f32], tags: &str) -> Result<()> {
+    pub fn add_tagged_memory(&self, content: &str, tags: &str) -> Result<()> {
         let id = Uuid::new_v4().to_string();
-        let embedding_json = serde_json::to_string(embedding)?;
+        let embedding = crate::embeddings::embed(content);
+        let embedding_json = serde_json::to_string(&embedding)?;
         let conn = self.get_conn();
         conn.execute(
             "INSERT INTO episodic_memory (id, content, embedding_json, tags) VALUES (?1, ?2, ?3, ?4)",
@@ -456,7 +460,7 @@ impl MemoryEngine {
         for row in rows {
             let (content, embedding_json) = row?;
             if let Ok(vec) = serde_json::from_str::<Vec<f32>>(&embedding_json) {
-                let similarity = cosine_similarity(query_embedding, &vec);
+                let similarity = crate::embeddings::cosine_similarity(query_embedding, &vec);
                 matched.push((content, similarity));
             }
         }
@@ -659,8 +663,33 @@ impl MemoryEngine {
     pub fn gather_context(&self, goal: &str) -> Result<String> {
         let mut context = String::new();
 
-        // 1. Relevant text memories
-        let memories = self.search_memory_by_text(goal, 3)?;
+        // 1. Relevant past memories — semantic search first (embedding cosine
+        //    similarity), then top up with lexical LIKE matches for anything the
+        //    embedder missed. Deduplicated, capped at 3.
+        let mut memories: Vec<String> = Vec::new();
+        let query_embedding = crate::embeddings::embed(goal);
+        if let Ok(semantic) = self.search_episodic_memory(&query_embedding, 3) {
+            // Only keep clearly-relevant hits so unrelated memories aren't
+            // injected. In this hashing-embedding space, related items land
+            // around 0.14+ while unrelated ones sit below ~0.07.
+            for (content, score) in semantic {
+                if score > 0.10 && !memories.contains(&content) {
+                    memories.push(content);
+                }
+            }
+        }
+        if memories.len() < 3 {
+            if let Ok(text_hits) = self.search_memory_by_text(goal, 3) {
+                for m in text_hits {
+                    if memories.len() >= 3 {
+                        break;
+                    }
+                    if !memories.contains(&m) {
+                        memories.push(m);
+                    }
+                }
+            }
+        }
         if !memories.is_empty() {
             context.push_str("## Relevant past memories:\n");
             for m in &memories {
@@ -782,19 +811,6 @@ impl MemoryEngine {
     }
 }
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|y| y * y).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
-    }
-    dot_product / (norm_a * norm_b)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -821,6 +837,42 @@ mod tests {
         let logs = mem.get_task_logs(&task_id.to_string()).unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].2, "Testing task log");
+    }
+
+    #[test]
+    fn test_semantic_memory_recall_ranks_relevant_first() {
+        let mem = setup_test_db("test_semantic");
+
+        // Store three unrelated memories and approve them so they're searchable.
+        let ids = [
+            mem.add_episodic_memory("Deleting files requires explicit confirmation for safety")
+                .unwrap(),
+            mem.add_episodic_memory("The user prefers dark mode in the terminal UI")
+                .unwrap(),
+            mem.add_episodic_memory("Kerna enforces execution budgets to stop runaway loops")
+                .unwrap(),
+        ];
+        for id in &ids {
+            mem.approve_memory(id).unwrap();
+        }
+
+        // A query about deleting files should surface the file-deletion memory first.
+        let query = crate::embeddings::embed("how do I safely delete a file");
+        let results = mem.search_episodic_memory(&query, 3).unwrap();
+        assert!(!results.is_empty());
+        assert!(
+            results[0].0.contains("Deleting files"),
+            "expected file-deletion memory ranked first, got: {}",
+            results[0].0
+        );
+
+        // And gather_context should inject it for a related goal.
+        let ctx = mem.gather_context("delete an old file").unwrap();
+        assert!(
+            ctx.contains("Deleting files"),
+            "semantic context missing the relevant memory: {}",
+            ctx
+        );
     }
 
     #[test]

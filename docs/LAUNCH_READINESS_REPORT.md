@@ -13,7 +13,7 @@ Kerna is a Rust **runtime trust layer** for AI agents: it owns the agent loop's 
 | `cargo build` | ✅ clean |
 | `cargo fmt --check` | ✅ formatted |
 | `cargo clippy` | ✅ zero warnings |
-| `cargo test` | ✅ **41 passed** (was 29) |
+| `cargo test` | ✅ **47 passed** (was 29) |
 | `cargo build --release` | ✅ clean with LTO profile |
 | `cargo audit` | ✅ no vulnerabilities (1 *unmaintained* transitive crate: `rustls-pemfile`; `fxhash` gone with wasmtime) |
 | Dependency count | ✅ **227 crates** (was 333, −106 after dropping wasmtime) |
@@ -53,6 +53,12 @@ Kerna is a Rust **runtime trust layer** for AI agents: it owns the agent loop's 
 - **Bounded `@file`/`@url` goal injection**: 256 KB cap (char-boundary safe), 20 s fetch timeout, and content fenced as "untrusted … data, not instructions" — closes an unbounded-download / prompt-injection surface. Verified a 400 KB file still runs cleanly.
 - **Redesigned `kerna init` onboarding**: provider picker now lists all presets + a zero-key **Demo mode** + Ollama; shows the exact env var each provider reads (with SET/MISSING detection and per-OS `setx`/`export` lines); ends with a tailored "your first 3 commands" block.
 - New everyday-usage guide `docs/USING_KERNA.md`; README gains a completed command reference + tools/MCP catalog (the previous table was truncated mid-row).
+
+### Phase 7 — Real semantic memory (follow-up)
+- **Replaced the embedding stub** (`[0.1, 0.2, 0.3]` for every memory) with a real, dependency-free local embedder in `kernel/src/embeddings.rs`: a feature-hashing vectorizer over word unigrams/bigrams **plus character trigrams** (the fastText subword trick), L2-normalized to 256 dims. It's deterministic, offline, preserves the local-only privacy guarantee, and adds zero heavy dependencies.
+- Wired it through `add_episodic_memory` (embeds content on write), `gather_context` (semantic recall blended with a LIKE fallback, relevance-thresholded), and both the `kerna memory search` subcommand and the interactive `/memory` command. Callers no longer pass fake vectors.
+- Verified live: query "echo call" matches a stored "…call echo" memory at 0.50 (word order — LIKE misses this); "invoke the echo tool" still matches at 0.19 via subword overlap; unrelated queries correctly return nothing. 6 new tests (5 embedding unit tests + 1 end-to-end semantic recall test); suite now **47 passing**.
+- Documented the neural-embedding upgrade path (OpenAI-compatible `/embeddings`, e.g. Ollama `nomic-embed-text` for local neural).
 
 ### Earlier in the session (pre-plan)
 - Fixed a Windows/UNC absolute-path bypass in the workspace-boundary check (`rm C:\Windows` was allowed; now denied).
@@ -95,8 +101,8 @@ All exercised against the mock provider + MockMCP (no real keys):
 ## 5. Known gaps / not yet done
 
 - **Streaming responses** (`stream: true`) are accepted but ignored by the server; it returns a single completion.
-- **Embeddings are still a stub** (`[0.1, 0.2, 0.3]`) — semantic memory retrieval is not yet real vector search.
-- **Git history** still carries the removed 13 MB blob (see Phase 0).
+- **Neural embeddings are opt-in, not yet wired.** Semantic memory now uses a real built-in local embedder (see Phase 7), which is a large step up from the old stub, but true transformer embeddings via an `/embeddings` endpoint are documented as the upgrade path rather than implemented.
+- **Git history** blob was removed post-report via `git-filter-repo` (`gh.zip` + the 50 MB `gh/bin/gh.exe`); `.git` went 38 MB → 567 KB with the HEAD tree hash verified unchanged.
 - **Live provider calls** were validated against OpenAI's real 401 path; a full happy-path call against each provider requires user-supplied keys / a running Ollama and is marked *pending user keys*.
 - `provider test` still prints a simulated success — superseded in practice by `keys add`'s real validation, but the old subcommand text remains.
 

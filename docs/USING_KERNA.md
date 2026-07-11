@@ -130,6 +130,18 @@ kerna trace last       # the full forensic event log
 kerna task replay <id> # re-run an old task
 ```
 
+## How memory recall works
+
+Every task can leave a memory (staged for your approval — `kerna memory staged` / `approve`). When a new task starts, Kerna injects the most *relevant* past memories into the prompt — not just keyword matches.
+
+Relevance uses a built-in **local embedder**: each memory is turned into a vector and ranked by cosine similarity to your goal. It's fully offline (no embedding API call), so it works under `--privacy local-only` and never sends your memories anywhere. Because it uses subword features, it matches across word forms — a goal about "deleting a file" recalls a memory about "file deletion" even with no shared exact word.
+
+```bash
+kerna memory search "how do I remove a file"   # ranked by similarity, not substring
+```
+
+Want true neural embeddings? Point Kerna at any OpenAI-compatible `/embeddings` endpoint — e.g. Ollama's `nomic-embed-text` for local neural embeddings, or OpenAI's `text-embedding-3-*`. (Upgrade path; the local embedder is the zero-config default.)
+
 ## Where things live
 
 | File / dir | What it is |

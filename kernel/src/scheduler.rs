@@ -706,7 +706,7 @@ impl TaskScheduler {
                         println!("⚠️ Memory write skipped (Budget exceeded)");
                     } else {
                         // TODO: Replace dummy embedding with actual embedding model call
-                        let mem_id = self.memory.add_episodic_memory(&memory_content, &[0.1, 0.2, 0.3])?;
+                        let mem_id = self.memory.add_episodic_memory(&memory_content)?;
                         println!("⚠️ Memory proposal STAGED for approval (ID: {})", mem_id);
 
                         event_seq += 1;
@@ -1121,9 +1121,7 @@ impl TaskScheduler {
         }
 
         let memory_content = format!("Goal: {}. Completed via offline fallback.", goal);
-        let mem_id = self
-            .memory
-            .add_episodic_memory(&memory_content, &[0.1, 0.2, 0.3])?;
+        let mem_id = self.memory.add_episodic_memory(&memory_content)?;
         println!("⚠️ Memory proposal STAGED for approval (ID: {})", mem_id);
 
         Ok(())
