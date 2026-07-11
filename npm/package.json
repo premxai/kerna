@@ -1,0 +1,45 @@
+{
+  "name": "@premxai/kerna",
+  "version": "0.1.0",
+  "description": "Kerna — the runtime trust layer for AI agents. Fail-closed permissions, budgets, full event traces, and MCP process isolation around any model or tool stack.",
+  "bin": {
+    "kerna": "bin/cli.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "bin/cli.js",
+    "install.js"
+  ],
+  "keywords": [
+    "ai",
+    "agents",
+    "mcp",
+    "llm",
+    "runtime",
+    "security",
+    "cli"
+  ],
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "MIT OR Apache-2.0",
+  "homepage": "https://github.com/premxai/kerna#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/premxai/kerna.git"
+  },
+  "bugs": {
+    "url": "https://github.com/premxai/kerna/issues"
+  }
+}

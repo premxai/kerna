@@ -1,0 +1,6 @@
+# Shell scripts must keep LF endings or they break when run (CRLF corrupts the shebang).
+*.sh text eol=lf
+install.sh text eol=lf
+scripts/*.sh text eol=lf
+# PowerShell is fine with either, but keep it consistent.
+*.ps1 text eol=crlf

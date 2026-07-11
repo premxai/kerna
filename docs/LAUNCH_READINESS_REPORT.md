@@ -54,6 +54,13 @@ Kerna is a Rust **runtime trust layer** for AI agents: it owns the agent loop's 
 - **Redesigned `kerna init` onboarding**: provider picker now lists all presets + a zero-key **Demo mode** + Ollama; shows the exact env var each provider reads (with SET/MISSING detection and per-OS `setx`/`export` lines); ends with a tailored "your first 3 commands" block.
 - New everyday-usage guide `docs/USING_KERNA.md`; README gains a completed command reference + tools/MCP catalog (the previous table was truncated mid-row).
 
+### Phase 9 — One-command install for every user type (follow-up)
+- Added `install.sh` (macOS/Linux) and `install.ps1` (Windows) one-line installers that pull the right prebuilt binary from GitHub Releases, detect OS/arch, install to a user bin dir, verify, and fix PATH. Both support a `KERNA_LOCAL_BIN` override for offline/air-gapped installs.
+- Added an npm distribution under `npm/` (`@premxai/kerna`): `npm install -g @premxai/kerna` or `npx @premxai/kerna`. A postinstall script downloads the platform binary; a Node launcher shim forwards args/stdio/exit-code. `npm pack` is a clean 2.2 kB tarball (binary fetched on install, not bundled).
+- Aligned all asset names across `install.sh`, `install.ps1`, `npm/install.js`, and `release.yml` (`kerna-linux-x86_64`, `kerna-macos-arm64`, `kerna-macos-x86_64`, `kerna-windows-x86_64.exe`); added the macOS-Intel target to `release.yml`.
+- Tested on this machine: `cargo install` (from source), `install.ps1` (native, installs + PATH), npm postinstall + launcher (`kerna 0.1.0`, arg forwarding, policy DENY) + `npm pack`, `install.sh` syntax + platform-mapping for all 5 targets. README install section rewritten as one-liners per user type.
+- Note: the download-based installers require a published `v*` GitHub release to function; `cargo install` works today. Cut a release with `git tag v0.1.0 && git push origin v0.1.0` to activate them.
+
 ### Phase 8 — MCP policy-gateway mode (follow-up)
 - New `kerna gateway` command + `kernel/src/gateway.rs`: Kerna runs as an **MCP server over stdio** that proxies the MCP servers in `kerna.toml` through its policy engine and event log. Any MCP client (Claude Code, Cursor, Cline) points at `kerna gateway`; every `tools/call` is policy-checked and recorded — drop-in governance over existing tools with no runtime migration. This is the highest-leverage adoption feature.
 - Fail-closed by design: only `auto_approve` tools are forwarded; `deny`/`require_confirmation` and unknown tools are blocked with an MCP `isError` result (a non-interactive server can't prompt). Downstream `allow_tools`/`deny_tools`/capability filters still apply.

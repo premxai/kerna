@@ -63,23 +63,34 @@ Most agent frameworks help you *build* agents. Kerna helps you *run them safely*
 
 ## Install
 
-**Prebuilt binaries** (recommended) — grab the latest from [Releases](https://github.com/premxai/kerna/releases) for your platform:
+Pick the one line for your setup — each installs the `kerna` command:
 
-| Platform | Steps |
-|---|---|
-| **Windows** | Download `kerna-windows-x86_64.zip`, extract, add the folder to your `PATH` (or `scoop install` — manifest coming soon) |
-| **macOS** | `curl -LO` the `kerna-macos-*.tar.gz` for your chip (Intel `x86_64` / Apple Silicon `aarch64`), `tar xzf`, move `kerna` to `/usr/local/bin` |
-| **Linux** | `curl -LO` the `kerna-linux-x86_64.tar.gz`, `tar xzf`, move `kerna` to `~/.local/bin` or `/usr/local/bin` |
-
-**From source** (any platform with the [Rust toolchain](https://rustup.rs)):
-
+**macOS / Linux** (one-line installer):
 ```bash
-git clone https://github.com/premxai/kerna.git
-cd kerna/kernel
-cargo install --path .        # installs `kerna` into ~/.cargo/bin
+curl -fsSL https://raw.githubusercontent.com/premxai/kerna/main/install.sh | sh
 ```
 
-Verify with `kerna --version`.
+**Windows** (PowerShell):
+```powershell
+irm https://raw.githubusercontent.com/premxai/kerna/main/install.ps1 | iex
+```
+
+**Node / npm** (any OS with Node ≥16):
+```bash
+npm install -g @premxai/kerna
+# or run once, no install:  npx @premxai/kerna init
+```
+
+**Rust** (build from source, any OS with the [Rust toolchain](https://rustup.rs)):
+```bash
+cargo install --git https://github.com/premxai/kerna --bin kerna
+```
+
+**Prebuilt binaries** for manual download: the [Releases](https://github.com/premxai/kerna/releases) page has `kerna-linux-x86_64`, `kerna-macos-arm64`, `kerna-macos-x86_64`, and `kerna-windows-x86_64.exe`.
+
+Then verify: `kerna --version` — and you're ready for `kerna init`.
+
+> The installer and npm scripts download prebuilt binaries from GitHub Releases, so they work once a `v*` release is published; `cargo install` builds from source and works today.
 
 ## Getting started
 

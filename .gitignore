@@ -16,3 +16,8 @@ Thumbs.db
 *.log
 *.zip
 /gh/
+# npm wrapper downloads the platform binary on install — never commit it
+/npm/bin/kerna
+/npm/bin/kerna.exe
+/npm/node_modules/
+/npm/*.tgz
