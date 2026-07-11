@@ -117,6 +117,7 @@ kerna trace last
 | `kerna policy simulate "<tool>" '<args>'` | Dry-run a tool call against the policy engine |
 | `kerna doctor` | System health: database, provider keys, plugins |
 | `kerna serve [--bind <addr>] [--token <t>]` | OpenAI-compatible API server |
+| `kerna gateway` | Run as an MCP server that governs + records your other MCP tools |
 | `kerna daemon` / `kerna watch <url>` | Background scheduler + continuous watchers |
 
 ## Tools & MCP plugins
@@ -137,6 +138,17 @@ kerna mcp risk myserver     # inspect its risk card before granting anything
 ```
 
 New to Kerna? See the [everyday usage guide](docs/USING_KERNA.md).
+
+## Policy-gateway mode: govern the MCP tools you already use
+
+`kerna gateway` makes Kerna an **MCP server** that proxies your *other* MCP servers through its policy engine and event log. Point Claude Code, Cursor, or Cline at Kerna instead of directly at a tool server, and every tool call is policy-checked (fail-closed) and recorded — without changing your agent.
+
+```jsonc
+// e.g. in an MCP client config, replace a direct server entry with:
+{ "command": "kerna", "args": ["gateway"] }
+```
+
+Kerna spawns the servers listed in your `kerna.toml`, re-exposes their tools, and for each call: checks your policy → forwards only `auto_approve` tools → blocks the rest with a clear error → writes a full trace. Audit any session with `kerna trace <id>`.
 
 ## Serving an OpenAI-compatible API
 

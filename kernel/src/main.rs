@@ -3,6 +3,7 @@ mod config;
 mod cron;
 pub mod embeddings;
 pub mod events;
+mod gateway;
 mod gateways;
 mod mcp;
 mod mcp_governance;
@@ -79,6 +80,10 @@ enum Commands {
         #[arg(long)]
         token: Option<String>,
     },
+
+    /// Run as an MCP server that proxies configured MCP servers through Kerna's
+    /// policy engine and event log (point Claude Code / Cursor / Cline at this).
+    Gateway,
 
     /// Run the MockMCP deterministic integration test server
     Mockmcp {
@@ -554,6 +559,23 @@ async fn main() -> Result<()> {
             let mut server = mockmcp::MockMcpServer::new(&mode);
             if let Err(e) = server.run().await {
                 eprintln!("[-] MockMCP failed: {}", e);
+            }
+        }
+
+        Some(Commands::Gateway) => {
+            // stdout is the MCP JSON-RPC channel, so spawn downstream servers in
+            // quiet mode (diagnostics → stderr) and never println! to stdout.
+            {
+                let mut registry = mcp_registry.lock().await;
+                registry.set_quiet(true);
+                if let Err(e) = registry.initialize(&config.mcp_servers).await {
+                    eprintln!("[gateway] downstream initialization warning: {}", e);
+                }
+            }
+            let mut gw =
+                gateway::Gateway::new(config.clone(), mcp_registry.clone(), memory.clone());
+            if let Err(e) = gw.run().await {
+                eprintln!("[gateway] fatal: {}", e);
             }
         }
 

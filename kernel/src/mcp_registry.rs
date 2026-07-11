@@ -15,6 +15,10 @@ pub struct McpRegistry {
     server_configs: HashMap<String, McpServerConfig>,
     /// Full list of all discovered tools across all servers
     all_tools: Vec<McpTool>,
+    /// When true, route status output to stderr instead of stdout. Required in
+    /// gateway mode, where stdout is the MCP JSON-RPC channel and must not be
+    /// polluted with human-readable diagnostics.
+    quiet: bool,
 }
 
 impl McpRegistry {
@@ -24,14 +28,45 @@ impl McpRegistry {
             clients: HashMap::new(),
             server_configs: HashMap::new(),
             all_tools: Vec::new(),
+            quiet: false,
         }
+    }
+
+    /// Route status output to stderr (used by the MCP gateway, where stdout is
+    /// the protocol channel).
+    pub fn set_quiet(&mut self, quiet: bool) {
+        self.quiet = quiet;
+    }
+
+    /// Emit a status line to stdout normally, or stderr in quiet mode.
+    fn status(&self, msg: &str) {
+        if self.quiet {
+            eprintln!("{}", msg);
+        } else {
+            println!("{}", msg);
+        }
+    }
+
+    /// MCP `tools/list`-format view of every discovered tool, for re-exposing
+    /// downstream tools through the gateway.
+    pub fn get_mcp_tools(&self) -> Vec<serde_json::Value> {
+        self.all_tools
+            .iter()
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.name,
+                    "description": tool.description.clone().unwrap_or_default(),
+                    "inputSchema": tool.input_schema,
+                })
+            })
+            .collect()
     }
 
     /// Spawn all configured MCP servers and discover their tools.
     pub async fn initialize(&mut self, configs: &[McpServerConfig]) -> Result<()> {
         for config in configs {
             if !config.enabled {
-                println!("[MCP] Skipping disabled server: {}", config.name);
+                self.status(&format!("[MCP] Skipping disabled server: {}", config.name));
                 continue;
             }
 
@@ -43,7 +78,10 @@ impl McpRegistry {
             if manifest_path.exists() {
                 match PluginManifest::load(manifest_path) {
                     Ok(_m) => {
-                        println!("[MCP] Loaded verified manifest for plugin: {}", config.name);
+                        self.status(&format!(
+                            "[MCP] Loaded verified manifest for plugin: {}",
+                            config.name
+                        ));
                         // TODO: Merge capabilities from manifest into config
                     }
                     Err(e) => {
@@ -51,7 +89,7 @@ impl McpRegistry {
                     }
                 }
             } else {
-                println!("[MCP] Legacy Warning: Plugin '{}' lacks a manifest.toml. Running with full config trust.", config.name);
+                self.status(&format!("[MCP] Legacy Warning: Plugin '{}' lacks a manifest.toml. Running with full config trust.", config.name));
             }
 
             match McpClient::spawn(
@@ -74,11 +112,11 @@ impl McpRegistry {
                     // Discover tools from this server
                     match client.list_tools().await {
                         Ok(tools) => {
-                            println!(
+                            self.status(&format!(
                                 "[MCP] Server '{}' registered {} tools:",
                                 config.name,
                                 tools.len()
-                            );
+                            ));
                             for tool in &tools {
                                 if self.tool_to_server.contains_key(&tool.name) {
                                     eprintln!(
@@ -87,7 +125,7 @@ impl McpRegistry {
                                     );
                                     continue;
                                 }
-                                println!("  ✔️ {}", tool.name);
+                                self.status(&format!("  ✔️ {}", tool.name));
                                 self.tool_to_server
                                     .insert(tool.name.clone(), config.name.clone());
                                 self.all_tools.push(tool.clone());

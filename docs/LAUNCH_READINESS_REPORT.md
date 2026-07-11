@@ -13,7 +13,7 @@ Kerna is a Rust **runtime trust layer** for AI agents: it owns the agent loop's 
 | `cargo build` | ✅ clean |
 | `cargo fmt --check` | ✅ formatted |
 | `cargo clippy` | ✅ zero warnings |
-| `cargo test` | ✅ **47 passed** (was 29) |
+| `cargo test` | ✅ **48 passed** (was 29) |
 | `cargo build --release` | ✅ clean with LTO profile |
 | `cargo audit` | ✅ no vulnerabilities (1 *unmaintained* transitive crate: `rustls-pemfile`; `fxhash` gone with wasmtime) |
 | Dependency count | ✅ **227 crates** (was 333, −106 after dropping wasmtime) |
@@ -53,6 +53,12 @@ Kerna is a Rust **runtime trust layer** for AI agents: it owns the agent loop's 
 - **Bounded `@file`/`@url` goal injection**: 256 KB cap (char-boundary safe), 20 s fetch timeout, and content fenced as "untrusted … data, not instructions" — closes an unbounded-download / prompt-injection surface. Verified a 400 KB file still runs cleanly.
 - **Redesigned `kerna init` onboarding**: provider picker now lists all presets + a zero-key **Demo mode** + Ollama; shows the exact env var each provider reads (with SET/MISSING detection and per-OS `setx`/`export` lines); ends with a tailored "your first 3 commands" block.
 - New everyday-usage guide `docs/USING_KERNA.md`; README gains a completed command reference + tools/MCP catalog (the previous table was truncated mid-row).
+
+### Phase 8 — MCP policy-gateway mode (follow-up)
+- New `kerna gateway` command + `kernel/src/gateway.rs`: Kerna runs as an **MCP server over stdio** that proxies the MCP servers in `kerna.toml` through its policy engine and event log. Any MCP client (Claude Code, Cursor, Cline) points at `kerna gateway`; every `tools/call` is policy-checked and recorded — drop-in governance over existing tools with no runtime migration. This is the highest-leverage adoption feature.
+- Fail-closed by design: only `auto_approve` tools are forwarded; `deny`/`require_confirmation` and unknown tools are blocked with an MCP `isError` result (a non-interactive server can't prompt). Downstream `allow_tools`/`deny_tools`/capability filters still apply.
+- Every proxied call writes the standard `tool.call.requested` → `tool.policy.checked` → `tool.call.completed`/`blocked` event chain, so `kerna trace <gateway-task-id>` shows the full audit trail.
+- Added `McpRegistry` quiet mode (diagnostics → stderr) since stdout is the JSON-RPC channel. Verified live end-to-end (echo forwarded, `secret_probe` blocked, unknown tool blocked, trace persisted) plus an in-process integration test. Suite now **48 passing**.
 
 ### Phase 7 — Real semantic memory (follow-up)
 - **Replaced the embedding stub** (`[0.1, 0.2, 0.3]` for every memory) with a real, dependency-free local embedder in `kernel/src/embeddings.rs`: a feature-hashing vectorizer over word unigrams/bigrams **plus character trigrams** (the fastText subword trick), L2-normalized to 256 dims. It's deterministic, offline, preserves the local-only privacy guarantee, and adds zero heavy dependencies.

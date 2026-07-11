@@ -142,6 +142,26 @@ kerna memory search "how do I remove a file"   # ranked by similarity, not subst
 
 Want true neural embeddings? Point Kerna at any OpenAI-compatible `/embeddings` endpoint — e.g. Ollama's `nomic-embed-text` for local neural embeddings, or OpenAI's `text-embedding-3-*`. (Upgrade path; the local embedder is the zero-config default.)
 
+## Governing tools you already use (gateway mode)
+
+You don't have to run agents *through* Kerna to benefit from it. `kerna gateway` puts Kerna in front of your existing MCP tools as a proxy: your MCP client (Claude Code, Cursor, Cline) talks to Kerna, and Kerna talks to the real tool servers — applying policy and recording everything in between.
+
+```jsonc
+// point your MCP client at Kerna instead of the tool server directly:
+{ "command": "kerna", "args": ["gateway"] }
+```
+
+Kerna reads the downstream servers from your `kerna.toml`, re-exposes their tools, and for each call:
+- **checks your policy** — only `auto_approve` tools pass; `deny` / `require_confirmation` / unknown tools are blocked with a clear error (a background proxy can't stop to ask you, so it fails closed);
+- **records a trace** — `kerna trace <id>` shows every proxied call, its policy decision, and result.
+
+To allow a downstream tool through, grant it in `kerna.toml`:
+```toml
+[[permissions]]
+tool = "read_file"
+action = "auto_approve"
+```
+
 ## Where things live
 
 | File / dir | What it is |
