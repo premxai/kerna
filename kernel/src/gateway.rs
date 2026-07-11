@@ -401,6 +401,7 @@ mod tests {
             approval_required: vec![],
             allow_tools: vec![],
             deny_tools: vec![],
+            secrets: vec![],
         });
         // echo is auto-approved; everything else denied by the wildcard.
         config.permissions.push(PermissionRule {

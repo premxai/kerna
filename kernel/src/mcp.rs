@@ -43,9 +43,27 @@ impl McpClient {
         docker_image: &str,
         network_mode: &str,
         egress_proxy: Option<&str>,
+        secrets: &[String],
     ) -> Result<Self> {
         // Create an isolated working directory (not an OS sandbox)
         let _ = std::fs::create_dir_all("sandbox");
+
+        // Resolve declared secret names to (name, value) from the environment.
+        // Only names came from config; values live only in the environment and
+        // are injected into the child process — never persisted.
+        let resolved_secrets: Vec<(String, String)> = secrets
+            .iter()
+            .filter_map(|name| match std::env::var(name) {
+                Ok(val) if !val.is_empty() => Some((name.clone(), val)),
+                _ => {
+                    eprintln!(
+                        "[MCP] Warning: declared secret '{}' is not set in the environment; the plugin may not authenticate.",
+                        name
+                    );
+                    None
+                }
+            })
+            .collect();
 
         let mut actual_cmd = cmd.to_string();
         let mut actual_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -69,6 +87,12 @@ impl McpClient {
                 docker_args.push(format!("http_proxy={}", proxy));
                 docker_args.push("-e".to_string());
                 docker_args.push(format!("https_proxy={}", proxy));
+            }
+
+            // Pass declared secrets into the container explicitly.
+            for (name, val) in &resolved_secrets {
+                docker_args.push("-e".to_string());
+                docker_args.push(format!("{}={}", name, val));
             }
 
             docker_args.push(docker_image.to_string());
@@ -97,6 +121,15 @@ impl McpClient {
         for var in retain_vars {
             if let Ok(val) = std::env::var(var) {
                 command.env(var, val);
+            }
+        }
+
+        // Inject declared secrets into the child's environment (native mode).
+        // In docker mode they were already passed via `-e` above, so skip to
+        // avoid leaking them to the `docker` CLI process env.
+        if runtime_mode != "docker" {
+            for (name, val) in &resolved_secrets {
+                command.env(name, val);
             }
         }
 

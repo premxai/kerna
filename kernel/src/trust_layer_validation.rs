@@ -48,6 +48,7 @@ async fn setup_test_env(
         approval_required: vec![],
         allow_tools: vec![],
         deny_tools: vec![],
+        secrets: vec![],
     });
 
     if let Some(bc) = override_budget {
@@ -80,6 +81,47 @@ async fn setup_test_env(
     config.llm_api_key = "mock".to_string();
 
     (memory, config, db_path)
+}
+
+#[tokio::test]
+async fn test_declared_secret_reaches_plugin_undeclared_does_not() {
+    // A plugin should receive exactly the secrets it declares — no more.
+    // mockmcp's `secret_probe` reports the env var names it can see.
+    std::env::set_var("KERNA_DECLARED_SECRET", "shhh-value");
+    std::env::set_var("KERNA_UNDECLARED_SECRET", "should-not-leak");
+
+    let (memory, mut config, db_path) = setup_test_env("test_secrets", None).await;
+    // Declare only the one secret on the mockmcp server; allow all tools so the
+    // capability filter doesn't block secret_probe (this test is about env, not policy).
+    config.mcp_servers[0].secrets = vec!["KERNA_DECLARED_SECRET".to_string()];
+    config.mcp_servers[0].capabilities = vec![];
+
+    let mut registry = crate::mcp_registry::McpRegistry::new();
+    registry.initialize(&config.mcp_servers).await.unwrap();
+    let result = registry
+        .call_tool("secret_probe", serde_json::json!({}))
+        .await
+        .unwrap();
+    let text = result.to_string();
+
+    assert!(
+        text.contains("KERNA_DECLARED_SECRET"),
+        "declared secret should be visible to the plugin: {}",
+        text
+    );
+    assert!(
+        !text.contains("KERNA_UNDECLARED_SECRET"),
+        "undeclared secret must NOT leak into the plugin: {}",
+        text
+    );
+
+    // And the value must never be written into the serialized config.
+    let toml_str = toml::to_string(&config).unwrap_or_default();
+    assert!(!toml_str.contains("shhh-value"));
+
+    std::env::remove_var("KERNA_DECLARED_SECRET");
+    std::env::remove_var("KERNA_UNDECLARED_SECRET");
+    let _ = fs::remove_file(&db_path);
 }
 
 #[tokio::test]
@@ -536,6 +578,7 @@ async fn test_mcp_risk_card_generation() {
         approval_required: vec![],
         allow_tools: vec![],
         deny_tools: vec![],
+        secrets: vec![],
         runtime_mode: "local".to_string(),
         docker_image: "".to_string(),
     };

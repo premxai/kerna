@@ -12,7 +12,15 @@ pub async fn probe(server_config: &McpServerConfig) -> Result<()> {
 
     // We will use local runtime mode for probing, but sandbox is preferred.
     // For now we'll just run it locally since we're just inspecting.
-    let mut client = McpClient::spawn(&server_config.command, &args, "local", "", "none", None)?;
+    let mut client = McpClient::spawn(
+        &server_config.command,
+        &args,
+        "local",
+        "",
+        "none",
+        None,
+        &server_config.secrets,
+    )?;
 
     timeout(Duration::from_secs(5), client.initialize()).await??;
     println!("[+] Connection successful");
@@ -32,7 +40,15 @@ pub async fn inspect(server_config: &McpServerConfig) -> Result<()> {
     println!("[*] Inspecting MCP Server: {}", server_config.name);
 
     let args: Vec<&str> = server_config.args.iter().map(|s| s.as_str()).collect();
-    let mut client = McpClient::spawn(&server_config.command, &args, "local", "", "none", None)?;
+    let mut client = McpClient::spawn(
+        &server_config.command,
+        &args,
+        "local",
+        "",
+        "none",
+        None,
+        &server_config.secrets,
+    )?;
 
     timeout(Duration::from_secs(5), client.initialize()).await??;
     let tools = timeout(Duration::from_secs(5), client.list_tools()).await??;
@@ -51,14 +67,21 @@ pub async fn inspect(server_config: &McpServerConfig) -> Result<()> {
 
 pub async fn generate_risk_card(server_config: &McpServerConfig) -> Result<()> {
     let args: Vec<&str> = server_config.args.iter().map(|s| s.as_str()).collect();
-    let mut client =
-        match McpClient::spawn(&server_config.command, &args, "local", "", "none", None) {
-            Ok(c) => c,
-            Err(e) => {
-                println!("\n[-] Failed to spawn plugin: {}", e);
-                return Err(e);
-            }
-        };
+    let mut client = match McpClient::spawn(
+        &server_config.command,
+        &args,
+        "local",
+        "",
+        "none",
+        None,
+        &server_config.secrets,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("\n[-] Failed to spawn plugin: {}", e);
+            return Err(e);
+        }
+    };
 
     if let Err(e) = timeout(Duration::from_secs(5), client.initialize()).await {
         println!("\n[-] Failed to initialize plugin: {}", e);
@@ -191,6 +214,48 @@ pub async fn generate_risk_card(server_config: &McpServerConfig) -> Result<()> {
         "  - Explicit Allow rules: {}\n",
         server_config.allow_tools.len()
     );
+
+    // Manifest disclosure: what the plugin *declares* it needs. Config secrets
+    // and any plugins/<name>/manifest.toml are unioned so the user sees the
+    // full picture (network reach + which secrets) before granting anything.
+    let mut declared_secrets = server_config.secrets.clone();
+    let mut declared_network: Vec<String> = Vec::new();
+    let manifest_path = format!("plugins/{}/manifest.toml", server_config.name);
+    if let Ok(m) =
+        crate::plugin_manifest::PluginManifest::load(std::path::Path::new(&manifest_path))
+    {
+        for s in m.plugin.secrets {
+            if !declared_secrets.contains(&s) {
+                declared_secrets.push(s);
+            }
+        }
+        declared_network = m.plugin.network_allowlist;
+    }
+    if !declared_secrets.is_empty() {
+        println!(
+            "🔒 Secrets requested (set via `kerna secrets add {}`):",
+            server_config.name
+        );
+        for s in &declared_secrets {
+            let status = if std::env::var(s)
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+            {
+                "\x1b[32mset\x1b[0m"
+            } else {
+                "\x1b[31mmissing\x1b[0m"
+            };
+            println!("    - {} ({})", s, status);
+        }
+        println!();
+    }
+    if !declared_network.is_empty() {
+        println!("🌐 Network access (reaches the internet — not filesystem-sandboxed):");
+        for n in &declared_network {
+            println!("    - {}", n);
+        }
+        println!();
+    }
 
     if !auto_allow.is_empty() {
         println!("🟢 Auto-allow (Read-only / Safe):");

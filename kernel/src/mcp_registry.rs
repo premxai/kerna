@@ -99,6 +99,7 @@ impl McpRegistry {
                 &config.docker_image,
                 "bridge",
                 None,
+                &config.secrets,
             ) {
                 Ok(mut client) => {
                     // Initialize the client

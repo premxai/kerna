@@ -30,6 +30,12 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub deny_tools: Vec<String>,
 
+    /// Names of environment variables this plugin needs (e.g. API tokens). Only
+    /// the NAMES live in config; values are read from the environment at spawn
+    /// and injected into the plugin's process — never written to disk.
+    #[serde(default)]
+    pub secrets: Vec<String>,
+
     #[serde(default = "default_runtime_mode")]
     pub runtime_mode: String,
 

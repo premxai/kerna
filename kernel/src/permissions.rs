@@ -57,22 +57,66 @@ impl PermissionManager {
         level
     }
 
-    /// Prompt the user for confirmation in the terminal.
+    /// Prompt the user for confirmation in the terminal, with a readable preview
+    /// of exactly what the tool will do. For side-effectful tools (send/post/
+    /// create/reply), the actual content (recipient, subject, body) is shown in
+    /// full so a non-technical user can eyeball it before approving.
     pub fn prompt_approval(tool_name: &str, args_display: &str) -> Result<bool> {
         println!();
-        println!("  ┌──────────────────────────────────────────────────────────┐");
-        println!("  │  ⚠️  PERMISSION REQUIRED                                 │");
-        println!("  ├──────────────────────────────────────────────────────────┤");
-        println!("  │  Tool:  {:<50} │", tool_name);
-        let args_short = if args_display.chars().count() > 50 {
-            let truncated: String = args_display.chars().take(47).collect();
-            format!("{}...", truncated)
-        } else {
-            args_display.to_string()
-        };
-        println!("  │  Args:  {:<50} │", args_short);
-        println!("  └──────────────────────────────────────────────────────────┘");
-        print!("  Allow this action? [y/n]: ");
+        println!("  ⚠️  APPROVAL REQUIRED");
+        println!("  ────────────────────────────────────────────────────────");
+        println!("  Tool: {}", tool_name);
+
+        let lower = tool_name.to_lowercase();
+        let is_side_effect = [
+            "send", "post", "reply", "create", "publish", "email", "message",
+        ]
+        .iter()
+        .any(|k| lower.contains(k));
+        if is_side_effect {
+            println!("  \x1b[33mThis will take an external action on your behalf.\x1b[0m");
+        }
+
+        // Pretty-print the arguments so the human sees the real content.
+        match serde_json::from_str::<serde_json::Value>(args_display) {
+            Ok(val) => {
+                if let Some(obj) = val.as_object() {
+                    println!("  Details:");
+                    for (k, v) in obj {
+                        let text = match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        // Show the full value for the fields that matter most on a
+                        // side-effectful action; cap the rest so the prompt stays readable.
+                        let important = [
+                            "to",
+                            "recipient",
+                            "subject",
+                            "body",
+                            "text",
+                            "message",
+                            "content",
+                        ]
+                        .contains(&k.as_str());
+                        if important || text.chars().count() <= 200 {
+                            println!("    {}: {}", k, text);
+                        } else {
+                            let short: String = text.chars().take(200).collect();
+                            println!("    {}: {}… [{} chars]", k, short, text.chars().count());
+                        }
+                    }
+                } else {
+                    println!("  Args: {}", val);
+                }
+            }
+            Err(_) => {
+                let short: String = args_display.chars().take(400).collect();
+                println!("  Args: {}", short);
+            }
+        }
+        println!("  ────────────────────────────────────────────────────────");
+        print!("  Allow this action? [y/N]: ");
         io::stdout().flush()?;
 
         let mut input = String::new();

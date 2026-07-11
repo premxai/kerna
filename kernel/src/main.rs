@@ -186,6 +186,24 @@ enum Commands {
         #[command(subcommand)]
         action: KeysCommands,
     },
+
+    /// Manage plugin secrets (guided setup; secrets live in environment variables)
+    Secrets {
+        #[command(subcommand)]
+        action: SecretsCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SecretsCommands {
+    /// Show which environment variables a plugin needs and whether they are set
+    Add {
+        /// MCP plugin/server name (as configured in kerna.toml)
+        #[arg(index = 1)]
+        plugin: String,
+    },
+    /// List every plugin and the status of the secrets it declares
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -940,6 +958,7 @@ async fn main() -> Result<()> {
                         approval_required: vec![],
                         allow_tools: vec![],
                         deny_tools: vec![],
+                        secrets: vec![],
                         runtime_mode: "native".to_string(),
                         docker_image: "ubuntu:latest".to_string(),
                     };
@@ -1578,6 +1597,98 @@ async fn main() -> Result<()> {
                         println!("  {:<12} {}", name, status);
                     }
                     println!("\nAdd a key with:  kerna keys add <provider>");
+                }
+            }
+        }
+
+        Some(Commands::Secrets { action }) => {
+            // Secrets a plugin declares come from its manifest (plugins/<name>/manifest.toml)
+            // unioned with anything already listed in kerna.toml. Only names are
+            // shown here; values live in the environment and are never printed.
+            let plugin_secrets = |name: &str| -> Vec<String> {
+                let mut names: Vec<String> = config
+                    .mcp_servers
+                    .iter()
+                    .find(|s| s.name == name)
+                    .map(|s| s.secrets.clone())
+                    .unwrap_or_default();
+                let manifest_path = format!("plugins/{}/manifest.toml", name);
+                if let Ok(m) =
+                    plugin_manifest::PluginManifest::load(std::path::Path::new(&manifest_path))
+                {
+                    for s in m.plugin.secrets {
+                        if !names.contains(&s) {
+                            names.push(s);
+                        }
+                    }
+                }
+                names
+            };
+            let is_set = |env_var: &str| {
+                std::env::var(env_var)
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false)
+            };
+            match action {
+                SecretsCommands::Add { plugin } => {
+                    let secrets = plugin_secrets(&plugin);
+                    if config.mcp_servers.iter().all(|s| s.name != plugin)
+                        && !std::path::Path::new(&format!("plugins/{}/manifest.toml", plugin))
+                            .exists()
+                    {
+                        eprintln!(
+                            "[-] Plugin '{}' is not configured and has no manifest. Add it first: kerna mcp add {} <command> [args...]",
+                            plugin, plugin
+                        );
+                    } else if secrets.is_empty() {
+                        println!("Plugin '{}' declares no secrets — nothing to set.", plugin);
+                    } else {
+                        println!("Secrets for plugin '{}':\n", plugin);
+                        for env_var in &secrets {
+                            if is_set(env_var) {
+                                println!("  \x1b[32m[set]\x1b[0m {}", env_var);
+                            } else {
+                                println!("  \x1b[31m[missing]\x1b[0m {}", env_var);
+                                if cfg!(windows) {
+                                    println!(
+                                        "      setx {} \"your-value\"     (new terminals)",
+                                        env_var
+                                    );
+                                    println!(
+                                        "      $env:{} = \"your-value\"   (this session)",
+                                        env_var
+                                    );
+                                } else {
+                                    println!("      export {}=\"your-value\"", env_var);
+                                }
+                            }
+                        }
+                        println!(
+                            "\nKerna reads these from your environment and injects them into the\nplugin's process only. They are never written to kerna.toml."
+                        );
+                    }
+                }
+                SecretsCommands::List => {
+                    println!("Plugin secret status:\n");
+                    if config.mcp_servers.is_empty() {
+                        println!("  No plugins configured. Add one with: kerna mcp add <name> <command> [args...]");
+                    }
+                    for server in &config.mcp_servers {
+                        let secrets = plugin_secrets(&server.name);
+                        if secrets.is_empty() {
+                            println!("  {:<14} (no secrets)", server.name);
+                        } else {
+                            for env_var in secrets {
+                                let status = if is_set(&env_var) {
+                                    "\x1b[32mset\x1b[0m".to_string()
+                                } else {
+                                    format!("\x1b[31mmissing\x1b[0m (set {})", env_var)
+                                };
+                                println!("  {:<14} {:<24} {}", server.name, env_var, status);
+                            }
+                        }
+                    }
+                    println!("\nConfigure with:  kerna secrets add <plugin>");
                 }
             }
         }
