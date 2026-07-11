@@ -265,6 +265,55 @@ pub fn run_onboarding(
     );
     println!();
 
+    // 4. Optional starter tools — install a curated pack so a new user has
+    //    something useful on day one. Fail-closed: the pack only sets read tools
+    //    to require_confirmation; nothing is auto-approved.
+    if !(ci || quick || yes) {
+        let tool_opts = vec![
+            "Productivity (web search, notes, web reading)",
+            "Developer (files, git, HTTP)",
+            "None for now",
+        ];
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Install a starter tool pack?")
+            .default(0)
+            .items(&tool_opts)
+            .interact()
+            .unwrap_or(2);
+        let pack_name = match selection {
+            0 => Some("productivity"),
+            1 => Some("dev"),
+            _ => None,
+        };
+        if let Some(name) = pack_name {
+            match crate::packs::load_pack(name) {
+                Ok(pack) => {
+                    let report = crate::packs::install(&mut config, &pack);
+                    println!(
+                        " {} Installed '{}' pack: {}",
+                        style("[✓]").green(),
+                        name,
+                        report.added.join(", ")
+                    );
+                    for (plugin, env_var) in &report.secrets_needed {
+                        println!(
+                            "     Set {} for '{}':  kerna secrets add {}",
+                            env_var, plugin, plugin
+                        );
+                    }
+                }
+                Err(e) => {
+                    println!(
+                        " {} Could not install pack now ({}). Add later: kerna pack install {}",
+                        style("[!]").yellow(),
+                        e,
+                        name
+                    );
+                }
+            }
+        }
+    }
+
     // Write config
     if let Ok(toml_str) = toml::to_string_pretty(&config) {
         let _ = fs::write("kerna.toml", toml_str);

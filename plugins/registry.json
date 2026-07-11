@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "name": "files",
+      "description": "Read, write, list, and search files in the workspace.",
+      "command": "python",
+      "args": ["{plugins}/files_mcp/mcp_server.py"],
+      "secrets": [],
+      "tags": ["dev", "files"],
+      "suggest_confirm": ["read_file", "list_dir", "search_text", "write_file"]
+    },
+    {
+      "name": "web",
+      "description": "Fetch a URL and read its text (HTML stripped).",
+      "command": "python",
+      "args": ["{plugins}/web_mcp/mcp_server.py"],
+      "secrets": [],
+      "tags": ["productivity", "research", "web"],
+      "suggest_confirm": ["read_page_text", "fetch_url"]
+    },
+    {
+      "name": "git",
+      "description": "Read-only git: status, branch, log, diff.",
+      "command": "python",
+      "args": ["{plugins}/git_mcp/mcp_server.py"],
+      "secrets": [],
+      "tags": ["dev", "git"],
+      "suggest_confirm": ["git_status", "git_branch", "git_log", "git_diff"]
+    },
+    {
+      "name": "search",
+      "description": "Web search via Tavily (needs TAVILY_API_KEY, free at tavily.com).",
+      "command": "python",
+      "args": ["{plugins}/search_mcp/mcp_server.py"],
+      "secrets": ["TAVILY_API_KEY"],
+      "tags": ["productivity", "research", "search"],
+      "suggest_confirm": ["web_search"]
+    },
+    {
+      "name": "notes",
+      "description": "Personal markdown notes stored in the workspace.",
+      "command": "python",
+      "args": ["{plugins}/notes_mcp/mcp_server.py"],
+      "secrets": [],
+      "tags": ["productivity", "notes"],
+      "suggest_confirm": ["list_notes", "read_note", "search_notes", "add_note"]
+    },
+    {
+      "name": "http",
+      "description": "Generic HTTP/JSON API caller (optional host allowlist).",
+      "command": "python",
+      "args": ["{plugins}/http_mcp/mcp_server.py"],
+      "secrets": [],
+      "tags": ["dev", "http"],
+      "suggest_confirm": ["http_get", "http_post_json"]
+    },
+    {
+      "name": "github",
+      "description": "GitHub (issues, PRs, repos) via the official MCP server. Needs Node/npx.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "secrets": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+      "tags": ["dev", "github"],
+      "suggest_confirm": []
+    },
+    {
+      "name": "slack",
+      "description": "Slack (read channels, post messages) via the official MCP server. Needs Node/npx.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-slack"],
+      "secrets": ["SLACK_BOT_TOKEN", "SLACK_TEAM_ID"],
+      "tags": ["productivity", "messaging", "slack"],
+      "suggest_confirm": []
+    },
+    {
+      "name": "fetch",
+      "description": "Web content fetch/convert via the official MCP server. Needs Node/npx.",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-fetch"],
+      "secrets": [],
+      "tags": ["productivity", "research", "web"],
+      "suggest_confirm": ["fetch"]
+    }
+  ]
+}

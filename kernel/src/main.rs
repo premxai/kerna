@@ -15,6 +15,7 @@ mod packs;
 mod permissions;
 pub mod plugin_manifest;
 pub mod providers;
+mod registry;
 mod sandbox;
 mod scheduler;
 mod security;
@@ -204,6 +205,28 @@ enum Commands {
     Routine {
         #[command(subcommand)]
         action: RoutineCommands,
+    },
+
+    /// Browse and install plugins from the registry
+    Plugins {
+        #[command(subcommand)]
+        action: PluginsCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PluginsCommands {
+    /// List all plugins in the registry
+    List,
+    /// Search the registry by name, description, or tag
+    Search {
+        #[arg(index = 1)]
+        query: String,
+    },
+    /// Install a plugin from the registry (fail-closed; you still grant each tool)
+    Install {
+        #[arg(index = 1)]
+        name: String,
     },
 }
 
@@ -1877,6 +1900,79 @@ async fn main() -> Result<()> {
                 }
             }
         },
+
+        Some(Commands::Plugins { action }) => {
+            let reg = match registry::load() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!(
+                        "[-] {}\n    Set KERNA_PLUGINS_DIR if you installed the binary standalone.",
+                        e
+                    );
+                    std::process::exit(1);
+                }
+            };
+            let print_row = |p: &registry::RegistryPlugin| {
+                let secrets = if p.secrets.is_empty() {
+                    String::new()
+                } else {
+                    format!("  [needs: {}]", p.secrets.join(", "))
+                };
+                println!("  {:<10} {}{}", p.name, p.description, secrets);
+            };
+            match action {
+                PluginsCommands::List => {
+                    println!("Registry plugins:\n");
+                    for p in &reg.plugins {
+                        print_row(p);
+                    }
+                    println!("\nInstall with:  kerna plugins install <name>");
+                }
+                PluginsCommands::Search { query } => {
+                    let hits = registry::search(&reg, &query);
+                    println!("Plugins matching '{}':\n", query);
+                    if hits.is_empty() {
+                        println!("  (none)");
+                    }
+                    for p in &hits {
+                        print_row(p);
+                    }
+                }
+                PluginsCommands::Install { name } => match registry::find(&reg, &name) {
+                    Some(plugin) => {
+                        let report = registry::install(&mut config, plugin);
+                        config.save();
+                        if report.added.is_empty() {
+                            println!("[i] Plugin '{}' is already installed.", name);
+                        } else {
+                            println!("[+] Installed plugin '{}': {}", name, plugin.description);
+                        }
+                        for (plug, env_var) in &report.secrets_needed {
+                            let set = std::env::var(env_var)
+                                .map(|v| !v.trim().is_empty())
+                                .unwrap_or(false);
+                            let status = if set {
+                                "\x1b[32mset\x1b[0m"
+                            } else {
+                                "\x1b[31mmissing\x1b[0m"
+                            };
+                            println!(
+                                "    Set {} ({}); guide: kerna secrets add {}",
+                                env_var, status, plug
+                            );
+                        }
+                        println!(
+                            "  Suggested tools are require_confirmation (fail-closed). Review: kerna mcp risk {}",
+                            name
+                        );
+                    }
+                    None => {
+                        eprintln!("[-] Plugin '{}' not found. Try: kerna plugins list", name);
+                        std::process::exit(1);
+                    }
+                },
+            }
+        }
 
         Some(Commands::Config { action }) => match action {
             Some(ConfigCommands::Path) => {

@@ -147,7 +147,15 @@ kerna mcp risk search              # read the risk card before granting
 | **productivity** | search (`web_search`), notes (`add_note`/`search_notes`/…), web (`fetch_url`/`read_page_text`) |
 | **dev** | files (`read_file`/`write_file`/…), git (read-only), http (`http_get`/`http_post_json`) |
 
-Every tool is fail-closed — a pack sets read tools to *require approval* and leaves the rest denied until you grant them. Connect any other MCP server too (`kerna mcp add fetch npx -y @modelcontextprotocol/server-fetch`), and Kerna governs it the same way.
+Or browse the registry for individual plugins (Kerna's own + wrapped official servers like GitHub and Slack):
+
+```bash
+kerna plugins list                 # everything available
+kerna plugins search messaging     # by name, description, or tag
+kerna plugins install github       # registers it, tells you which secret to set
+```
+
+Every tool is fail-closed — installing a pack or plugin sets read tools to *require approval* and leaves the rest denied until you grant them. Connect any other MCP server too (`kerna mcp add fetch npx -y @modelcontextprotocol/server-fetch`), and Kerna governs it the same way.
 
 Not a developer? Start with the [everyday guide](docs/EVERYDAY.md). Want recurring routines (a daily digest, morning news)? `kerna routine add daily-digest` and run `kerna daemon`.
 
