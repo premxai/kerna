@@ -287,14 +287,12 @@ pub enum PolicyCommands {
 pub enum McpCommands {
     /// List configured plugins
     List,
-    /// Add a new plugin to config
+    /// Add a new plugin to config: kerna mcp add <name> <command> [args...]
     Add {
-        #[arg(index = 1)]
         name: String,
-
-        #[arg(index = 2)]
         command: String,
-
+        /// Remaining arguments passed to the command (e.g. the server script path).
+        #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
     /// Probe an MCP server for its raw capabilities

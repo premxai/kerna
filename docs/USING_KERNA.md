@@ -53,13 +53,15 @@ kerna provider add myhost --base-url https://my-endpoint/v1 --api-key-env MY_KEY
 
 ## Connecting tools (MCP plugins)
 
-A tool is anything exposed by an MCP server over stdio. Kerna ships three reference plugins in [`plugins/`](../plugins/), and you can add any other:
+A tool is anything exposed by an MCP server over stdio. Kerna ships a zero-dependency **starter pack** (files, web, git) plus reference plugins in [`plugins/`](../plugins/). Add the starter pack in one shot:
 
 ```bash
-kerna mcp add filesystem --command python --args "plugins/desktop_mcp/mcp_server.py"
-kerna mcp risk filesystem      # read the risk card BEFORE granting anything
-kerna mcp list                 # what's connected and what tools they expose
+./scripts/add_starter_plugins.sh   # files + web + git   (scripts\add_starter_plugins.ps1 on Windows)
+kerna mcp list                     # what's connected and what tools they expose
+kerna mcp risk files               # read the risk card BEFORE granting anything
 ```
+
+Add any other MCP server (yours or third-party) with `kerna mcp add <name> <command> [args...]` — e.g. `kerna mcp add fetch npx -y @modelcontextprotocol/server-fetch`. See [plugins/README.md](../plugins/README.md) for the catalog.
 
 Nothing a plugin exposes can actually run until you grant it in `kerna.toml`. That's the whole point.
 

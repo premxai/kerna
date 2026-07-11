@@ -1,0 +1,11 @@
+[plugin]
+name = "desktop"
+version = "1.0.0"
+kind = "tool.mcp"
+entrypoint = "mcp_server.py"
+source = "kerna-reference"
+trust = "untrusted"
+capabilities = ["desktop_click", "desktop_type", "fs_list_dir"]
+requires_approval = ["desktop_click", "desktop_type"]
+declared_outputs = ["text"]
+max_output_bytes = 50000

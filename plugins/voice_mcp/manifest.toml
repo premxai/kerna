@@ -1,0 +1,11 @@
+[plugin]
+name = "voice"
+version = "1.0.0"
+kind = "tool.mcp"
+entrypoint = "mcp_server.py"
+source = "kerna-reference"
+trust = "untrusted"
+capabilities = ["voice_speak", "voice_listen"]
+requires_approval = ["voice_listen"]
+declared_outputs = ["text"]
+max_output_bytes = 50000
