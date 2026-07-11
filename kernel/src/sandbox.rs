@@ -19,6 +19,10 @@ pub fn is_out_of_workspace_path(path: &str) -> bool {
     if path.starts_with('/') || path.contains("..") {
         return true;
     }
+    // Home-directory reference (`~`, `~/foo`, `~\foo`) resolves outside the workspace.
+    if path == "~" || path.starts_with("~/") || path.starts_with("~\\") {
+        return true;
+    }
     // UNC path, e.g. \\server\share
     if path.starts_with("\\\\") {
         return true;
@@ -297,15 +301,31 @@ impl ProcessSandbox {
         if tool == "run_command" {
             if let Ok(parsed_args) = serde_json::from_str::<serde_json::Value>(args) {
                 if let Some(cmd) = parsed_args.get("command").and_then(|v| v.as_str()) {
+                    let arg_strings: Vec<String> = parsed_args
+                        .get("args")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|a| a.as_str().unwrap_or("").to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let arg_refs: Vec<&str> = arg_strings.iter().map(|s| s.as_str()).collect();
+
+                    // Classify the command itself — this catches shell/interpreter
+                    // wrappers (`bash -c "rm -rf /"`), sudo/chmod/chown, global
+                    // installs, and `rm -rf /` or `rm -rf ~` regardless of the
+                    // rm/mv/cp path heuristic below.
+                    if classify_command(cmd, &arg_refs) == CommandClass::DangerousGlobal {
+                        decision.is_allowed = false;
+                        decision.reasons.push(format!(
+                            "Command '{}' is classified as globally destructive/dangerous.",
+                            cmd
+                        ));
+                    }
+
                     if cmd == "rm" || cmd == "mv" || cmd == "cp" {
-                        let is_global = parsed_args
-                            .get("args")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .any(|arg| is_out_of_workspace_path(arg.as_str().unwrap_or("")))
-                            })
-                            .unwrap_or(false);
+                        let is_global = arg_refs.iter().any(|arg| is_out_of_workspace_path(arg));
 
                         if is_global {
                             decision.is_allowed = false;
@@ -397,10 +417,47 @@ mod tests {
         assert!(is_out_of_workspace_path("D:\\data"));
         // UNC paths
         assert!(is_out_of_workspace_path("\\\\server\\share"));
+        // Home-directory references resolve outside the workspace
+        assert!(is_out_of_workspace_path("~"));
+        assert!(is_out_of_workspace_path("~/.ssh/id_rsa"));
+        assert!(is_out_of_workspace_path("~\\Documents"));
         // In-workspace relative paths remain allowed
         assert!(!is_out_of_workspace_path("build/output.txt"));
         assert!(!is_out_of_workspace_path("./notes.md"));
         assert!(!is_out_of_workspace_path("file.txt"));
+    }
+
+    #[test]
+    fn test_simulate_denies_wrappers_and_home() {
+        let dir = env::temp_dir().join("kerna_sim_sandbox");
+        let sandbox =
+            ProcessSandbox::new(&dir, "native".to_string(), false, "none".to_string(), None)
+                .unwrap();
+        // Permissive policy so the *only* thing that can deny is the sandbox
+        // boundary/classification logic under test.
+        let config = crate::config::Config {
+            permissions: vec![crate::config::PermissionRule {
+                tool: "*".to_string(),
+                action: "auto_approve".to_string(),
+            }],
+            ..Default::default()
+        };
+        let perms = crate::permissions::PermissionManager::new(config);
+
+        let denied = |args: &str| {
+            !sandbox
+                .simulate_command("run_command", args, &perms)
+                .unwrap()
+                .is_allowed
+        };
+        // Shell wrapper smuggling a destructive command.
+        assert!(denied(r#"{"command":"bash","args":["-c","rm -rf /"]}"#));
+        // rm targeting the home directory.
+        assert!(denied(r#"{"command":"rm","args":["-rf","~"]}"#));
+        // Classic global rm.
+        assert!(denied(r#"{"command":"rm","args":["-rf","/"]}"#));
+        // A benign in-workspace command still passes.
+        assert!(!denied(r#"{"command":"ls","args":["-la"]}"#));
     }
 
     #[tokio::test]
