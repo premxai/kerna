@@ -44,6 +44,8 @@ pub struct TaskScheduler {
     mcp_registry: Arc<Mutex<McpRegistry>>,
     permissions: PermissionManager,
     session_id: Option<String>,
+    /// Shared HTTP client — reused across LLM rounds so TLS connections pool.
+    http_client: reqwest::Client,
 }
 
 impl TaskScheduler {
@@ -61,6 +63,9 @@ impl TaskScheduler {
             config.egress_proxy.clone(),
         )?;
         let permissions = PermissionManager::new(config.clone());
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()?;
         Ok(TaskScheduler {
             config,
             memory,
@@ -68,6 +73,7 @@ impl TaskScheduler {
             mcp_registry,
             permissions,
             session_id,
+            http_client,
         })
     }
 
@@ -903,9 +909,7 @@ impl TaskScheduler {
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
     ) -> Result<(ChatMessage, u64)> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()?;
+        let client = &self.http_client;
 
         let url = format!(
             "{}/chat/completions",
@@ -979,9 +983,7 @@ impl TaskScheduler {
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
     ) -> Result<(ChatMessage, u64)> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()?;
+        let client = &self.http_client;
 
         let (system_prompt, anthropic_messages) = convert_to_anthropic(messages);
 

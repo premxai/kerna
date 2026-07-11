@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::time::timeout;
-use wasmtime::{Engine, Linker, Module, Store};
 
 #[derive(Debug, PartialEq)]
 pub enum CommandClass {
@@ -356,48 +355,6 @@ impl ProcessSandbox {
         }
 
         Ok(decision)
-    }
-}
-
-#[allow(dead_code)]
-pub struct WasmSandbox {
-    engine: Engine,
-}
-
-impl WasmSandbox {
-    #[allow(dead_code)]
-    pub fn new() -> Result<Self> {
-        let mut config = wasmtime::Config::new();
-        config.consume_fuel(true);
-        let engine = Engine::new(&config)?;
-        Ok(WasmSandbox { engine })
-    }
-
-    #[allow(dead_code)]
-    pub fn run_wasm_module(&self, wasm_path: &Path) -> Result<String> {
-        let wasm_bytes = fs::read(wasm_path)?;
-        let module = Module::new(&self.engine, &wasm_bytes)?;
-
-        let mut store = Store::new(&self.engine, ());
-        store.set_fuel(10_000_000)?; // 10 million instructions budget
-        let linker = Linker::new(&self.engine);
-
-        // Instantiate the module (empty imports for core calculation modules)
-        let instance = linker.instantiate(&mut store, &module)?;
-
-        // Try calling default run or start functions if exported
-        if let Ok(func) = instance.get_typed_func::<(), ()>(&mut store, "run") {
-            func.call(&mut store, ())?;
-            Ok("Wasm module execution completed successfully via run().".to_string())
-        } else if let Ok(func) = instance.get_typed_func::<(), ()>(&mut store, "_start") {
-            // Emulate WASI start call
-            func.call(&mut store, ())?;
-            Ok("Wasm module execution completed successfully via _start().".to_string())
-        } else {
-            Err(anyhow!(
-                "Wasm module has no exported run() or _start() entry point"
-            ))
-        }
     }
 }
 

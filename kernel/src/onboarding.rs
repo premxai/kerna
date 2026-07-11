@@ -1,4 +1,5 @@
 use crate::config::{BudgetPreset, Config, PermissionRule};
+use crate::providers;
 use console::style;
 use dialoguer::{theme::ColorfulTheme, Select};
 use std::collections::HashMap;
@@ -44,41 +45,103 @@ pub fn run_onboarding(
 
     let mut config = Config::load();
 
-    // 1. LLM Provider
+    // 1. LLM Provider — driven by the built-in preset catalog so onboarding
+    //    always matches what the runtime actually supports.
     if let Some(p) = provider_flag {
         config.llm_provider = p;
     } else if ci || quick || yes {
         config.llm_provider = "openai".to_string();
     } else {
-        let providers = vec![
-            "OpenAI",
-            "Anthropic",
-            "Local / OpenAI-compatible",
+        let choices = vec![
+            "OpenAI            (gpt-4o-mini)",
+            "Anthropic         (claude-sonnet-4)",
+            "Ollama            (local, no API key needed)",
+            "OpenRouter        (one key, 300+ models)",
+            "Groq              (fast llama inference)",
+            "Other / OpenAI-compatible endpoint",
+            "🎬 Demo mode      (no key, mock LLM — try Kerna instantly)",
             "Skip for now",
         ];
         let selection = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt("Select provider")
+            .with_prompt("Which model provider do you want to start with?")
             .default(0)
-            .items(&providers)
+            .items(&choices)
             .interact()
-            .unwrap_or(3);
+            .unwrap_or(7);
 
         config.llm_provider = match selection {
             0 => "openai".to_string(),
             1 => "anthropic".to_string(),
-            2 => "local".to_string(),
+            2 => "ollama".to_string(),
+            3 => "openrouter".to_string(),
+            4 => "groq".to_string(),
+            5 => "local".to_string(),
+            6 => "mock".to_string(),
             _ => "skip".to_string(),
         };
     }
 
+    // Model default comes from the provider preset so it never goes stale.
     if let Some(m) = model_flag {
         config.llm_model = m;
-    } else if config.llm_provider == "openai" {
-        config.llm_model = "gpt-4o-mini".to_string();
-    } else if config.llm_provider == "anthropic" {
-        config.llm_model = "claude-3-5-sonnet-20240620".to_string();
+    } else if let Some(info) = providers::preset_info(&config.llm_provider) {
+        config.llm_model = info.default_model;
+    } else if config.llm_provider == "mock" {
+        config.llm_model = "mock".to_string();
     } else {
         config.llm_model = "llama3".to_string();
+    }
+
+    // Key guidance: tell the user exactly which env var this provider reads,
+    // and whether it's already set. Never ask for the key itself.
+    if !(ci || quick || yes)
+        && config.llm_provider != "mock"
+        && config.llm_provider != "skip"
+        && config.llm_provider != "ollama"
+    {
+        let env_var = providers::api_key_env_for(&config, &config.llm_provider);
+        println!();
+        if std::env::var(&env_var)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
+            println!(
+                " {} {} detected in your environment — you're ready to go.",
+                style("[✓]").green(),
+                style(&env_var).bold()
+            );
+        } else {
+            println!(
+                " {} Set your API key (Kerna reads it from the environment, never stores it):",
+                style("[i]").cyan()
+            );
+            if cfg!(windows) {
+                println!(
+                    "     setx {} \"your-key-here\"     (new terminals)",
+                    env_var
+                );
+                println!("     $env:{} = \"your-key-here\"   (this session)", env_var);
+            } else {
+                println!("     export {}=\"your-key-here\"", env_var);
+            }
+            println!(
+                "     Validate anytime with: {}",
+                style(format!("kerna keys add {}", config.llm_provider)).bold()
+            );
+        }
+        println!();
+    }
+    if config.llm_provider == "ollama" && !(ci || quick || yes) {
+        println!();
+        println!(
+            " {} Ollama runs locally — no API key needed. Make sure it's running:",
+            style("[i]").cyan()
+        );
+        println!(
+            "     ollama serve   (then: ollama pull {})",
+            config.llm_model
+        );
+        println!();
     }
 
     // 2. Default Policy
@@ -210,14 +273,39 @@ pub fn run_onboarding(
     if !ci {
         println!("{}", style("[✓] Kerna is ready.").green().bold());
         println!();
-        println!("Let's test your agent's execution boundaries.");
-        println!("Run your first supervised task:");
-        println!(
-            "  > kerna run \"Calculate 25 * 4 and save it to result.txt\" --budget-tool-calls=5"
-        );
+        println!("{}", style("Your first 3 commands:").bold());
         println!();
-        println!("Then, audit the agent's exact thought process and policy checks:");
-        println!("  > kerna trace last");
+        if config.llm_provider == "mock" {
+            println!(
+                "  {}  {}",
+                style("1.").cyan(),
+                style("kerna run \"Please call echo\"").bold()
+            );
+            println!("      Watch a full agent loop run with zero API keys.");
+        } else {
+            println!(
+                "  {}  {}",
+                style("1.").cyan(),
+                style("kerna run \"Summarize the files in this folder\"").bold()
+            );
+            println!("      Your first supervised task — Kerna asks before anything risky.");
+        }
+        println!();
+        println!(
+            "  {}  {}",
+            style("2.").cyan(),
+            style("kerna trace last").bold()
+        );
+        println!("      The black-box recording: every prompt, tool call, and policy check.");
+        println!();
+        println!("  {}  {}", style("3.").cyan(), style("kerna doctor").bold());
+        println!("      Health check: database, provider keys, plugins.");
+        println!();
+        println!(
+            "{} kerna mcp add <name> --command <cmd>   (connect your tools)",
+            style("Add tools:").bold()
+        );
+        println!("{} docs/USING_KERNA.md", style("Learn more:").bold());
         println!();
     }
 }

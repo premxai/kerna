@@ -3,3 +3,10 @@ resolver = "2"
 members = [
     "kernel",
 ]
+
+# Optimized settings for shipped binaries: smaller downloads, faster startup.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3

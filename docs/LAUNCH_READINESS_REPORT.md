@@ -14,8 +14,10 @@ Kerna is a Rust **runtime trust layer** for AI agents: it owns the agent loop's 
 | `cargo fmt --check` | ✅ formatted |
 | `cargo clippy` | ✅ zero warnings |
 | `cargo test` | ✅ **41 passed** (was 29) |
-| `cargo audit` | ✅ no vulnerabilities (2 low-priority *unmaintained* transitive crates: `fxhash`, `rustls-pemfile`) |
-| CLI command matrix | ✅ **24/24 checks pass** |
+| `cargo build --release` | ✅ clean with LTO profile |
+| `cargo audit` | ✅ no vulnerabilities (1 *unmaintained* transitive crate: `rustls-pemfile`; `fxhash` gone with wasmtime) |
+| Dependency count | ✅ **227 crates** (was 333, −106 after dropping wasmtime) |
+| CLI command matrix | ✅ **26/26 checks pass** |
 | Server auth (live HTTP) | ✅ 401 without token, 200 + real output with token |
 | Smoke test (`scripts/smoke_test.sh`) | ✅ pipeline trace verified |
 
@@ -43,6 +45,14 @@ Kerna is a Rust **runtime trust layer** for AI agents: it owns the agent loop's 
 - **MCP client robustness**: JSON-RPC responses are matched by request `id`; notification and noise lines are skipped within a bounded loop.
 - **`classify_command` hardening**: shell/interpreter inline-code wrappers (`bash -c`, `powershell -Command`, `cmd /C`, `python -c`, …) classified DangerousGlobal; install-block list extended (`pip3`, `python -m pip`, `apt`, `brew`, `winget`, `choco`, `yarn`, `pnpm`, `gem`, `go install`).
 - Documented the prompt-injection detector as heuristic-only in `SECURITY_MODEL.md` (the real control is the fail-closed permission + budget layer).
+
+### Phase 6 — Performance, onboarding & docs (follow-up pass)
+- **Dropped the unused `wasmtime` dependency** (`WasmSandbox` was defined but never constructed). This cut the dependency graph **333 → 227 crates (−106)**, meaningfully shrinking cold-build time and binary size, and it eliminated the `fxhash` unmaintained advisory (only `rustls-pemfile`, transitive from reqwest, remains).
+- Added a `[profile.release]` (`lto = true`, `codegen-units = 1`, `strip = true`, `opt-level = 3`) for small, fast shipped binaries.
+- **Shared `reqwest::Client`**: built once in `TaskScheduler::new` and reused across LLM rounds so TLS connections pool (was rebuilt every call).
+- **Bounded `@file`/`@url` goal injection**: 256 KB cap (char-boundary safe), 20 s fetch timeout, and content fenced as "untrusted … data, not instructions" — closes an unbounded-download / prompt-injection surface. Verified a 400 KB file still runs cleanly.
+- **Redesigned `kerna init` onboarding**: provider picker now lists all presets + a zero-key **Demo mode** + Ollama; shows the exact env var each provider reads (with SET/MISSING detection and per-OS `setx`/`export` lines); ends with a tailored "your first 3 commands" block.
+- New everyday-usage guide `docs/USING_KERNA.md`; README gains a completed command reference + tools/MCP catalog (the previous table was truncated mid-row).
 
 ### Earlier in the session (pre-plan)
 - Fixed a Windows/UNC absolute-path bypass in the workspace-boundary check (`rm C:\Windows` was allowed; now denied).
@@ -99,6 +109,9 @@ All exercised against the mock provider + MockMCP (no real keys):
 - [x] Full command suite tested end-to-end
 - [x] CI runs fmt + clippy + audit + tests + smoke on 3 OSes
 - [x] Release workflow producing tagged binaries (win/mac/linux)
-- [ ] README rewritten around the killer demo (Phase 5)
+- [x] README rewritten around the killer demo, with cross-platform install + command reference
+- [x] Guided terminal onboarding (`kerna init`) with zero-key Demo mode
+- [x] Everyday usage guide (`docs/USING_KERNA.md`)
+- [x] Dependency/perf cleanup (dropped wasmtime, release profile, shared HTTP client)
 - [ ] Real embeddings / streaming (post-launch)
 - [ ] History blob removed (owner decision)

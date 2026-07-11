@@ -61,24 +61,82 @@ Most agent frameworks help you *build* agents. Kerna helps you *run them safely*
 - **Process isolation** — MCP plugins run as untrusted child processes in a sandboxed working dir; hung plugins are killed and reaped, and the agent chooses another path.
 - **BYOK privacy routing** — route sensitive tasks to local models so secrets never leave the machine.
 
+## Install
+
+**Prebuilt binaries** (recommended) — grab the latest from [Releases](https://github.com/premxai/kerna/releases) for your platform:
+
+| Platform | Steps |
+|---|---|
+| **Windows** | Download `kerna-windows-x86_64.zip`, extract, add the folder to your `PATH` (or `scoop install` — manifest coming soon) |
+| **macOS** | `curl -LO` the `kerna-macos-*.tar.gz` for your chip (Intel `x86_64` / Apple Silicon `aarch64`), `tar xzf`, move `kerna` to `/usr/local/bin` |
+| **Linux** | `curl -LO` the `kerna-linux-x86_64.tar.gz`, `tar xzf`, move `kerna` to `~/.local/bin` or `/usr/local/bin` |
+
+**From source** (any platform with the [Rust toolchain](https://rustup.rs)):
+
+```bash
+git clone https://github.com/premxai/kerna.git
+cd kerna/kernel
+cargo install --path .        # installs `kerna` into ~/.cargo/bin
+```
+
+Verify with `kerna --version`.
+
 ## Getting started
 
 ```bash
-# 1. Build (Rust toolchain required)
-cd kernel && cargo build --release
+# 1. Initialize — a guided setup picks your provider, policy, and budgets
+kerna init
 
-# 2. Initialize
-kerna init --quick
-
-# 3. Add a provider key (or use Ollama for zero-key local)
+# 2. Add a provider key (or pick Ollama / Demo mode for zero-key)
 kerna keys add openai
 
-# 4. Check system health
+# 3. Check system health
 kerna doctor
 
-# 5. Run a supervised task
+# 4. Run a supervised task
 kerna run "Write a Python script to calculate fibonacci"
+
+# 5. See exactly what the agent did
+kerna trace last
 ```
+
+## Command reference
+
+| Command | What it does |
+|---|---|
+| `kerna init` | Guided onboarding: provider, policy, budgets (use `--quick`/`--ci` for non-interactive) |
+| `kerna run "<goal>"` | Execute a goal through the agent loop (`--converse` to approve each tool, `--privacy local-only` to force local models) |
+| `kerna trace <id\|last>` | Full event trace: every prompt, tool call, policy check, budget snapshot |
+| `kerna inspect <id\|last>` | Task summary: duration, model, tools used, tokens, real cost |
+| `kerna explain <id\|last>` | Step-by-step reasoning chain for a task |
+| `kerna task list / show / replay / export` | Manage, replay, and export past tasks |
+| `kerna keys add / list` | Guided API-key setup + live validation (keys never written to disk) |
+| `kerna provider add / list / test / route` | Manage BYOK LLM providers and routing |
+| `kerna mcp add / probe / inspect / risk / filter` | Manage MCP plugins and their risk cards |
+| `kerna memory search / approve / reject` | Query and curate persistent memory |
+| `kerna policy simulate "<tool>" '<args>'` | Dry-run a tool call against the policy engine |
+| `kerna doctor` | System health: database, provider keys, plugins |
+| `kerna serve [--bind <addr>] [--token <t>]` | OpenAI-compatible API server |
+| `kerna daemon` / `kerna watch <url>` | Background scheduler + continuous watchers |
+
+## Tools & MCP plugins
+
+Kerna owns *no* domain logic — every capability is an MCP plugin spawned as an isolated child process. Reference plugins ship in [`plugins/`](plugins/):
+
+| Plugin | Tools |
+|--------|-------|
+| `mock_mcp` | `echo` plus fault-injection tools (`hang`, `huge_output`, …) for exercising the runtime |
+| `desktop_mcp` | Desktop automation (`desktop_click`, `desktop_type`) — gated behind approval |
+| `voice_mcp` | Voice I/O (`voice_speak`, `voice_listen`) |
+
+Connect any MCP server (yours or third-party):
+
+```bash
+kerna mcp add myserver --command python --args "path/to/mcp_server.py"
+kerna mcp risk myserver     # inspect its risk card before granting anything
+```
+
+New to Kerna? See the [everyday usage guide](docs/USING_KERNA.md).
 
 ## Serving an OpenAI-compatible API
 
