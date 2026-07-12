@@ -130,6 +130,7 @@ kerna trace last
 | `kerna serve [--bind <addr>] [--token <t>]` | OpenAI-compatible API server |
 | `kerna gateway` | Run as an MCP server that governs + records your other MCP tools |
 | `kerna folders add/list/remove` | Grant real Documents/Desktop/etc. folders for the agent to read (or write) |
+| `kerna preferences set/list/remove` | Explicit communication-style preferences, injected into every task |
 | `kerna daemon` / `kerna watch <url>` | Background scheduler + continuous watchers |
 
 ## Tools & MCP plugins

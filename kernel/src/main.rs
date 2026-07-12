@@ -219,6 +219,31 @@ enum Commands {
         #[command(subcommand)]
         action: FoldersCommands,
     },
+
+    /// Set, list, or remove your communication-style preferences (explicit only —
+    /// nothing is inferred; injected into every task's context once set)
+    Preferences {
+        #[command(subcommand)]
+        action: PreferencesCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PreferencesCommands {
+    /// Set a preference, e.g. `kerna preferences set tone concise`
+    Set {
+        #[arg(index = 1)]
+        key: String,
+        #[arg(index = 2)]
+        value: String,
+    },
+    /// List your current preferences
+    List,
+    /// Remove a preference
+    Remove {
+        #[arg(index = 1)]
+        key: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2082,6 +2107,45 @@ async fn main() -> Result<()> {
                 config.save();
                 println!("[+] Revoked folder grant '{}'.", name);
             }
+        },
+
+        Some(Commands::Preferences { action }) => match action {
+            PreferencesCommands::Set { key, value } => {
+                if let Err(e) = memory.set_style_preference(&key, &value) {
+                    eprintln!("[-] Could not save preference: {}", e);
+                    std::process::exit(1);
+                }
+                println!("[+] Set preference '{}' = '{}'.", key, value);
+                println!("    This is now included in every task's context.");
+            }
+            PreferencesCommands::List => match memory.get_style_preferences() {
+                Ok(prefs) if prefs.is_empty() => {
+                    println!(
+                        "No preferences set. Add one with: kerna preferences set <key> <value>"
+                    );
+                }
+                Ok(prefs) => {
+                    println!("Your preferences:\n");
+                    for (k, v) in prefs {
+                        println!("  {:<20} {}", k, v);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[-] Could not read preferences: {}", e);
+                    std::process::exit(1);
+                }
+            },
+            PreferencesCommands::Remove { key } => match memory.remove_style_preference(&key) {
+                Ok(true) => println!("[+] Removed preference '{}'.", key),
+                Ok(false) => {
+                    eprintln!("[-] No preference named '{}'.", key);
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("[-] Could not remove preference: {}", e);
+                    std::process::exit(1);
+                }
+            },
         },
 
         Some(Commands::Config { action }) => match action {

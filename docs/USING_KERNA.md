@@ -160,6 +160,19 @@ kerna memory search "how do I remove a file"   # ranked by similarity, not subst
 
 Want true neural embeddings? Point Kerna at any OpenAI-compatible `/embeddings` endpoint — e.g. Ollama's `nomic-embed-text` for local neural embeddings, or OpenAI's `text-embedding-3-*`. (Upgrade path; the local embedder is the zero-config default.)
 
+### Communication-style preferences (explicit only)
+
+Kerna never guesses your style — it only remembers what you tell it, via `kerna preferences`:
+
+```bash
+kerna preferences set tone concise
+kerna preferences set format "bullet points, no headers"
+kerna preferences list
+kerna preferences remove tone
+```
+
+Anything you set here is injected into every task's context from then on. You can also just say it mid-goal — "remember that I prefer short answers" — which stages a memory the normal way (`kerna memory staged` / `approve`); nothing is ever inferred or auto-detected from your behavior.
+
 ## Governing tools you already use (gateway mode)
 
 You don't have to run agents *through* Kerna to benefit from it. `kerna gateway` puts Kerna in front of your existing MCP tools as a proxy: your MCP client (Claude Code, Cursor, Cline) talks to Kerna, and Kerna talks to the real tool servers — applying policy and recording everything in between.

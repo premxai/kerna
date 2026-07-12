@@ -566,10 +566,30 @@ impl MemoryEngine {
         }
     }
 
-    pub fn get_all_preferences(&self) -> Result<Vec<(String, String)>> {
+    /// Prefix used to namespace genuine, user-facing style/communication
+    /// preferences (set via `kerna preferences`) within the same
+    /// `user_preferences` table other subsystems also use for internal
+    /// bookkeeping (e.g. `watchdog.rs` stores content-change hashes there).
+    /// Namespacing means `gather_context` can safely surface only real
+    /// preferences to the LLM without leaking internal state into the prompt.
+    const STYLE_PREFIX: &'static str = "style.";
+
+    /// Set a user-facing style/communication preference (e.g. "tone" ->
+    /// "concise"). Explicit only — nothing here is inferred automatically.
+    pub fn set_style_preference(&self, key: &str, value: &str) -> Result<()> {
+        self.set_preference(&format!("{}{}", Self::STYLE_PREFIX, key), value)
+    }
+
+    /// All user-facing style preferences, with the internal `style.` prefix
+    /// stripped. Excludes any other key stored in `user_preferences` (e.g.
+    /// watchdog bookkeeping), so this is what should be injected into prompts.
+    pub fn get_style_preferences(&self) -> Result<Vec<(String, String)>> {
         let conn = self.get_conn();
-        let mut stmt = conn.prepare("SELECT key, value FROM user_preferences ORDER BY key ASC")?;
-        let rows = stmt.query_map([], |row| {
+        let mut stmt = conn.prepare(
+            "SELECT key, value FROM user_preferences WHERE key LIKE ?1 ORDER BY key ASC",
+        )?;
+        let pattern = format!("{}%", Self::STYLE_PREFIX);
+        let rows = stmt.query_map(params![pattern], |row| {
             let key: String = row.get(0)?;
             let value: String = row.get(1)?;
             Ok((key, value))
@@ -577,9 +597,24 @@ impl MemoryEngine {
 
         let mut prefs = Vec::new();
         for r in rows {
-            prefs.push(r?);
+            let (key, value) = r?;
+            let display_key = key
+                .strip_prefix(Self::STYLE_PREFIX)
+                .unwrap_or(&key)
+                .to_string();
+            prefs.push((display_key, value));
         }
         Ok(prefs)
+    }
+
+    /// Remove a previously-set style preference. Returns true if a row was deleted.
+    pub fn remove_style_preference(&self, key: &str) -> Result<bool> {
+        let conn = self.get_conn();
+        let affected = conn.execute(
+            "DELETE FROM user_preferences WHERE key = ?1",
+            params![format!("{}{}", Self::STYLE_PREFIX, key)],
+        )?;
+        Ok(affected > 0)
     }
 
     // ─── Facts / Knowledge Graph ─────────────────────────────────
@@ -704,8 +739,10 @@ impl MemoryEngine {
             context.push('\n');
         }
 
-        // 2. User preferences
-        let prefs = self.get_all_preferences()?;
+        // 2. User preferences (only genuine style/communication preferences —
+        // NOT other subsystems' internal bookkeeping stored in the same table,
+        // e.g. watchdog.rs's content-change hashes; see get_style_preferences).
+        let prefs = self.get_style_preferences()?;
         if !prefs.is_empty() {
             context.push_str("## User preferences:\n");
             for (k, v) in &prefs {
@@ -837,6 +874,46 @@ mod tests {
         let logs = mem.get_task_logs(&task_id.to_string()).unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].2, "Testing task log");
+    }
+
+    #[test]
+    fn test_style_preferences_are_namespaced_and_dont_leak_watchdog_bookkeeping() {
+        let mem = setup_test_db("test_style_prefs");
+
+        // A genuine user-facing preference.
+        mem.set_style_preference("tone", "concise").unwrap();
+        // Simulate watchdog.rs's internal bookkeeping, which writes to the same
+        // underlying table via the generic set_preference (see watchdog.rs).
+        mem.set_preference("watchdog_some-task-id", "9f8e7d6c5b4a")
+            .unwrap();
+
+        let prefs = mem.get_style_preferences().unwrap();
+        assert_eq!(prefs.len(), 1, "only the real preference should surface");
+        assert_eq!(prefs[0], ("tone".to_string(), "concise".to_string()));
+
+        // The bug this guards against: gather_context must never show
+        // watchdog's internal key in the prompt.
+        let ctx = mem.gather_context("anything").unwrap();
+        assert!(
+            ctx.contains("tone: concise"),
+            "real preference should be in context: {}",
+            ctx
+        );
+        assert!(
+            !ctx.contains("watchdog_"),
+            "internal bookkeeping must never leak into the prompt: {}",
+            ctx
+        );
+
+        // Removal only affects the namespaced key.
+        assert!(mem.remove_style_preference("tone").unwrap());
+        assert!(!mem.remove_style_preference("tone").unwrap()); // already gone
+        assert!(mem.get_style_preferences().unwrap().is_empty());
+        // watchdog's key is untouched by preference removal.
+        assert_eq!(
+            mem.get_preference("watchdog_some-task-id").unwrap(),
+            Some("9f8e7d6c5b4a".to_string())
+        );
     }
 
     #[test]
