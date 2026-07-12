@@ -4,7 +4,7 @@
 # require_confirmation; anything that sends/writes stays denied until you grant it.
 [pack]
 name = "productivity"
-description = "Web search, notes, and web reading for everyday tasks."
+description = "Web search, notes, web reading, calendar, and weather for everyday tasks."
 
 [[plugin]]
 name = "search"
@@ -24,3 +24,15 @@ name = "web"
 command = "python"
 args = ["{plugins}/web_mcp/mcp_server.py"]
 suggest_confirm = ["read_page_text", "fetch_url"]
+
+[[plugin]]
+name = "calendar"
+command = "python"
+args = ["{plugins}/calendar_mcp/mcp_server.py"]
+suggest_confirm = ["list_events", "add_event"]
+
+[[plugin]]
+name = "weather"
+command = "python"
+args = ["{plugins}/weather_mcp/mcp_server.py"]
+suggest_confirm = ["get_weather"]

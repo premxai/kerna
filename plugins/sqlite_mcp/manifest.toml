@@ -1,0 +1,11 @@
+[plugin]
+name = "sqlite"
+version = "1.0.0"
+kind = "tool.mcp"
+entrypoint = "mcp_server.py"
+source = "kerna-starter-pack"
+trust = "verified"
+capabilities = ["list_tables", "sql_query"]
+secrets = ["KERNA_SQLITE_DB"]
+declared_outputs = ["text"]
+max_output_bytes = 50000

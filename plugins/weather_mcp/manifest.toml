@@ -1,0 +1,11 @@
+[plugin]
+name = "weather"
+version = "1.0.0"
+kind = "tool.mcp"
+entrypoint = "mcp_server.py"
+source = "kerna-starter-pack"
+trust = "verified"
+capabilities = ["get_weather"]
+network_allowlist = ["wttr.in"]
+declared_outputs = ["text"]
+max_output_bytes = 20000

@@ -31,6 +31,9 @@ kerna mcp risk search              # read the risk card
 | **notes** | `add_note`, `list_notes`, `read_note`, `search_notes` | Markdown notes in a workspace `notes/` folder — nothing leaves your machine. |
 | **http** | `http_get`, `http_post_json` | Generic REST/JSON caller. Optional `KERNA_HTTP_ALLOWLIST` restricts hosts. |
 | **email** | `send_email`, `list_recent_emails`, `read_email` | IMAP/SMTP. Needs `EMAIL_ADDRESS` + `EMAIL_PASSWORD` (app password). `send_email` requires your approval. |
+| **calendar** | `list_events`, `add_event` | Local iCalendar `.ics` file (`KERNA_CALENDAR_FILE`, default `./calendar.ics`). Nothing leaves your machine. |
+| **weather** | `get_weather` | Current + 3-day outlook via wttr.in. No API key. |
+| **sqlite** | `list_tables`, `sql_query` | Read-only SQL against `KERNA_SQLITE_DB` (SELECT/WITH/PRAGMA/EXPLAIN only). |
 
 Add one manually with `kerna mcp add <name> <command> [args...]`, e.g. `kerna mcp add files python "<KERNA_DIR>/plugins/files_mcp/mcp_server.py"`.
 

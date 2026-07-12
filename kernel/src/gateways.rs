@@ -40,9 +40,14 @@ pub fn start_channels(
                     }
                 });
             }
+            // "discord" is planned: the channel config, allowlist, non-interactive
+            // run path, and daemon lifecycle here are platform-agnostic and ready
+            // for it. What's missing is a Discord Gateway websocket client
+            // (identify/heartbeat/intents/resume), which needs a live bot token to
+            // verify — deferred rather than shipped unverified.
             other => {
                 eprintln!(
-                    "[channel:{}] unsupported platform '{}' — skipping.",
+                    "[channel:{}] platform '{}' not supported yet (Telegram is; Discord planned) — skipping.",
                     channel.name, other
                 );
             }

@@ -65,6 +65,33 @@
       "suggest_confirm": ["send_email", "list_recent_emails", "read_email"]
     },
     {
+      "name": "calendar",
+      "description": "Local calendar (iCalendar .ics) — list and add events. Nothing leaves your machine.",
+      "command": "python",
+      "args": ["{plugins}/calendar_mcp/mcp_server.py"],
+      "secrets": [],
+      "tags": ["productivity", "calendar"],
+      "suggest_confirm": ["list_events", "add_event"]
+    },
+    {
+      "name": "weather",
+      "description": "Current weather + 3-day outlook via wttr.in (no API key).",
+      "command": "python",
+      "args": ["{plugins}/weather_mcp/mcp_server.py"],
+      "secrets": [],
+      "tags": ["productivity", "weather"],
+      "suggest_confirm": ["get_weather"]
+    },
+    {
+      "name": "sqlite",
+      "description": "Read-only SQL queries against a local SQLite database (KERNA_SQLITE_DB).",
+      "command": "python",
+      "args": ["{plugins}/sqlite_mcp/mcp_server.py"],
+      "secrets": ["KERNA_SQLITE_DB"],
+      "tags": ["dev", "data", "sqlite"],
+      "suggest_confirm": ["list_tables", "sql_query"]
+    },
+    {
       "name": "github",
       "description": "GitHub (issues, PRs, repos) via the official MCP server. Needs Node/npx.",
       "command": "npx",
