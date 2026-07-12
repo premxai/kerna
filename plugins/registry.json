@@ -56,6 +56,15 @@
       "suggest_confirm": ["http_get", "http_post_json"]
     },
     {
+      "name": "email",
+      "description": "Send and read email via IMAP/SMTP. Give the agent its own mailbox + an app password.",
+      "command": "python",
+      "args": ["{plugins}/email_mcp/mcp_server.py"],
+      "secrets": ["EMAIL_ADDRESS", "EMAIL_PASSWORD"],
+      "tags": ["productivity", "email", "messaging"],
+      "suggest_confirm": ["send_email", "list_recent_emails", "read_email"]
+    },
+    {
       "name": "github",
       "description": "GitHub (issues, PRs, repos) via the official MCP server. Needs Node/npx.",
       "command": "npx",

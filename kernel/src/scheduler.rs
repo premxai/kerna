@@ -46,6 +46,10 @@ pub struct TaskScheduler {
     session_id: Option<String>,
     /// Shared HTTP client — reused across LLM rounds so TLS connections pool.
     http_client: reqwest::Client,
+    /// When true, there's no human at a terminal to answer approval prompts
+    /// (e.g. a messaging-channel or daemon-driven run). Anything that would
+    /// require confirmation is denied fail-closed instead of blocking on stdin.
+    non_interactive: bool,
 }
 
 impl TaskScheduler {
@@ -74,7 +78,16 @@ impl TaskScheduler {
             permissions,
             session_id,
             http_client,
+            non_interactive: false,
         })
+    }
+
+    /// Mark this scheduler as running without a human at a terminal (messaging
+    /// channel / daemon). Approval-required tools are then denied fail-closed
+    /// rather than blocking on an interactive prompt that no one can answer.
+    pub fn non_interactive(mut self) -> Self {
+        self.non_interactive = true;
+        self
     }
 
     /// Run a goal using an agentic tool-call loop.
@@ -347,6 +360,26 @@ impl TaskScheduler {
                         }
 
                         if self.config.converse || perm_level == PermissionLevel::RequireConfirmation {
+                            // No terminal to approve at (messaging channel / daemon):
+                            // deny fail-closed instead of blocking on stdin.
+                            if self.non_interactive {
+                                println!("❌ {} (needs approval; denied in non-interactive mode)", display_name);
+                                let _ = self.memory.log_message(
+                                    task_id,
+                                    "WARN",
+                                    &format!(
+                                        "Tool '{}' requires confirmation but ran non-interactively; denied.",
+                                        tool_name
+                                    ),
+                                );
+                                messages.push(ChatMessage {
+                                    role: "tool".to_string(),
+                                    content: Some("This action needs human approval, which isn't available in this context (messaging channel / background run). It was not performed.".to_string()),
+                                    tool_calls: None,
+                                    tool_call_id: Some(tc.id.clone()),
+                                });
+                                continue;
+                            }
                             println!("⚠️ ACTION REQUIRES APPROVAL: {} {}", tool_name, tool_args_str);
                             let approved = PermissionManager::prompt_approval(tool_name, tool_args_str)?;
                             if !approved {

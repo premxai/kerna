@@ -226,6 +226,46 @@ enum Commands {
         #[command(subcommand)]
         action: PreferencesCommands,
     },
+
+    /// Connect a messaging channel (Telegram) so allowlisted people can trigger
+    /// governed agent runs by messaging your bot. Runs while `kerna daemon` is up.
+    Channel {
+        #[command(subcommand)]
+        action: ChannelCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ChannelCommands {
+    /// Add a channel. e.g. `kerna channel add telegram --token-env TELEGRAM_BOT_TOKEN --allow-id 12345`
+    Add {
+        /// Platform: telegram
+        #[arg(index = 1)]
+        platform: String,
+        /// Env var name holding the bot token (never the token itself)
+        #[arg(long, default_value = "TELEGRAM_BOT_TOKEN")]
+        token_env: String,
+        /// A sender/chat id allowed to trigger runs (repeatable)
+        #[arg(long = "allow-id")]
+        allow_id: Vec<String>,
+        /// Friendly name for this channel
+        #[arg(long, default_value = "default")]
+        name: String,
+    },
+    /// List configured channels
+    List,
+    /// Allow another sender/chat id on an existing channel
+    Allow {
+        #[arg(index = 1)]
+        name: String,
+        #[arg(index = 2)]
+        id: String,
+    },
+    /// Remove a channel
+    Remove {
+        #[arg(index = 1)]
+        name: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -666,6 +706,10 @@ async fn main() -> Result<()> {
                 eprintln!("[!] Cron engine failed to start: {}", e);
             }
 
+            // Messaging-channel listeners (Telegram, …). Each allowlisted
+            // inbound message becomes a governed, non-interactive agent run.
+            gateways::start_channels(config.clone(), memory.clone(), mcp_registry.clone());
+
             println!("╔══════════════════════════════════════════════════════════════╗");
             println!("║                  Kerna Daemon v0.1.0                        ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
@@ -681,6 +725,13 @@ async fn main() -> Result<()> {
             println!(
                 "║  Schedules:  {:<45} ║",
                 format!("{} cron jobs", config.schedules.len())
+            );
+            println!(
+                "║  Channels:   {:<45} ║",
+                format!(
+                    "{} messaging channel(s)",
+                    config.channels.iter().filter(|c| c.enabled).count()
+                )
             );
             println!("╠══════════════════════════════════════════════════════════════╣");
             println!("║  Daemon running. Press Ctrl+C to stop.                      ║");
@@ -2146,6 +2197,99 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             },
+        },
+
+        Some(Commands::Channel { action }) => match action {
+            ChannelCommands::Add {
+                platform,
+                token_env,
+                allow_id,
+                name,
+            } => {
+                if platform != "telegram" {
+                    eprintln!(
+                        "[-] Unsupported platform '{}'. Supported: telegram.",
+                        platform
+                    );
+                    std::process::exit(1);
+                }
+                if config.channels.iter().any(|c| c.name == name) {
+                    eprintln!(
+                        "[-] Channel '{}' already exists. Remove it first: kerna channel remove {}",
+                        name, name
+                    );
+                    std::process::exit(1);
+                }
+                let has_token = std::env::var(&token_env)
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false);
+                config.channels.push(config::ChatChannelConfig {
+                    platform: platform.clone(),
+                    name: name.clone(),
+                    token_env: token_env.clone(),
+                    allowed_ids: allow_id.clone(),
+                    enabled: true,
+                });
+                config.save();
+                println!("[+] Added {} channel '{}'.", platform, name);
+                println!(
+                    "    Bot token: reads {} ({}).",
+                    token_env,
+                    if has_token {
+                        "set"
+                    } else {
+                        "MISSING — set it before starting the daemon"
+                    }
+                );
+                if allow_id.is_empty() {
+                    println!("    \x1b[33mNo allowlisted ids yet — nobody can trigger it.\x1b[0m Add one: kerna channel allow {} <id>", name);
+                } else {
+                    println!("    Allowed ids: {}", allow_id.join(", "));
+                }
+                println!("    Start listening with: kerna daemon");
+            }
+            ChannelCommands::List => {
+                if config.channels.is_empty() {
+                    println!(
+                        "No channels. Add one with: kerna channel add telegram --allow-id <id>"
+                    );
+                } else {
+                    println!("Configured channels:\n");
+                    for c in &config.channels {
+                        println!(
+                            "  {:<12} {:<9} token_env={} allowed={:?}",
+                            c.name, c.platform, c.token_env, c.allowed_ids
+                        );
+                    }
+                }
+            }
+            ChannelCommands::Allow { name, id } => {
+                match config.channels.iter_mut().find(|c| c.name == name) {
+                    Some(c) => {
+                        if c.allowed_ids.contains(&id) {
+                            println!("[i] '{}' is already allowed on channel '{}'.", id, name);
+                        } else {
+                            c.allowed_ids.push(id.clone());
+                            config.save();
+                            println!("[+] Allowed '{}' on channel '{}'.", id, name);
+                        }
+                    }
+                    None => {
+                        eprintln!("[-] No channel named '{}'.", name);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            ChannelCommands::Remove { name } => {
+                let before = config.channels.len();
+                config.channels.retain(|c| c.name != name);
+                if config.channels.len() == before {
+                    eprintln!("[-] No channel named '{}'.", name);
+                    std::process::exit(1);
+                }
+                config.save();
+                println!("[+] Removed channel '{}'.", name);
+            }
         },
 
         Some(Commands::Config { action }) => match action {

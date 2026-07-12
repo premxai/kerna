@@ -77,6 +77,22 @@ pub fn get_tool_definitions() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "fs.move",
+                "description": "Move or rename a file or directory (works on any file type, including PDFs and images). Both paths are within the same root — the workspace, or a granted real folder via `root` (must be read-write). Use this to organize/sort files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "from": { "type": "string", "description": "Current path, relative to the root." },
+                        "to": { "type": "string", "description": "Destination path, relative to the root." },
+                        "root": root_property()
+                    },
+                    "required": ["from", "to"]
+                }
+            }
+        }),
         // Shell Pack
         json!({
             "type": "function",
@@ -185,6 +201,34 @@ pub async fn execute_tool(
             }
             Ok(json!({ "status": "deleted" }))
         }
+        "fs.move" => {
+            let from_str = args["from"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing 'from'"))?;
+            let to_str = args["to"].as_str().ok_or_else(|| anyhow!("Missing 'to'"))?;
+            let root_name = args["root"]
+                .as_str()
+                .unwrap_or(crate::folders::WORKSPACE_ROOT);
+            // Both endpoints resolve within the same root; a move can't cross a
+            // folder boundary, and a read-only grant refuses the operation.
+            let (root, read_only) =
+                crate::folders::resolve_root(config, sandbox.get_workspace_root(), root_name)?;
+            if read_only {
+                return Err(anyhow!(
+                    "This folder is granted read-only. Re-grant it with --read-write to allow moves: kerna folders add <name> <path> --read-write"
+                ));
+            }
+            let from = crate::folders::safe_join(&root, from_str)?;
+            let to = crate::folders::safe_join(&root, to_str)?;
+            if !from.exists() {
+                return Err(anyhow!("Source '{}' does not exist.", from_str));
+            }
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(&from, &to)?;
+            Ok(json!({ "status": "moved", "from": from_str, "to": to_str }))
+        }
         "shell.exec" => {
             let cmd = args["command"]
                 .as_str()
@@ -214,5 +258,103 @@ pub async fn execute_tool(
             Ok(json!({ "status": "success", "path": path.display().to_string() }))
         }
         _ => Err(anyhow!("Unknown tool pack function: {}", tool_name)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::FolderGrant;
+
+    fn sandbox_in(dir: &std::path::Path) -> ProcessSandbox {
+        ProcessSandbox::new(
+            dir.to_path_buf(),
+            "native".to_string(),
+            false,
+            "none".to_string(),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn fs_move_relocates_binary_file_within_a_readwrite_grant() {
+        let base = std::env::temp_dir().join("kerna_fsmove_test");
+        let _ = std::fs::remove_dir_all(&base);
+        let sandbox_dir = base.join("sandbox");
+        let real = base.join("documents");
+        std::fs::create_dir_all(&sandbox_dir).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        // A genuinely binary (non-UTF8) file — the whole point vs fs.read/write.
+        std::fs::write(real.join("scan.pdf"), [0xFFu8, 0xD8, 0x00, 0x01, 0xFE]).unwrap();
+
+        let mut config = Config::default();
+        config.folders.push(FolderGrant {
+            name: "docs".to_string(),
+            path: real.to_string_lossy().to_string(),
+            read_write: true,
+        });
+        let sandbox = sandbox_in(&sandbox_dir);
+
+        // Move it into a subfolder (sorting).
+        let res = execute_tool(
+            "fs.move",
+            &json!({"root": "docs", "from": "scan.pdf", "to": "receipts/scan.pdf"}),
+            &sandbox,
+            &config,
+        )
+        .await
+        .unwrap();
+        assert_eq!(res["status"], "moved");
+        assert!(!real.join("scan.pdf").exists());
+        assert_eq!(
+            std::fs::read(real.join("receipts/scan.pdf")).unwrap(),
+            vec![0xFFu8, 0xD8, 0x00, 0x01, 0xFE]
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn fs_move_refused_on_readonly_grant_and_on_traversal() {
+        let base = std::env::temp_dir().join("kerna_fsmove_deny_test");
+        let _ = std::fs::remove_dir_all(&base);
+        let sandbox_dir = base.join("sandbox");
+        let real = base.join("documents");
+        std::fs::create_dir_all(&sandbox_dir).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("a.txt"), "x").unwrap();
+
+        let mut config = Config::default();
+        config.folders.push(FolderGrant {
+            name: "docs".to_string(),
+            path: real.to_string_lossy().to_string(),
+            read_write: false, // read-only
+        });
+        let sandbox = sandbox_in(&sandbox_dir);
+
+        // Read-only grant refuses the move.
+        let ro = execute_tool(
+            "fs.move",
+            &json!({"root": "docs", "from": "a.txt", "to": "b.txt"}),
+            &sandbox,
+            &config,
+        )
+        .await;
+        assert!(ro.is_err());
+        assert!(ro.unwrap_err().to_string().contains("read-only"));
+        assert!(real.join("a.txt").exists(), "file untouched after refusal");
+
+        // Traversal out of the workspace is rejected even for the default root.
+        let traversal = execute_tool(
+            "fs.move",
+            &json!({"from": "a.txt", "to": "../../escape.txt"}),
+            &sandbox,
+            &config,
+        )
+        .await;
+        assert!(traversal.is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

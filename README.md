@@ -131,6 +131,7 @@ kerna trace last
 | `kerna gateway` | Run as an MCP server that governs + records your other MCP tools |
 | `kerna folders add/list/remove` | Grant real Documents/Desktop/etc. folders for the agent to read (or write) |
 | `kerna preferences set/list/remove` | Explicit communication-style preferences, injected into every task |
+| `kerna channel add/list/allow/remove` | Connect a Telegram bot so allowlisted people trigger governed runs (runs under `kerna daemon`) |
 | `kerna daemon` / `kerna watch <url>` | Background scheduler + continuous watchers |
 
 ## Tools & MCP plugins

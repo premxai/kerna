@@ -1,0 +1,13 @@
+[plugin]
+name = "email"
+version = "1.0.0"
+kind = "tool.mcp"
+entrypoint = "mcp_server.py"
+source = "kerna-starter-pack"
+trust = "verified"
+capabilities = ["send_email", "list_recent_emails", "read_email"]
+requires_approval = ["send_email"]
+secrets = ["EMAIL_ADDRESS", "EMAIL_PASSWORD"]
+network_allowlist = ["smtp.gmail.com", "imap.gmail.com"]
+declared_outputs = ["text"]
+max_output_bytes = 50000

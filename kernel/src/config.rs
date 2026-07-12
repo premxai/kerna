@@ -52,6 +52,25 @@ pub struct ScheduleConfig {
     pub enabled: bool,
 }
 
+/// A messaging-channel bridge (Telegram, Discord, …). An inbound message from
+/// an allowlisted sender becomes a goal that runs through the full fail-closed
+/// pipeline; the reply is sent back to that chat. Runs inside `kerna daemon`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatChannelConfig {
+    /// "telegram" | "discord"
+    pub platform: String,
+    /// A friendly name for this channel (e.g. "personal").
+    pub name: String,
+    /// Environment-variable NAME holding the bot token (never the token itself).
+    pub token_env: String,
+    /// Sender/chat IDs allowed to trigger runs. Anyone else is logged + ignored.
+    /// Fail-closed: an empty allowlist means nobody can trigger the bot.
+    #[serde(default)]
+    pub allowed_ids: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
 /// Permission policy for a specific tool action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionRule {
@@ -146,6 +165,10 @@ pub struct Config {
     pub mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]
     pub schedules: Vec<ScheduleConfig>,
+    /// Messaging-channel bridges (Telegram, Discord). Empty by default; a
+    /// channel only listens while `kerna daemon` runs.
+    #[serde(default)]
+    pub channels: Vec<ChatChannelConfig>,
     #[serde(default)]
     pub permissions: Vec<PermissionRule>,
     #[serde(default = "default_max_retries")]

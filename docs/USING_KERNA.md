@@ -193,6 +193,34 @@ tool = "read_file"
 action = "auto_approve"
 ```
 
+## Messaging channels (Telegram)
+
+Let allowlisted people trigger governed agent runs by messaging a Telegram bot. Create a bot with @BotFather, then:
+
+```bash
+setx TELEGRAM_BOT_TOKEN "123456:ABC..."          # your bot token (env var, never on disk)
+kerna channel add telegram --name personal --allow-id <your-telegram-id>
+kerna channel allow personal <another-id>        # add more people later
+kerna daemon                                     # starts listening
+```
+
+Now a message to the bot becomes a goal, runs through the full fail-closed pipeline, and the reply comes back in the chat. Two safety properties matter:
+- **Allowlist is fail-closed** — only the ids you list can trigger runs; everyone else is logged and ignored. An empty allowlist means nobody can use it.
+- **No terminal to approve at** — a channel run is *non-interactive*, so any tool that would need confirmation (like `send_email`) is **denied** rather than run without your say-so. Read/search-type tools you've auto-approved work normally.
+
+Discord is on the way; WhatsApp requires Meta business verification and is deferred.
+
+## Sending email (agent's own mailbox)
+
+Give the agent its own email address (not your personal one) and an app-specific password:
+
+```bash
+kerna plugins install email
+kerna secrets add email      # guides EMAIL_ADDRESS + EMAIL_PASSWORD (app password)
+```
+
+`send_email` is fail-closed: it requires your confirmation and shows the full recipient, subject, and body before anything sends. `list_recent_emails` / `read_email` let it triage the inbox.
+
 ## Where things live
 
 | File / dir | What it is |
