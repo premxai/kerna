@@ -1,6 +1,17 @@
+use crate::config::Config;
 use crate::sandbox::ProcessSandbox;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
+
+/// Tool-schema fragment shared by every fs.* tool: an optional named root.
+/// Omit it (or pass "workspace") for the sandboxed workspace; pass the name
+/// of a folder granted via `kerna folders add` to reach a real directory.
+fn root_property() -> Value {
+    json!({
+        "type": "string",
+        "description": "Which granted folder to operate in. Omit for the sandboxed workspace, or the name of a folder from `kerna folders list`."
+    })
+}
 
 pub fn get_tool_definitions() -> Vec<Value> {
     vec![
@@ -9,11 +20,12 @@ pub fn get_tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "fs.read",
-                "description": "Read the contents of a file in the workspace.",
+                "description": "Read the contents of a file in the workspace, or in a granted real folder via `root`.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string" }
+                        "path": { "type": "string" },
+                        "root": root_property()
                     },
                     "required": ["path"]
                 }
@@ -23,12 +35,13 @@ pub fn get_tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "fs.write",
-                "description": "Write contents to a file in the workspace.",
+                "description": "Write contents to a file in the workspace, or in a granted real folder via `root` (folder must be granted read-write).",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string" },
-                        "content": { "type": "string" }
+                        "content": { "type": "string" },
+                        "root": root_property()
                     },
                     "required": ["path", "content"]
                 }
@@ -38,11 +51,12 @@ pub fn get_tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "fs.list",
-                "description": "List the contents of a directory in the workspace.",
+                "description": "List the contents of a directory in the workspace, or in a granted real folder via `root`.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string" }
+                        "path": { "type": "string" },
+                        "root": root_property()
                     },
                     "required": ["path"]
                 }
@@ -52,11 +66,12 @@ pub fn get_tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "fs.delete",
-                "description": "Delete a file or directory in the workspace.",
+                "description": "Delete a file or directory in the workspace, or in a granted real folder via `root` (folder must be granted read-write).",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string" }
+                        "path": { "type": "string" },
+                        "root": root_property()
                     },
                     "required": ["path"]
                 }
@@ -97,28 +112,48 @@ pub fn get_tool_definitions() -> Vec<Value> {
     ]
 }
 
+/// Resolve `args.root` (default: sandboxed workspace) and safely join
+/// `args.path` onto it, returning the joined path and whether the root is
+/// read-only. Rejects traversal/absolute paths and unknown root names.
+fn resolve_arg_path(
+    args: &Value,
+    config: &Config,
+    sandbox: &ProcessSandbox,
+) -> Result<(std::path::PathBuf, bool)> {
+    let path_str = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Missing path"))?;
+    let root_name = args["root"]
+        .as_str()
+        .unwrap_or(crate::folders::WORKSPACE_ROOT);
+    let (root, read_only) =
+        crate::folders::resolve_root(config, sandbox.get_workspace_root(), root_name)?;
+    let path = crate::folders::safe_join(&root, path_str)?;
+    Ok((path, read_only))
+}
+
 pub async fn execute_tool(
     tool_name: &str,
     args: &Value,
     sandbox: &ProcessSandbox,
+    config: &Config,
 ) -> Result<Value> {
     match tool_name {
         "fs.read" => {
-            let path_str = args["path"]
-                .as_str()
-                .ok_or_else(|| anyhow!("Missing path"))?;
-            let path = std::path::Path::new(&sandbox.get_workspace_root()).join(path_str);
+            let (path, _) = resolve_arg_path(args, config, sandbox)?;
             let content = std::fs::read_to_string(path)?;
             Ok(json!({ "content": content }))
         }
         "fs.write" => {
-            let path_str = args["path"]
-                .as_str()
-                .ok_or_else(|| anyhow!("Missing path"))?;
             let content = args["content"]
                 .as_str()
                 .ok_or_else(|| anyhow!("Missing content"))?;
-            let path = std::path::Path::new(&sandbox.get_workspace_root()).join(path_str);
+            let (path, read_only) = resolve_arg_path(args, config, sandbox)?;
+            if read_only {
+                return Err(anyhow!(
+                    "This folder is granted read-only. Re-grant it with --read-write to allow writes: kerna folders add <name> <path> --read-write"
+                ));
+            }
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -126,10 +161,7 @@ pub async fn execute_tool(
             Ok(json!({ "status": "success" }))
         }
         "fs.list" => {
-            let path_str = args["path"]
-                .as_str()
-                .ok_or_else(|| anyhow!("Missing path"))?;
-            let path = std::path::Path::new(&sandbox.get_workspace_root()).join(path_str);
+            let (path, _) = resolve_arg_path(args, config, sandbox)?;
             let mut entries = Vec::new();
             if path.is_dir() {
                 for entry in std::fs::read_dir(path)? {
@@ -140,10 +172,12 @@ pub async fn execute_tool(
             Ok(json!({ "entries": entries }))
         }
         "fs.delete" => {
-            let path_str = args["path"]
-                .as_str()
-                .ok_or_else(|| anyhow!("Missing path"))?;
-            let path = std::path::Path::new(&sandbox.get_workspace_root()).join(path_str);
+            let (path, read_only) = resolve_arg_path(args, config, sandbox)?;
+            if read_only {
+                return Err(anyhow!(
+                    "This folder is granted read-only. Re-grant it with --read-write to allow deletes: kerna folders add <name> <path> --read-write"
+                ));
+            }
             if path.is_dir() {
                 std::fs::remove_dir_all(path)?;
             } else if path.exists() {

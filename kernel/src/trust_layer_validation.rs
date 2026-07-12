@@ -125,6 +125,144 @@ async fn test_declared_secret_reaches_plugin_undeclared_does_not() {
 }
 
 #[tokio::test]
+async fn test_granted_folder_read_works_and_write_denied_when_readonly() {
+    use crate::config::FolderGrant;
+
+    let (memory, mut config, db_path) = setup_test_env("test_folders", None).await;
+
+    let sandbox_dir = std::env::temp_dir().join("kerna_folders_sandbox_test");
+    let _ = fs::remove_dir_all(&sandbox_dir);
+    fs::create_dir_all(&sandbox_dir).unwrap();
+    config.sandbox_dir = sandbox_dir.to_string_lossy().to_string();
+    config.workspace.root = sandbox_dir.to_string_lossy().to_string();
+
+    // A "real" folder outside the sandbox, granted read-only — the point of
+    // the whole feature: the agent can reach it without it being the sandbox.
+    let real_folder = std::env::temp_dir().join("kerna_real_documents_test");
+    let _ = fs::remove_dir_all(&real_folder);
+    fs::create_dir_all(&real_folder).unwrap();
+    fs::write(
+        real_folder.join("resume.txt"),
+        "Jane Doe, Software Engineer",
+    )
+    .unwrap();
+
+    config.folders.push(FolderGrant {
+        name: "documents".to_string(),
+        path: real_folder.to_string_lossy().to_string(),
+        read_write: false,
+    });
+    config.permissions.push(PermissionRule {
+        tool: "*".to_string(),
+        action: "auto_approve".to_string(),
+    });
+
+    let mcp_registry = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::mcp_registry::McpRegistry::new(),
+    ));
+    let mem = std::sync::Arc::new(memory);
+
+    // created_at has second granularity, so back-to-back run_goal calls in
+    // this test can tie — look a task up by its (unique, test-chosen) goal
+    // text rather than relying on ordering.
+    let find_task_id_by_goal = |mem: &MemoryEngine, goal: &str| -> String {
+        mem.get_tasks()
+            .unwrap()
+            .into_iter()
+            .find(|(_, g, _)| g == goal)
+            .map(|(id, _, _)| id)
+            .unwrap_or_else(|| panic!("no task found with goal '{}'", goal))
+    };
+
+    // --- Read a real file outside the sandbox via the granted folder ---
+    let scheduler =
+        Scheduler::new(config.clone(), mem.clone(), mcp_registry.clone(), None).unwrap();
+    let task_id = scheduler
+        .run_goal("MOCK_FS_READ documents resume.txt")
+        .await
+        .unwrap();
+    let events = mem.get_events(&task_id.to_string()).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.event_type == "tool.call.completed" && e.tool.as_deref() == Some("fs.read")),
+        "fs.read should have completed"
+    );
+    // The event payload only stores a length summary; the actual (truncated)
+    // result is written to the task log, so check the real file content there.
+    let logs = mem.get_task_logs(&task_id.to_string()).unwrap();
+    assert!(
+        logs.iter().any(|(_, _, msg)| msg.contains("Jane Doe")),
+        "expected the real file's content in the task log: {:?}",
+        logs
+    );
+
+    // A single-round config so a failing tool call surfaces one clear
+    // tool.call.failed event instead of retrying to the 5-failure hard error
+    // (run_goal then returns Err and, being a fresh Uuid generated inside it,
+    // the task id would otherwise be unreachable from here — so we look it up
+    // by its goal text instead of the run_goal return value).
+    let mut fail_fast_config = config.clone();
+    fail_fast_config.max_tool_rounds = 1;
+
+    // --- Writing to the same read-only-granted folder must be refused ---
+    let write_goal = "MOCK_FS_WRITE documents resume.txt overwritten";
+    let scheduler2 = Scheduler::new(
+        fail_fast_config.clone(),
+        mem.clone(),
+        mcp_registry.clone(),
+        None,
+    )
+    .unwrap();
+    let _ = scheduler2.run_goal(write_goal).await;
+    let task_id2 = find_task_id_by_goal(&mem, write_goal);
+    let events2 = mem.get_events(&task_id2).unwrap();
+    assert!(
+        events2
+            .iter()
+            .any(|e| e.event_type == "tool.call.failed" && e.tool.as_deref() == Some("fs.write")),
+        "fs.write should have failed and been recorded: {:?}",
+        events2
+            .iter()
+            .map(|e| (&e.event_type, &e.tool))
+            .collect::<Vec<_>>()
+    );
+    let logs2 = mem.get_task_logs(&task_id2).unwrap();
+    assert!(
+        logs2.iter().any(|(_, _, msg)| msg.contains("read-only")),
+        "expected a read-only refusal in the task log: {:?}",
+        logs2
+    );
+    // And the real file must be untouched.
+    assert_eq!(
+        fs::read_to_string(real_folder.join("resume.txt")).unwrap(),
+        "Jane Doe, Software Engineer"
+    );
+
+    // --- Path traversal out of the granted folder is rejected ---
+    let traversal_goal = "MOCK_FS_READ documents ../../../../etc/passwd";
+    let scheduler3 =
+        Scheduler::new(fail_fast_config, mem.clone(), mcp_registry.clone(), None).unwrap();
+    let _ = scheduler3.run_goal(traversal_goal).await;
+    let task_id3 = find_task_id_by_goal(&mem, traversal_goal);
+    let events3 = mem.get_events(&task_id3).unwrap();
+    assert!(
+        events3
+            .iter()
+            .any(|e| e.event_type == "tool.call.failed" && e.tool.as_deref() == Some("fs.read")),
+        "traversal attempt should have failed and been recorded: {:?}",
+        events3
+            .iter()
+            .map(|e| (&e.event_type, &e.tool))
+            .collect::<Vec<_>>()
+    );
+
+    let _ = fs::remove_dir_all(&sandbox_dir);
+    let _ = fs::remove_dir_all(&real_folder);
+    let _ = fs::remove_file(&db_path);
+}
+
+#[tokio::test]
 async fn test_mockmcp_echo_succeeds_and_appears_in_trace() {
     let (memory, config, db_path) = setup_test_env("test_echo", None).await;
     let mcp_registry = std::sync::Arc::new(tokio::sync::Mutex::new(

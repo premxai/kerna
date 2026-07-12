@@ -46,6 +46,15 @@ With BYOK (Bring Your Own Key) architecture, Kerna routes LLM tasks dynamically 
 
 This prevents accidental secret leakage by ensuring high-risk data is only processed by trusted providers.
 
+### 5. Real-Filesystem Folder Grants
+By default, every file tool (`fs.read`/`fs.write`/`fs.list`/`fs.delete`, and the `files` plugin) is confined to an isolated sandbox directory — nothing on the real disk is visible. A user can explicitly grant a real folder (Documents, Desktop, a project directory) with `kerna folders add <name> <path>`:
+- **Named, explicit, revocable**: nothing is exposed until granted by name; `kerna folders remove <name>` revokes it instantly.
+- **Read-only by default**: a grant only allows writes if created with `--read-write`; even then, a write still passes through the normal fail-closed permission check for `fs.write`, same as any other tool.
+- **Boundary-enforced, symlink-safe**: every path is canonicalized before comparison, so a symlink inside a granted folder can't be used to escape it. `..`, absolute paths, and `~` are rejected outright before touching the filesystem.
+- **File tools only**: a folder grant does not extend to `shell.exec`/`run_command`, which stays confined to the sandbox regardless of what folders are granted — a shell command is much harder to audit than a single file read/write.
+
+This is the mechanism, not the guarantee — the guarantee is the same fail-closed permission engine every other tool call goes through (§2, §3). Granting a folder widens *where* a call can reach; it does not bypass *whether* the call is allowed.
+
 ## Known Threat Vectors & Mitigations
 
 | Threat | Mitigation |

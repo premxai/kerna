@@ -129,6 +129,7 @@ kerna trace last
 | `kerna doctor` | System health: database, provider keys, plugins |
 | `kerna serve [--bind <addr>] [--token <t>]` | OpenAI-compatible API server |
 | `kerna gateway` | Run as an MCP server that governs + records your other MCP tools |
+| `kerna folders add/list/remove` | Grant real Documents/Desktop/etc. folders for the agent to read (or write) |
 | `kerna daemon` / `kerna watch <url>` | Background scheduler + continuous watchers |
 
 ## Tools & MCP plugins
@@ -169,6 +170,18 @@ kerna mcp add fetch npx -y @modelcontextprotocol/server-fetch
 See [plugins/README.md](plugins/README.md) for the full catalog and how to write your own.
 
 New to Kerna? See the [everyday usage guide](docs/USING_KERNA.md).
+
+## Real files and documents
+
+By default every file tool stays inside an isolated sandbox folder. To let the agent read (or write) your real Documents, Desktop, or any other folder, grant it explicitly — nothing is exposed until you do:
+
+```bash
+kerna folders add documents ~/Documents          # read-only by default
+kerna folders add scratch ~/scratch --read-write # writes still require your confirmation
+kerna folders list
+```
+
+Then ask the agent to use it: `kerna run "Summarize the PDFs in @documents"`. Grants are named, revocable (`kerna folders remove <name>`), boundary-checked (symlink-safe — a granted folder can't be used to escape to the rest of your disk), and reachable only by file tools — `shell.exec`/`run_command` never gets access to a granted folder, only the sandbox.
 
 ## Policy-gateway mode: govern the MCP tools you already use
 

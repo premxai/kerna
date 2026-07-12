@@ -819,7 +819,7 @@ impl TaskScheduler {
             }
             _ => {
                 // Try tool packs
-                crate::tool_packs::execute_tool(tool_name, args, &self.sandbox).await
+                crate::tool_packs::execute_tool(tool_name, args, &self.sandbox, &self.config).await
             }
         }
     }
@@ -1259,6 +1259,26 @@ fn call_mock(messages: &[ChatMessage]) -> Result<(ChatMessage, u64)> {
         (
             "delegate_task".to_string(),
             "{\"goal\": \"subtask\"}".to_string(),
+        )
+    } else if let Some(rest) = last_user_msg.strip_prefix("MOCK_FS_READ ") {
+        // Test-only trigger: "MOCK_FS_READ <root> <path>" drives a real
+        // fs.read tool call so integration tests can exercise folder grants
+        // end-to-end through the scheduler, not just unit-test the resolver.
+        let mut parts = rest.splitn(2, ' ');
+        let root = parts.next().unwrap_or("workspace");
+        let path = parts.next().unwrap_or("");
+        (
+            "fs.read".to_string(),
+            serde_json::json!({ "root": root, "path": path }).to_string(),
+        )
+    } else if let Some(rest) = last_user_msg.strip_prefix("MOCK_FS_WRITE ") {
+        let mut parts = rest.splitn(3, ' ');
+        let root = parts.next().unwrap_or("workspace");
+        let path = parts.next().unwrap_or("");
+        let content = parts.next().unwrap_or("");
+        (
+            "fs.write".to_string(),
+            serde_json::json!({ "root": root, "path": path, "content": content }).to_string(),
         )
     } else if last_user_msg.contains("memory_writes") {
         return Ok((

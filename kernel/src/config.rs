@@ -90,6 +90,20 @@ impl Default for WorkspaceConfig {
     }
 }
 
+/// A named grant of real-filesystem access outside the sandbox (e.g. a user's
+/// real Documents folder), analogous to Claude's file/folder access grants.
+/// Explicit and revocable — nothing is exposed until `kerna folders add` names
+/// it. Read-only unless `read_write` is set, and even then every write still
+/// passes through the normal fail-closed permission check for `fs.write`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderGrant {
+    pub name: String,
+    /// Absolute, canonicalized path at grant time.
+    pub path: String,
+    #[serde(default)]
+    pub read_write: bool,
+}
+
 /// A named budget preset to quickly switch limits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BudgetPreset {
@@ -123,8 +137,11 @@ pub struct Config {
     pub db_path: String,
     pub sandbox_dir: String,
     pub memory_backend: String, // "sqlite" | "mem0" | "chroma" | "qdrant"
+    /// Named grants of real-filesystem folders (outside the sandbox) the agent
+    /// may reach via `root: "<name>"` on file tools. Empty by default —
+    /// nothing beyond the sandbox is visible until explicitly granted.
     #[serde(default)]
-    pub allowed_directories: Vec<String>,
+    pub folders: Vec<FolderGrant>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]

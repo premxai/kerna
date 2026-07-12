@@ -33,6 +33,8 @@ kerna mcp risk search              # read the risk card
 
 Add one manually with `kerna mcp add <name> <command> [args...]`, e.g. `kerna mcp add files python "<KERNA_DIR>/plugins/files_mcp/mcp_server.py"`.
 
+**Real folders (Documents, Desktop, etc.):** the `files` plugin above stays sandbox-only. To reach a real folder, use Kerna's built-in `fs.read`/`fs.write`/`fs.list`/`fs.delete` tools instead (always available, no plugin needed) with `root: "<name>"` after granting it: `kerna folders add documents ~/Documents`. See the [everyday guide](../docs/USING_KERNA.md#real-files-and-documents).
+
 Then inspect and grant:
 
 ```bash

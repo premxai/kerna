@@ -39,6 +39,17 @@ pub fn is_out_of_workspace_path(path: &str) -> bool {
     false
 }
 
+/// Returns true if `candidate` resolves inside `root` (symlink-safe:
+/// canonicalizes both sides so `..`/symlink tricks can't escape). Used both
+/// for the sandbox workspace and for any real-filesystem folder grant.
+pub fn path_within_root(root: &Path, candidate: &Path) -> bool {
+    let canonical_candidate = candidate
+        .canonicalize()
+        .unwrap_or_else(|_| candidate.to_path_buf());
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    canonical_candidate.starts_with(&canonical_root)
+}
+
 pub fn classify_command(cmd: &str, args: &[&str]) -> CommandClass {
     // Interpreter/shell wrappers can run arbitrary code that evades per-command
     // classification (e.g. `bash -c "rm -rf /"`). Treat the inline-code forms as
@@ -161,14 +172,7 @@ impl ProcessSandbox {
     }
 
     pub fn is_path_in_workspace(&self, target_path: &Path) -> bool {
-        let canonical_target = target_path
-            .canonicalize()
-            .unwrap_or_else(|_| target_path.to_path_buf());
-        let canonical_workspace = self
-            .sandbox_dir
-            .canonicalize()
-            .unwrap_or_else(|_| self.sandbox_dir.clone());
-        canonical_target.starts_with(&canonical_workspace)
+        path_within_root(&self.sandbox_dir, target_path)
     }
 
     pub fn is_trusted_for_rollback(&self, cmd: &str, args: &[&str]) -> bool {

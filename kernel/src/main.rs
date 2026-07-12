@@ -3,6 +3,7 @@ mod config;
 mod cron;
 pub mod embeddings;
 pub mod events;
+pub mod folders;
 mod gateway;
 mod gateways;
 mod mcp;
@@ -211,6 +212,33 @@ enum Commands {
     Plugins {
         #[command(subcommand)]
         action: PluginsCommands,
+    },
+
+    /// Grant, list, or revoke real-filesystem folder access (outside the sandbox)
+    Folders {
+        #[command(subcommand)]
+        action: FoldersCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum FoldersCommands {
+    /// Grant a real folder (e.g. Documents) a name file tools can address via `root`.
+    /// Read-only unless --read-write is passed.
+    Add {
+        #[arg(index = 1)]
+        name: String,
+        #[arg(index = 2)]
+        path: String,
+        #[arg(long)]
+        read_write: bool,
+    },
+    /// List granted folders
+    List,
+    /// Revoke a folder grant
+    Remove {
+        #[arg(index = 1)]
+        name: String,
     },
 }
 
@@ -1973,6 +2001,88 @@ async fn main() -> Result<()> {
                 },
             }
         }
+
+        Some(Commands::Folders { action }) => match action {
+            FoldersCommands::Add {
+                name,
+                path,
+                read_write,
+            } => {
+                if config.folders.iter().any(|g| g.name == name) {
+                    eprintln!(
+                        "[-] Folder '{}' is already granted. Remove it first: kerna folders remove {}",
+                        name, name
+                    );
+                    std::process::exit(1);
+                }
+                let raw = std::path::Path::new(&path);
+                if !raw.is_dir() {
+                    eprintln!("[-] '{}' does not exist or is not a directory.", path);
+                    std::process::exit(1);
+                }
+                let canonical = match raw.canonicalize() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("[-] Could not resolve '{}': {}", path, e);
+                        std::process::exit(1);
+                    }
+                };
+                // Windows canonicalize() emits a \\?\ extended-path prefix; strip it
+                // for a path users recognize and can paste elsewhere.
+                let display_path = canonical
+                    .to_string_lossy()
+                    .trim_start_matches(r"\\?\")
+                    .to_string();
+                config.folders.push(config::FolderGrant {
+                    name: name.clone(),
+                    path: display_path.clone(),
+                    read_write,
+                });
+                config.save();
+                let mode = if read_write {
+                    "read-write"
+                } else {
+                    "read-only"
+                };
+                println!(
+                    "[+] Granted {} access to '{}' as '{}'.",
+                    mode, display_path, name
+                );
+                println!(
+                    "    Agents can reach it with root: \"{}\" on file tools. Every {} still requires your confirmation, same as any other tool.",
+                    name,
+                    if read_write { "write" } else { "read" }
+                );
+                if !read_write {
+                    println!("    To allow writes here: kerna folders remove {} && kerna folders add {} {} --read-write", name, name, path);
+                }
+            }
+            FoldersCommands::List => {
+                if config.folders.is_empty() {
+                    println!("No folders granted. Add one with: kerna folders add <name> <path>");
+                } else {
+                    println!("Granted folders:\n");
+                    for g in &config.folders {
+                        let mode = if g.read_write {
+                            "read-write"
+                        } else {
+                            "read-only "
+                        };
+                        println!("  {:<12} {}  {}", g.name, mode, g.path);
+                    }
+                }
+            }
+            FoldersCommands::Remove { name } => {
+                let before = config.folders.len();
+                config.folders.retain(|g| g.name != name);
+                if config.folders.len() == before {
+                    eprintln!("[-] No folder grant named '{}'.", name);
+                    std::process::exit(1);
+                }
+                config.save();
+                println!("[+] Revoked folder grant '{}'.", name);
+            }
+        },
 
         Some(Commands::Config { action }) => match action {
             Some(ConfigCommands::Path) => {

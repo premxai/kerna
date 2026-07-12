@@ -65,6 +65,22 @@ Add any other MCP server (yours or third-party) with `kerna mcp add <name> <comm
 
 Nothing a plugin exposes can actually run until you grant it in `kerna.toml`. That's the whole point.
 
+## Real files and documents
+
+Every file tool (`fs.read`/`fs.write`/`fs.list`/`fs.delete`, and the `files` plugin) is confined to an isolated sandbox by default — the agent can't see your real Documents, Desktop, or anything else on disk. To let it work with a real folder, grant it explicitly, by name:
+
+```bash
+kerna folders add documents ~/Documents      # read-only by default
+kerna folders list
+kerna folders remove documents               # revoke anytime
+```
+
+Then address it with `root: "documents"` on a file tool (the agent does this automatically once it knows the folder exists — mention it in your goal, e.g. "read my resume from @documents"). A few things worth knowing:
+
+- **Read-only unless you say otherwise.** `kerna folders add scratch ~/scratch --read-write` allows writes — but every write still passes through the same `require_confirmation` gate as any other tool, so you see it before it happens.
+- **Only file tools reach a granted folder.** `run_command`/`shell.exec` never gets access to it, even if you grant read-write — shell commands are much harder to audit than a single file read or write, so the blast radius stays small.
+- **Symlink-safe.** A symlink inside a granted folder can't be used to jump outside it; every path is resolved and boundary-checked before use.
+
 ## Granting permissions (the safety dial)
 
 By default every tool is **denied**. You opt in per tool:
