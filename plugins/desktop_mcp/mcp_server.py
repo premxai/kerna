@@ -125,7 +125,7 @@ def main():
             send_response({
                 "jsonrpc": "2.0",
                 "id": None,
-                "error": {"code": -32700, "message": "Parse error"}
+                "error": {"code": -32700, "message": f"Parse error: {e}"}
             })
 
 if __name__ == "__main__":

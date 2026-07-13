@@ -2,7 +2,6 @@ import sys
 import json
 import pyttsx3
 import speech_recognition as sr
-import threading
 
 # Initialize TTS Engine (Fallback for Piper)
 tts_engine = pyttsx3.init()
@@ -124,7 +123,7 @@ def main():
             send_response({
                 "jsonrpc": "2.0",
                 "id": None,
-                "error": {"code": -32700, "message": "Parse error"}
+                "error": {"code": -32700, "message": f"Parse error: {e}"}
             })
 
 if __name__ == "__main__":
