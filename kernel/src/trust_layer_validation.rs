@@ -3,6 +3,32 @@ use crate::config::{Config, McpServerConfig, PermissionRule};
 use crate::memory::MemoryEngine;
 use crate::scheduler::TaskScheduler as Scheduler;
 use std::fs;
+use std::path::Path;
+use std::sync::Once;
+
+// These tests spawn the compiled `kerna` binary (as `kerna mockmcp`) as a child
+// MCP process. Because they live in the library crate as unit tests, Cargo does
+// not guarantee the binary is built before they run — a clean `cargo test`
+// (without a prior `cargo build`) would otherwise fail. Build it on demand once.
+static BUILD_BIN: Once = Once::new();
+
+pub(crate) fn ensure_kerna_binary(path: &str) {
+    BUILD_BIN.call_once(|| {
+        if Path::new(path).exists() {
+            return;
+        }
+        let status = std::process::Command::new(env!("CARGO"))
+            .args(["build", "--bin", "kerna"])
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            other => panic!(
+                "failed to build `kerna` binary needed by trust-layer tests: {:?}",
+                other
+            ),
+        }
+    });
+}
 
 // Utility to set up a clean DB and Config
 async fn setup_test_env(
@@ -28,6 +54,7 @@ async fn setup_test_env(
         .join(format!("kerna{}", std::env::consts::EXE_SUFFIX))
         .to_string_lossy()
         .to_string();
+    ensure_kerna_binary(&kerna_bin);
 
     // Configure MockMCP
     config.mcp_servers.push(McpServerConfig {
@@ -279,6 +306,7 @@ async fn test_mockmcp_invalid_json_fails_cleanly() {
         .join(format!("kerna{}", std::env::consts::EXE_SUFFIX))
         .to_string_lossy()
         .to_string();
+    ensure_kerna_binary(&kerna_bin);
     config.mcp_servers[0].command = kerna_bin;
     config.mcp_servers[0].args = vec![
         "mockmcp".to_string(),
@@ -353,6 +381,7 @@ async fn test_mockmcp_malicious_mode_prevents_poison() {
         .join(format!("kerna{}", std::env::consts::EXE_SUFFIX))
         .to_string_lossy()
         .to_string();
+    ensure_kerna_binary(&kerna_bin);
     config.mcp_servers[0].command = kerna_bin;
     config.mcp_servers[0].args = vec![
         "mockmcp".to_string(),
@@ -521,6 +550,7 @@ async fn test_mcp_risk_card_generation() {
         .join(format!("kerna{}", std::env::consts::EXE_SUFFIX))
         .to_string_lossy()
         .to_string();
+    ensure_kerna_binary(&kerna_bin);
 
     let config = crate::config::McpServerConfig {
         name: "MockSabotage".to_string(),

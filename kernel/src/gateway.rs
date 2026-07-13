@@ -369,14 +369,16 @@ mod tests {
 
     fn kerna_bin() -> String {
         let test_exe = std::env::current_exe().unwrap();
-        test_exe
+        let path = test_exe
             .parent()
             .unwrap()
             .parent()
             .unwrap()
             .join(format!("kerna{}", std::env::consts::EXE_SUFFIX))
             .to_string_lossy()
-            .to_string()
+            .to_string();
+        crate::trust_layer_validation::ensure_kerna_binary(&path);
+        path
     }
 
     #[tokio::test]
