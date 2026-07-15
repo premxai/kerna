@@ -30,6 +30,17 @@ enabled = true
 capabilities = [`"echo`"]
 "@
 
+Add-Content -Path "kerna.toml" -Value @"
+
+[[permissions]]
+tool = "echo"
+action = "auto_approve"
+
+[[permissions]]
+tool = "*"
+action = "deny"
+"@
+
 
 Write-Host "[1/4] Running Kerna Doctor..."
 Invoke-Expression "$KernaBin doctor"
@@ -62,11 +73,11 @@ Write-Host "[4/4] Verifying Trace..."
 Invoke-Expression "$KernaBin trace $TaskId" | Out-File trace_output.txt
 Get-Content trace_output.txt
 
-# Verify that pipeline events are in the trace
-if (Select-String -Path trace_output.txt -Pattern "tool.call.requested" -Quiet) {
-    Write-Host "[+] Pipeline trace verified successfully."
+# Verify that the explicitly granted tool actually completed.
+if (Select-String -Path trace_output.txt -Pattern "tool.call.completed" -Quiet) {
+    Write-Host "[+] Allowed tool execution and trace verified successfully."
 } else {
-    Write-Host "[-] Trace missing pipeline events!"
+    Write-Host "[-] Trace missing a completed allowed tool call!"
     exit 1
 }
 

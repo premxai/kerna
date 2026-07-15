@@ -27,6 +27,17 @@ enabled = true
 capabilities = ["echo"]
 EOF
 
+cat >> kerna.toml <<'EOF'
+
+[[permissions]]
+tool = "echo"
+action = "auto_approve"
+
+[[permissions]]
+tool = "*"
+action = "deny"
+EOF
+
 echo "[1/4] Running Kerna Doctor..."
 $KERNA_BIN doctor
 
@@ -55,11 +66,11 @@ echo "[4/4] Verifying Trace..."
 $KERNA_BIN trace $TASK_ID > trace_output.txt
 cat trace_output.txt
 
-# Verify that pipeline events are in the trace
-if grep -q "tool.call.requested" trace_output.txt; then
-    echo "[+] Pipeline trace verified successfully."
+# Verify that the explicitly granted tool actually completed.
+if grep -q "tool.call.completed" trace_output.txt; then
+    echo "[+] Allowed tool execution and trace verified successfully."
 else
-    echo "[-] Trace missing pipeline events!"
+    echo "[-] Trace missing a completed allowed tool call!"
     exit 1
 fi
 
