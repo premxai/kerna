@@ -11,6 +11,8 @@ if (-not $env:KERNA_BIN) {
 } else {
     $KernaBin = $env:KERNA_BIN
 }
+$KernaBin = (Resolve-Path -LiteralPath $KernaBin).Path
+$McpCommand = $KernaBin.Replace("\", "\\")
 
 if (Test-Path "kerna.toml") { Remove-Item -Force "kerna.toml" }
 
@@ -24,7 +26,7 @@ llm_api_key = `"fake`"
 
 [[mcp_servers]]
 name = `"mockmcp`"
-command = `"./target/debug/kerna.exe`"
+command = `"$McpCommand`"
 args = [`"mockmcp`"]
 enabled = true
 capabilities = [`"echo`"]
@@ -43,7 +45,7 @@ action = "deny"
 
 
 Write-Host "[1/4] Running Kerna Doctor..."
-Invoke-Expression "$KernaBin doctor"
+& $KernaBin doctor
 
 Write-Host "[2/4] Verifying MockMCP..."
 # Run mockmcp briefly to ensure it compiles and starts
@@ -57,7 +59,7 @@ if (echo '{"jsonrpc":"2.0","method":"tools/list","id":1}' | & $KernaBin mockmcp 
 Write-Host "[3/4] Running an agent goal..."
 $env:KERNA_MOCK_LLM = "1"
 Write-Host "Running goal to test tool execution..."
-Invoke-Expression "$KernaBin run `"Please call echo`"" | Out-File run_output.txt
+& $KernaBin run "Please call echo" | Out-File run_output.txt
 Get-Content run_output.txt
 
 # Extract Task ID from output
@@ -70,7 +72,7 @@ if (-not $TaskId) {
 Write-Host "[+] Goal completed with Task ID: $TaskId"
 
 Write-Host "[4/4] Verifying Trace..."
-Invoke-Expression "$KernaBin trace $TaskId" | Out-File trace_output.txt
+& $KernaBin trace $TaskId | Out-File trace_output.txt
 Get-Content trace_output.txt
 
 # Verify that the explicitly granted tool actually completed.
