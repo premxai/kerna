@@ -8,9 +8,10 @@ When an agent decides to use an MCP tool, Kerna emits the following events in or
 
 1. **`tool.call.requested`**: The raw intention from the LLM. Includes the tool name and proposed arguments.
 2. **`tool.policy.checked`**: The result of the Policy Engine evaluation. Contains the decision (`allow`, `deny`, `require_confirmation`) and the reason.
-3. **`budget.checked`**: Verifies that the task has not exceeded its configured limits (`max_tool_calls`, `max_cost_usd`, etc.).
-4. **`tool.call.started`**: Emitted immediately before control is handed over to the MCP sub-process.
-5. **`tool.call.completed`** / **`tool.call.failed`**: Emitted when the MCP tool returns its result or crashes. Contains execution duration and the final payload.
+3. **`approval.decided`**: For a queued confirmation, records the reviewed action's approval ID and whether it was approved, denied, or expired. An action cannot advance past this point without an approved decision.
+4. **`budget.checked`**: Verifies that the task has not exceeded its configured limits (`max_tool_calls`, `max_cost_usd`, etc.).
+5. **`tool.call.started`**: Emitted immediately before control is handed over to the MCP sub-process.
+6. **`tool.call.completed`** / **`tool.call.failed`**: Emitted when the MCP tool returns its result or crashes. Contains execution duration and the final payload.
 
 ## Accessing Traces
 

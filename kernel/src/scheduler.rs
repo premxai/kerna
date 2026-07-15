@@ -437,12 +437,15 @@ impl TaskScheduler {
                                 });
                                 continue;
                             }
+                            let mut queued_approval_id = None;
+                            let mut queued_approval_outcome = None;
                             let approved = if self.approval_mode == ApprovalMode::Queue {
                                 let approval_id = self.memory.create_pending_approval(
                                     task_id,
                                     tool_name,
                                     tool_args_str,
                                 )?;
+                                queued_approval_id = Some(approval_id.clone());
                                 println!("⚠️ ACTION QUEUED FOR APPROVAL: {} ({})", tool_name, approval_id);
                                 let _ = self.memory.log_message(
                                     task_id,
@@ -453,6 +456,11 @@ impl TaskScheduler {
                                     + std::time::Duration::from_secs(300);
                                 loop {
                                     if let Some(decision) = self.memory.pending_approval_decision(&approval_id)? {
+                                        queued_approval_outcome = Some(if decision {
+                                            "approved"
+                                        } else {
+                                            "denied"
+                                        });
                                         break decision;
                                     }
                                     if tokio::time::Instant::now() >= deadline {
@@ -462,6 +470,7 @@ impl TaskScheduler {
                                             "WARN",
                                             &format!("Approval '{}' expired after five minutes", approval_id),
                                         );
+                                        queued_approval_outcome = Some("expired");
                                         break false;
                                     }
                                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -470,6 +479,41 @@ impl TaskScheduler {
                                 println!("⚠️ ACTION REQUIRES APPROVAL: {} {}", tool_name, tool_args_str);
                                 PermissionManager::prompt_approval(tool_name, tool_args_str)?
                             };
+                            if let Some(approval_id) = queued_approval_id {
+                                event_seq += 1;
+                                let outcome = queued_approval_outcome.unwrap_or(if approved {
+                                    "approved"
+                                } else {
+                                    "denied"
+                                });
+                                let _ = self.memory.record(Event {
+                                    event_id: uuid::Uuid::new_v4().to_string(),
+                                    task_id: task_id.to_string(),
+                                    session_id: self.session_id.clone(),
+                                    sequence: event_seq,
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                    event_type: "approval.decided".to_string(),
+                                    actor: if outcome == "expired" {
+                                        "kerna".to_string()
+                                    } else {
+                                        "human".to_string()
+                                    },
+                                    severity: if approved {
+                                        "info".to_string()
+                                    } else {
+                                        "warning".to_string()
+                                    },
+                                    model: None,
+                                    tool: Some(tool_name.clone()),
+                                    policy_decision: Some(outcome.to_string()),
+                                    risk_score: None,
+                                    parent_event_id: Some(parent_evt_id.clone()),
+                                    correlation_id: Some(tc.id.clone()),
+                                    redaction_status: None,
+                                    budget_snapshot_json: Some(budget.get_snapshot_json()),
+                                    payload_json: json!({ "approval_id": approval_id, "outcome": outcome }),
+                                });
+                            }
                             if !approved {
                                 println!("❌ {} (Rejected)", display_name);
                                 messages.push(ChatMessage {

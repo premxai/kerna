@@ -288,6 +288,66 @@ async fn test_mockmcp_echo_succeeds_and_appears_in_trace() {
 }
 
 #[tokio::test]
+async fn test_queued_approval_is_recorded_before_tool_execution() {
+    let (memory, mut config, db_path) = setup_test_env("test_queued_approval_event", None).await;
+    config.permissions = vec![PermissionRule {
+        tool: "echo".to_string(),
+        action: "require_confirmation".to_string(),
+    }];
+
+    let mcp_registry = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::mcp_registry::McpRegistry::new(),
+    ));
+    mcp_registry
+        .lock()
+        .await
+        .initialize(&config.mcp_servers)
+        .await
+        .unwrap();
+    let mem = std::sync::Arc::new(memory);
+    let scheduler = Scheduler::new(config, mem.clone(), mcp_registry, None)
+        .unwrap()
+        .approval_queue();
+    let run = tokio::spawn(async move { scheduler.run_goal("Please call echo").await });
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let approval_id = loop {
+        let pending = mem.list_pending_approvals().unwrap();
+        if let Some((id, _, tool, _)) = pending.into_iter().next() {
+            assert_eq!(tool, "echo");
+            break id;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "queued approval was not created within five seconds"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
+    assert!(mem.decide_pending_approval(&approval_id, true).unwrap());
+
+    let task_id = run.await.unwrap().unwrap();
+    let events = mem.get_events(&task_id.to_string()).unwrap();
+    let approval_index = events
+        .iter()
+        .position(|event| {
+            event.event_type == "approval.decided"
+                && event.tool.as_deref() == Some("echo")
+                && event.policy_decision.as_deref() == Some("approved")
+        })
+        .expect("queued approval must be present in the task receipt");
+    let start_index = events
+        .iter()
+        .position(|event| event.event_type == "tool.call.started")
+        .expect("approved tool must start");
+    assert!(
+        approval_index < start_index,
+        "approval must be recorded before the MCP tool starts: {events:?}"
+    );
+
+    let _ = fs::remove_file(&db_path);
+}
+
+#[tokio::test]
 async fn test_mockmcp_hang_times_out_cleanly() {
     let (memory, config, db_path) = setup_test_env("test_hang", None).await;
     let mcp_registry = std::sync::Arc::new(tokio::sync::Mutex::new(
