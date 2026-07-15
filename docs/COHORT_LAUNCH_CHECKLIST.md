@@ -17,7 +17,7 @@ content.
 | Google connector contract | Manifest limits tools, secrets, network hosts, and requires approval for creation | Verified by manifest and plugin tests |
 | OAuth setup safety | PKCE loopback helper defaults to `calendar.events.readonly`; it will not begin consent without an explicit storage choice | Verified by plugin test |
 | Desktop control surface | Task receipts, local approval queue, routine scope, connector setup state, and latest tool-call result are represented | Desktop build and responsive visual smoke check verified |
-| Controlled-cohort artifact integrity | v0.2.0 published CLI and native desktop assets with SHA-256 checksum files; all 18 released assets, four CLI sidecars, and six desktop-installer manifest entries were verified against their SHA-256 values | Verified on 2026-07-15 |
+| Controlled-cohort artifact integrity | v0.2.3 published CLI and native desktop assets with SHA-256 checksum files; all 20 released assets, five CLI/plugin-bundle sidecars, and six desktop-installer manifest entries were verified against their SHA-256 values | Verified on 2026-07-15 |
 
 ## Required live acceptance checks
 
@@ -47,8 +47,9 @@ personal or team account is connected.
 6. Disconnect the network during a read. Confirm the result is a bounded,
    understandable failure, not a retry loop or a successful-looking receipt.
 
-Record only the task IDs, outcome, platform, and elapsed time. If any check
-fails, stop expansion and file the receipt as a launch blocker.
+Record only the task IDs, outcome, platform, and elapsed time in the
+[cohort acceptance record](COHORT_ACCEPTANCE_RECORD.md). If any check fails,
+stop expansion and file the receipt as a launch blocker.
 
 ## Controlled-cohort distribution checks
 
@@ -63,6 +64,10 @@ fails, stop expansion and file the receipt as a launch blocker.
    before opening the desktop app.
 4. Record the release tag and checksum value in the cohort invitation. Do not
    distribute an artifact from a local build folder.
+
+Use the [cohort acceptance record](COHORT_ACCEPTANCE_RECORD.md) to retain the
+verified tag, checksum filenames, and test outcomes without collecting private
+calendar content or credentials.
 
 Code signing and macOS notarization remain required before a broad public
 release. They are not silently implied by a successful unsigned build; this

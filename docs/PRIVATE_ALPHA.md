@@ -156,5 +156,6 @@ and collaboration connectors, richer approval risk summaries, and a shared
 policy plane remain required release gates for a broader daily-productivity
 launch.
 
-Use the [cohort launch checklist](COHORT_LAUNCH_CHECKLIST.md) to record the
+Use the [cohort launch checklist](COHORT_LAUNCH_CHECKLIST.md) and its
+[acceptance-record template](COHORT_ACCEPTANCE_RECORD.md) to record the
 required live-account and user evidence before inviting or expanding users.
