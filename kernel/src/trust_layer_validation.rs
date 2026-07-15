@@ -639,6 +639,11 @@ async fn test_kerna_trace_output() {
     assert!(events.len() >= 4);
     assert_eq!(events[0].event_type, "tool.call.requested");
     assert_eq!(events[1].event_type, "tool.policy.checked");
+    assert_eq!(
+        events[1].policy_decision.as_deref(),
+        Some("AutoApprove"),
+        "trace policy events must retain the decision shown to operators"
+    );
     assert_eq!(events[2].event_type, "budget.checked");
     assert_eq!(events[3].event_type, "tool.call.started");
 

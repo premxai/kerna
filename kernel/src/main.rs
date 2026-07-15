@@ -1205,12 +1205,12 @@ async fn main() -> Result<()> {
                 }
 
                 println!(
-                    "{:<4} | {:<24} | {:<22} | {:<10} | {:<7} | Details",
-                    "Seq", "Timestamp", "Event Type", "Actor", "Level"
+                    "{:<4} | {:<24} | {:<22} | {:<10} | {:<7} | {:<24} | Details",
+                    "Seq", "Timestamp", "Event Type", "Actor", "Level", "Decision"
                 );
                 println!(
-                    "{:-<4}-+-{:-<24}-+-{:-<22}-+-{:-<10}-+-{:-<7}-+-{:-<40}",
-                    "", "", "", "", "", ""
+                    "{:-<4}-+-{:-<24}-+-{:-<22}-+-{:-<10}-+-{:-<7}-+-{:-<24}-+-{:-<40}",
+                    "", "", "", "", "", "", ""
                 );
 
                 for ev in events {
@@ -1224,8 +1224,14 @@ async fn main() -> Result<()> {
                     };
 
                     println!(
-                        "{:<4} | {:<24} | {:<22} | {:<10} | {:<7} | {}",
-                        ev.sequence, ts, ev.event_type, ev.actor, ev.severity, display_payload
+                        "{:<4} | {:<24} | {:<22} | {:<10} | {:<7} | {:<24} | {}",
+                        ev.sequence,
+                        ts,
+                        ev.event_type,
+                        ev.actor,
+                        ev.severity,
+                        ev.policy_decision.as_deref().unwrap_or("—"),
+                        display_payload
                     );
                 }
             } else {

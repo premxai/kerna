@@ -2,6 +2,12 @@
 
 All notable changes to Kerna will be documented in this file.
 
+## [v0.2.2] - 2026-07-15
+
+### Changed
+- `kerna trace` now shows each event's recorded policy decision, including
+  explicit routine-allowlist denials, alongside the event payload.
+
 ## [v0.2.1] - 2026-07-15
 
 ### Changed
