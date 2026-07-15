@@ -826,7 +826,8 @@ impl TaskScheduler {
                         });
                         println!("⚠️ Memory write skipped (Budget exceeded)");
                     } else {
-                        // TODO: Replace dummy embedding with actual embedding model call
+                        // `add_episodic_memory` computes the deterministic local embedding,
+                        // preserving the local-only memory path without an external model call.
                         let mem_id = self.memory.add_episodic_memory(&memory_content)?;
                         println!("⚠️ Memory proposal STAGED for approval (ID: {})", mem_id);
 
