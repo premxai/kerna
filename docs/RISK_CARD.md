@@ -1,52 +1,55 @@
-# Kerna Risk Cards
+# Kerna MCP risk cards
 
-When a plugin is loaded, Kerna calculates a **Risk Card** which serves as a security passport for the plugin's execution session.
+A risk card is a human-readable review of a connector before you grant it
+access. It is not a permission grant and it never overrides Kerna's
+fail-closed policy.
 
-## Risk Score Calculation
+## What a risk card shows
 
-The risk score is a float from `0.0` (fully benign) to `10.0` (critical risk). It is calculated based on the capabilities requested in the `manifest.toml`.
+For a configured MCP server, `kerna mcp risk <name>` reports:
 
-- **Baseline**: `0.0`
-- **Missing Manifest**: `+10.0` (Legacy Warning Mode)
-- **Filesystem Access**:
-  - `fs_read` requested: `+1.0`
-  - `fs_write` requested: `+3.0`
-  - `fs_write` to sensitive path (e.g., `/etc`, `.ssh`, `~`): `+5.0`
-- **Network Access**:
-  - `network_outbound` requested: `+2.0`
-  - `network_outbound` with wildcards (`*`): `+4.0`
-- **Execution Access**:
-  - `shell` requested: `+10.0`
-- **Environment Access**:
-  - `env` requested: `+1.0`
-  - `env` requesting secrets (`*_KEY`, `*_TOKEN`, `PASSWORD`): `+5.0`
+- discovered tools and the effective allow/deny filters;
+- secrets the connector declares, showing only whether an environment variable
+  is present—not its value;
+- declared network hosts and other manifest metadata;
+- tools that the connector contract itself requires approval for.
 
-## Risk Tiers
+Curated plugins include a `manifest.toml`. Kerna applies that manifest at
+runtime as a narrowing contract: it can restrict callable tools, add approval
+requirements, and prevent a configured secret from being forwarded unless the
+plugin also declares that exact name. A malformed discovered manifest prevents
+the plugin from starting.
 
-| Score | Tier | Behavior |
-|-------|------|----------|
-| `0.0 - 2.0` | **Low** | Automatically approved for execution. |
-| `2.1 - 6.0` | **Moderate** | Executes, but sensitive operations may require explicit user approval (Converse Mode). |
-| `6.1 - 9.9` | **High** | Warns the user on initialization. Enforces strict budgets. |
-| `10.0+` | **Critical** | Plugin cannot be loaded unless the user explicitly forces it with `--trust-all` or runs in Legacy Warning Mode. |
+Third-party servers without a manifest may still be configured, but they are
+unreviewed: inspect their tools, set a narrow `allow_tools` filter, and grant
+each tool explicitly before use.
 
-## Viewing a Risk Card
+## What actually enforces safety
 
-You can inspect a plugin's Risk Card before installing it:
+Risk severity is explanatory. Execution remains governed by four independent,
+fail-closed controls:
+
+1. **Manifest contract** — narrows a connector's declared capabilities and
+   secret access.
+2. **Permission policy** — every tool is `deny`, `require_confirmation`, or
+   `auto_approve`; there is no automatic permission based on a risk score.
+3. **Budgets and sandboxing** — tool calls, runtime, output, and other resource
+   limits bound every task; runtime mode determines the available process and
+   network isolation.
+4. **Per-action approval** — a tool marked `require_confirmation`, including a
+   manifest-required write, pauses for a person or is denied in unattended
+   contexts.
+
+## Review a connector
 
 ```bash
-kerna plugin inspect ./path/to/plugin/manifest.toml
+kerna pack install google-workspace
+kerna mcp risk google-calendar
+kerna doctor                       # setup state for every configured connector
+kerna mcp doctor google-calendar   # local command/configuration diagnostics
+kerna mcp probe google-calendar    # start it and list its transport tools
 ```
 
-**Output Example**:
-```text
-Plugin: github-plugin (v1.0.0)
-Risk Score: 4.0 [MODERATE]
-
-Capabilities:
-- fs_read: [".git/config", "src/"]
-- network_outbound: ["api.github.com"]
-
-Warnings:
-- Network outbound requests are permitted.
-```
+Before enabling a connector, confirm its described job, tools, requested
+secrets, and network reach match what you intend to use. Then grant the
+smallest useful set in `kerna.toml`; leave all other tools denied.

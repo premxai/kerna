@@ -66,6 +66,11 @@ pub async fn inspect(server_config: &McpServerConfig) -> Result<()> {
 }
 
 pub async fn generate_risk_card(server_config: &McpServerConfig) -> Result<()> {
+    // Render the card for the effective policy, not merely the raw config. A
+    // manifest can only narrow the callable tool set and add approval gates.
+    let mut effective_server_config = server_config.clone();
+    let manifest_path = crate::plugin_manifest::apply_to_server(&mut effective_server_config)?;
+    let server_config = &effective_server_config;
     let args: Vec<&str> = server_config.args.iter().map(|s| s.as_str()).collect();
     let mut client = match McpClient::spawn(
         &server_config.command,
@@ -220,16 +225,15 @@ pub async fn generate_risk_card(server_config: &McpServerConfig) -> Result<()> {
     // full picture (network reach + which secrets) before granting anything.
     let mut declared_secrets = server_config.secrets.clone();
     let mut declared_network: Vec<String> = Vec::new();
-    let manifest_path = format!("plugins/{}/manifest.toml", server_config.name);
-    if let Ok(m) =
-        crate::plugin_manifest::PluginManifest::load(std::path::Path::new(&manifest_path))
-    {
-        for s in m.plugin.secrets {
-            if !declared_secrets.contains(&s) {
-                declared_secrets.push(s);
+    if let Some(path) = manifest_path {
+        if let Ok(m) = crate::plugin_manifest::PluginManifest::load(&path) {
+            for s in m.plugin.secrets {
+                if !declared_secrets.contains(&s) {
+                    declared_secrets.push(s);
+                }
             }
+            declared_network = m.plugin.network_allowlist;
         }
-        declared_network = m.plugin.network_allowlist;
     }
     if !declared_secrets.is_empty() {
         println!(

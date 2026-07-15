@@ -212,4 +212,35 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn google_workspace_pack_is_fail_closed_and_declares_oauth_secrets() {
+        let pack_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("plugins")
+            .join("packs")
+            .join("google-workspace.toml");
+        let pack = load_pack_file(&pack_path).expect("curated Google pack loads");
+        assert_eq!(pack.plugins.len(), 1);
+        let plugin = &pack.plugins[0];
+        assert_eq!(plugin.name, "google-calendar");
+        assert_eq!(
+            plugin.secrets,
+            vec![
+                "KERNA_GOOGLE_CALENDAR_CLIENT_ID".to_string(),
+                "KERNA_GOOGLE_CALENDAR_REFRESH_TOKEN".to_string()
+            ]
+        );
+
+        let mut config = Config::default();
+        install(&mut config, &pack);
+        for tool in &plugin.suggest_confirm {
+            let rule = config
+                .permissions
+                .iter()
+                .find(|rule| rule.tool == *tool)
+                .expect("connector tool has a policy");
+            assert_eq!(rule.action, "require_confirmation");
+        }
+    }
 }

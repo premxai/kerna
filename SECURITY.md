@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-Currently, only the latest release of Kerna (`v0.1.x`) is supported with security updates.
+Currently, only the latest release of Kerna (`v0.2.x`) is supported with security updates.
 
 ## Reporting a Vulnerability
 

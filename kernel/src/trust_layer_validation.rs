@@ -90,7 +90,7 @@ async fn test_declared_secret_reaches_plugin_undeclared_does_not() {
     std::env::set_var("KERNA_DECLARED_SECRET", "shhh-value");
     std::env::set_var("KERNA_UNDECLARED_SECRET", "should-not-leak");
 
-    let (memory, mut config, db_path) = setup_test_env("test_secrets", None).await;
+    let (_memory, mut config, db_path) = setup_test_env("test_secrets", None).await;
     // Declare only the one secret on the mockmcp server; allow all tools so the
     // capability filter doesn't block secret_probe (this test is about env, not policy).
     config.mcp_servers[0].secrets = vec!["KERNA_DECLARED_SECRET".to_string()];

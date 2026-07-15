@@ -37,8 +37,20 @@ impl CronEngine {
                 continue;
             }
 
+            // Legacy schedules deserialize with an empty allowlist. Refuse to
+            // run them unattended rather than silently granting access to all
+            // currently configured tools.
+            if schedule.allowed_tools.is_empty() {
+                eprintln!(
+                    "[Cron] Skipping routine '{}': it has no reviewed tool allowlist. Re-add it with `kerna routine add ... --allow-tool <tool>` and enable it explicitly.",
+                    if schedule.name.is_empty() { &schedule.goal } else { &schedule.name }
+                );
+                continue;
+            }
+
             let cron_expr = schedule.cron.clone();
             let goal = schedule.goal.clone();
+            let allowed_tools = schedule.allowed_tools.clone();
 
             let config_clone = self.config.clone();
             let memory_clone = self.memory.clone();
@@ -53,6 +65,7 @@ impl CronEngine {
                 let memory_c = memory_clone.clone();
                 let mcp_c = mcp_registry_clone.clone();
                 let running_c = running_jobs_clone.clone();
+                let routine_tools = allowed_tools.clone();
 
                 Box::pin(async move {
                     {
@@ -70,6 +83,12 @@ impl CronEngine {
                     println!("\n[Cron] Triggering scheduled goal: {}", goal_clone);
                     match TaskScheduler::new(config_c, memory_c, mcp_c, None) {
                         Ok(task_scheduler) => {
+                            // A daemon has nobody at stdin to answer a prompt.
+                            // Approval-required work must be denied rather than
+                            // leaving a routine hung indefinitely.
+                            let task_scheduler = task_scheduler
+                                .restrict_to_tools(routine_tools)
+                                .non_interactive();
                             if let Err(e) = task_scheduler.run_goal(&goal_clone).await {
                                 eprintln!("[Cron] Scheduled goal failed: {}", e);
                             }

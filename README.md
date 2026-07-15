@@ -140,14 +140,15 @@ Kerna owns *no* domain logic — every capability is an MCP plugin spawned as an
 
 ```bash
 kerna pack list                    # productivity, dev
-kerna pack install productivity    # search + notes + web, fail-closed
+kerna pack install productivity    # local notes/calendar/weather + optional web/search
 kerna secrets add search           # set the API key it needs (guided)
 kerna mcp risk search              # read the risk card before granting
 ```
 
 | Pack | Plugins (tools) |
 |------|------|
-| **productivity** | search (`web_search`), notes (`add_note`/`search_notes`/…), web (`fetch_url`/`read_page_text`) |
+| **productivity** | local Markdown notes, local calendar, weather, optional web search and web reading |
+| **google-workspace** | optional Google Calendar: read events by default; event creation needs a separate OAuth write grant and per-action approval |
 | **dev** | files (`read_file`/`write_file`/…), git (read-only), http (`http_get`/`http_post_json`) |
 
 Or browse the registry for individual plugins (Kerna's own + wrapped official servers like GitHub and Slack):
@@ -160,7 +161,17 @@ kerna plugins install github       # registers it, tells you which secret to set
 
 Every tool is fail-closed — installing a pack or plugin sets read tools to *require approval* and leaves the rest denied until you grant them. Connect any other MCP server too (`kerna mcp add fetch npx -y @modelcontextprotocol/server-fetch`), and Kerna governs it the same way.
 
-Not a developer? Start with the [everyday guide](docs/EVERYDAY.md). Want recurring routines (a daily digest, morning news)? `kerna routine add daily-digest` and run `kerna daemon`.
+Not a developer? Start with the [everyday guide](docs/EVERYDAY.md). The initial
+cohort's supported daily-use scope and acceptance checks are in the
+[Private Alpha Guide](docs/PRIVATE_ALPHA.md) and
+[Cohort Launch Checklist](docs/COHORT_LAUNCH_CHECKLIST.md). Want recurring
+routines (a daily digest, morning news)? `kerna routine add daily-digest` and
+run `kerna daemon`.
+
+The local desktop control surface is available to the initial technical cohort
+and reads the same workspace, receipts, connector state, and approval queue as
+the CLI. Its explicit `KERNA_HOME` / `KERNA_BIN` setup is documented in the
+[Private Alpha Guide](docs/PRIVATE_ALPHA.md#use-the-desktop-control-surface).
 
 Also included: `desktop` and `voice` reference plugins (need extra pip packages), and `mock`. Connect any other MCP server the same way — `kerna mcp add <name> <command> [args...]`:
 
@@ -203,4 +214,4 @@ kerna serve                              # loopback only, no auth — safe defau
 kerna serve --bind 0.0.0.0 --token SECRET # network-exposed requires a bearer token
 ```
 
-See `docs/` for the [Security Model](docs/SECURITY_MODEL.md), [Architecture](docs/architecture.md), [Policy Engine](docs/POLICY_ENGINE.md), [Budgets](docs/BUDGETS.md), and [BYOK Providers](docs/BYOK_PROVIDERS.md). Current launch status: [Launch Readiness Report](docs/LAUNCH_READINESS_REPORT.md).
+See `docs/` for the [Security Model](docs/SECURITY_MODEL.md), [Architecture](docs/architecture.md), [Policy Engine](docs/POLICY_ENGINE.md), [Budgets](docs/BUDGETS.md), and [BYOK Providers](docs/BYOK_PROVIDERS.md). The current acceptance record is the [Cohort Launch Checklist](docs/COHORT_LAUNCH_CHECKLIST.md); the [Launch Readiness Report](docs/LAUNCH_READINESS_REPORT.md) is a historical engineering record.

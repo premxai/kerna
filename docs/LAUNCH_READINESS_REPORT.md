@@ -1,6 +1,10 @@
-# Kerna Launch Readiness Report
+# Kerna Launch Readiness Report (historical)
 
-_Generated during the pre-launch hardening pass. Reflects the state of the `kernel/` crate after Phases 0–4._
+> This is a historical engineering record from an earlier hardening pass, not
+> the current release decision. Its phase descriptions and contemporaneous
+> test counts are retained for provenance. Use
+> [COHORT_LAUNCH_CHECKLIST.md](COHORT_LAUNCH_CHECKLIST.md) for the current
+> initial-cohort acceptance evidence and live-account gates.
 
 ## 1. Executive summary
 

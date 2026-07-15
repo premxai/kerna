@@ -11,7 +11,7 @@ Kerna is designed as a **runtime trust layer** for agentic execution. It assumes
 ## Trust Boundaries
 
 - **LLM ↔ Kerna Core**: LLMs communicate with Kerna solely by requesting tool calls. They cannot directly execute code or mutate state.
-- **Kerna Core ↔ MCP Plugins**: Plugins execute in isolated sandboxes or as separate processes over stdio. Kerna strictly controls their lifecycles.
+- **Kerna Core ↔ MCP Plugins**: Plugins execute as separate child processes over stdio. Kerna controls the tool protocol, lifecycle, configured environment, working directory, permissions, and budgets. The default `native` mode is not an OS-level sandbox; use a hardened runtime mode when one is available and treat every plugin as untrusted.
 - **Kerna Core ↔ OS**: Kerna acts as the gatekeeper to the host operating system, enforcing path restrictions, capability limits, and execution budgets.
 
 ## Mitigation Strategies
@@ -25,9 +25,10 @@ Every task is assigned a `BudgetConfig` that defines hard limits on execution:
 - **`max_output_bytes`**: Prevents memory exhaustion from runaway stdout streams.
 
 ### 2. Capabilities and the Plugin Manifest
-Plugins must define a `manifest.toml` that explicitly declares their capabilities (e.g., `fs_read`, `network_outbound`, `shell`).
-- **Fail-Closed Default**: Without a manifest, a plugin is treated as high-risk and operates under "Legacy Warning" mode.
-- **Least Privilege**: Plugins only receive the permissions they explicitly request and the user approves.
+Curated plugins define a `manifest.toml` that explicitly declares their MCP tool names, approval requirements, and requested secret names.
+- **Manifest contract**: A discovered manifest narrows the effective callable-tool set, adds approval requirements, and requires a matching config declaration before a secret is passed through. A malformed manifest prevents that plugin from starting.
+- **Legacy Warning**: A plugin without a manifest remains compatible but is treated as unreviewed; explicit `kerna.toml` policy is still required and should be restrictive.
+- **Least Privilege**: Plugins only receive the permissions and secrets both the user configuration and their declared contract allow.
 
 ### 3. The Sacred Pipeline & Event Sinking
 Every tool execution follows a strictly ordered pipeline:
@@ -38,6 +39,11 @@ Every tool execution follows a strictly ordered pipeline:
 5. `tool.call.completed` / `failed`: Emitted with the result.
 
 This pipeline ensures 100% observability and non-repudiation. All events are synced to a durable SQLite store.
+
+Credential-shaped fields in event payloads (for example `Authorization`,
+`token`, `api_key`, `password`, and `cookie`) are redacted at the durable event
+storage boundary. Traces retain the action metadata and show that redaction
+occurred, but not the credential value.
 
 ### 4. Provider Routing & Privacy Boundaries
 With BYOK (Bring Your Own Key) architecture, Kerna routes LLM tasks dynamically based on privacy requirements:

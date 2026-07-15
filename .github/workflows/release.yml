@@ -36,6 +36,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify release version matches tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          if not tag.startswith("v") or len(tag) == 1:
+              raise SystemExit(f"Release tags must be v<version>, got {tag!r}")
+          expected = tag[1:]
+
+          def toml_version(path):
+              match = re.search(r'^version\s*=\s*"([^"]+)"', Path(path).read_text(), re.M)
+              if not match:
+                  raise SystemExit(f"Could not read a package version from {path}")
+              return match.group(1)
+
+          versions = {
+              "kernel": toml_version("kernel/Cargo.toml"),
+              "desktop": toml_version("ui/src-tauri/Cargo.toml"),
+              "desktop config": json.loads(Path("ui/src-tauri/tauri.conf.json").read_text())["version"],
+              "npm wrapper": json.loads(Path("npm/package.json").read_text())["version"],
+          }
+          mismatches = {name: version for name, version in versions.items() if version != expected}
+          if mismatches:
+              details = ", ".join(f"{name}={version}" for name, version in versions.items())
+              raise SystemExit(f"Tag {tag} does not match release versions: {details}")
+          print(f"Release version verified: {expected}")
+          PY
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -51,10 +86,128 @@ jobs:
           mkdir -p dist
           # Cargo workspace: the target dir lives at the repo root, not kernel/.
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${{ matrix.asset }}"
+          sha256sum "dist/${{ matrix.asset }}" > "dist/${{ matrix.asset }}.sha256"
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
           name: Kerna ${{ github.ref_name }}
           generate_release_notes: true
-          files: dist/${{ matrix.asset }}
+          files: |
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.asset }}.sha256
+
+  desktop:
+    name: Build desktop ${{ matrix.name }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            checksum_asset: kerna-desktop-linux-SHA256SUMS
+            assets: |
+              ui/src-tauri/target/release/bundle/deb/*.deb
+              ui/src-tauri/target/release/bundle/appimage/*.AppImage
+          - name: macOS Apple Silicon
+            os: macos-latest
+            checksum_asset: kerna-desktop-macos-arm64-SHA256SUMS
+            assets: ui/src-tauri/target/release/bundle/dmg/*.dmg
+          - name: macOS Intel
+            os: macos-13
+            checksum_asset: kerna-desktop-macos-x86_64-SHA256SUMS
+            assets: ui/src-tauri/target/release/bundle/dmg/*.dmg
+          - name: Windows
+            os: windows-latest
+            checksum_asset: kerna-desktop-windows-SHA256SUMS
+            assets: |
+              ui/src-tauri/target/release/bundle/msi/*.msi
+              ui/src-tauri/target/release/bundle/nsis/*-setup.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify release version matches tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"]
+          if not tag.startswith("v") or len(tag) == 1:
+              raise SystemExit(f"Release tags must be v<version>, got {tag!r}")
+          expected = tag[1:]
+
+          def toml_version(path):
+              match = re.search(r'^version\s*=\s*"([^"]+)"', Path(path).read_text(), re.M)
+              if not match:
+                  raise SystemExit(f"Could not read a package version from {path}")
+              return match.group(1)
+
+          versions = {
+              "kernel": toml_version("kernel/Cargo.toml"),
+              "desktop": toml_version("ui/src-tauri/Cargo.toml"),
+              "desktop config": json.loads(Path("ui/src-tauri/tauri.conf.json").read_text())["version"],
+              "npm wrapper": json.loads(Path("npm/package.json").read_text())["version"],
+          }
+          mismatches = {name: version for name, version in versions.items() if version != expected}
+          if mismatches:
+              details = ", ".join(f"{name}={version}" for name, version in versions.items())
+              raise SystemExit(f"Tag {tag} does not match release versions: {details}")
+          print(f"Release version verified: {expected}")
+          PY
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install Tauri system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential curl wget file libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install desktop dependencies
+        run: npm ci
+        working-directory: ./ui
+
+      - name: Build desktop bundles
+        run: npm run tauri build
+        working-directory: ./ui
+
+      - name: Generate desktop bundle checksums
+        shell: bash
+        run: |
+          cd ui/src-tauri/target/release/bundle
+          find . -type f \( -name '*.msi' -o -name '*-setup.exe' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > "${{ matrix.checksum_asset }}"
+          test -s "${{ matrix.checksum_asset }}" || {
+            echo "No desktop bundle was produced for ${{ matrix.name }}." >&2
+            exit 1
+          }
+
+      - name: Upload desktop installers to release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Kerna ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            ${{ matrix.assets }}
+            ui/src-tauri/target/release/bundle/${{ matrix.checksum_asset }}

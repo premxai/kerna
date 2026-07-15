@@ -74,6 +74,15 @@
       "suggest_confirm": ["list_events", "add_event"]
     },
     {
+      "name": "google-calendar",
+      "description": "Google Calendar through OAuth. Read-only consent by default; event creation is approval-gated.",
+      "command": "python",
+      "args": ["{plugins}/google_calendar_mcp/mcp_server.py"],
+      "secrets": ["KERNA_GOOGLE_CALENDAR_CLIENT_ID", "KERNA_GOOGLE_CALENDAR_REFRESH_TOKEN"],
+      "tags": ["productivity", "calendar", "oauth", "google"],
+      "suggest_confirm": ["google_calendar_status", "google_list_events", "google_create_event"]
+    },
+    {
       "name": "weather",
       "description": "Current weather + 3-day outlook via wttr.in (no API key).",
       "command": "python",

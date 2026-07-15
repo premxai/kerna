@@ -1,9 +1,7 @@
 use crate::config::McpServerConfig;
 use crate::mcp::{McpClient, McpTool};
-use crate::plugin_manifest::PluginManifest;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
-use std::path::Path;
 
 /// Manages the lifecycle and routing of all registered MCP servers.
 pub struct McpRegistry {
@@ -64,33 +62,38 @@ impl McpRegistry {
 
     /// Spawn all configured MCP servers and discover their tools.
     pub async fn initialize(&mut self, configs: &[McpServerConfig]) -> Result<()> {
-        for config in configs {
-            if !config.enabled {
-                self.status(&format!("[MCP] Skipping disabled server: {}", config.name));
+        for configured_server in configs {
+            if !configured_server.enabled {
+                self.status(&format!(
+                    "[MCP] Skipping disabled server: {}",
+                    configured_server.name
+                ));
                 continue;
             }
 
-            let args_ref: Vec<&str> = config.args.iter().map(|s| s.as_str()).collect();
-
-            // Load manifest (Phase 3)
-            let manifest_path_str = format!("plugins/{}/manifest.toml", config.name);
-            let manifest_path = Path::new(&manifest_path_str);
-            if manifest_path.exists() {
-                match PluginManifest::load(manifest_path) {
-                    Ok(_m) => {
-                        self.status(&format!(
-                            "[MCP] Loaded verified manifest for plugin: {}",
-                            config.name
-                        ));
-                        // TODO: Merge capabilities from manifest into config
-                    }
-                    Err(e) => {
-                        eprintln!("[MCP] Error loading manifest for {}: {}", config.name, e);
-                    }
+            // Apply manifest declarations here too, so registry users outside
+            // the CLI main path cannot accidentally bypass the contract.
+            let mut config = configured_server.clone();
+            match crate::plugin_manifest::apply_to_server(&mut config) {
+                Ok(Some(path)) => self.status(&format!(
+                    "[MCP] Enforcing manifest for '{}': {}",
+                    config.name,
+                    path.display()
+                )),
+                Ok(None) => self.status(&format!(
+                    "[MCP] Legacy Warning: Plugin '{}' lacks a manifest.toml. Running with full config trust.",
+                    config.name
+                )),
+                Err(e) => {
+                    eprintln!(
+                        "[MCP] Refusing to start '{}' because its manifest is invalid: {}",
+                        config.name, e
+                    );
+                    continue;
                 }
-            } else {
-                self.status(&format!("[MCP] Legacy Warning: Plugin '{}' lacks a manifest.toml. Running with full config trust.", config.name));
             }
+
+            let args_ref: Vec<&str> = config.args.iter().map(|s| s.as_str()).collect();
 
             match McpClient::spawn(
                 &config.command,

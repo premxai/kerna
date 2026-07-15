@@ -46,8 +46,17 @@ pub struct McpServerConfig {
 /// Configuration for a scheduled recurring goal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleConfig {
+    /// Human-readable routine identity. Older schedules may not have a name;
+    /// callers should fall back to the goal when presenting them.
+    #[serde(default)]
+    pub name: String,
     pub cron: String,
     pub goal: String,
+    /// The complete set of tools a background routine is allowed to see or
+    /// invoke. An empty list is unsafe for unattended execution and is refused
+    /// by the cron engine; it only exists to deserialize legacy configs.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -135,7 +144,7 @@ pub struct BudgetPreset {
 }
 
 /// Root application configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub llm_provider: String,
 
@@ -223,6 +232,46 @@ pub struct Config {
 
     #[serde(default)]
     pub credential_pool: Vec<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            llm_provider: String::new(),
+            llm_api_key: String::new(),
+            llm_model: String::new(),
+            providers: std::collections::HashMap::new(),
+            model_routes: std::collections::HashMap::new(),
+            privacy_routes: std::collections::HashMap::new(),
+            db_path: String::new(),
+            sandbox_dir: String::new(),
+            memory_backend: String::new(),
+            folders: Vec::new(),
+            mcp_servers: Vec::new(),
+            schedules: Vec::new(),
+            channels: Vec::new(),
+            permissions: Vec::new(),
+            max_retries: default_max_retries(),
+            max_tool_rounds: default_max_tool_rounds(),
+            runtime_mode: default_runtime_mode(),
+            allow_dynamic_installs: false,
+            presets: std::collections::HashMap::new(),
+            workspace: WorkspaceConfig::default(),
+            max_runtime_seconds: default_max_runtime_seconds(),
+            max_tool_calls: default_max_tool_calls(),
+            max_llm_calls: default_max_llm_calls(),
+            max_cost_usd: default_max_cost_usd(),
+            max_output_bytes: default_max_output_bytes(),
+            max_memory_writes: default_max_memory_writes(),
+            network_mode: default_network_mode(),
+            egress_proxy: None,
+            enable_supervisor: false,
+            converse: false,
+            llm_fallback_provider: None,
+            llm_fallback_api_key: None,
+            credential_pool: Vec::new(),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -431,5 +480,15 @@ mod tests {
         assert!(!toml_str.contains("fallback_sk"));
         assert!(!toml_str.contains("llm_api_key"));
         assert!(!toml_str.contains("llm_fallback_api_key"));
+    }
+
+    #[test]
+    fn defaults_produce_a_usable_budget_envelope() {
+        let config = Config::default();
+        assert!(config.max_retries > 0);
+        assert!(config.max_tool_rounds > 0);
+        assert!(config.max_runtime_seconds > 0);
+        assert!(config.max_llm_calls > 0);
+        assert!(config.max_tool_calls > 0);
     }
 }

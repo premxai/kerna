@@ -123,7 +123,7 @@ impl Gateway {
                                 Some(json!({
                                     "protocolVersion": "2024-11-05",
                                     "capabilities": { "tools": {} },
-                                    "serverInfo": { "name": "kerna-gateway", "version": "0.1.0" }
+                                    "serverInfo": { "name": "kerna-gateway", "version": env!("CARGO_PKG_VERSION") }
                                 })),
                                 None,
                             )

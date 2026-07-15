@@ -1,0 +1,10 @@
+[pack]
+name = "google-workspace"
+description = "Google Calendar through OAuth: read-only consent by default, with explicitly approved writes."
+
+[[plugin]]
+name = "google-calendar"
+command = "python"
+args = ["{plugins}/google_calendar_mcp/mcp_server.py"]
+secrets = ["KERNA_GOOGLE_CALENDAR_CLIENT_ID", "KERNA_GOOGLE_CALENDAR_REFRESH_TOKEN"]
+suggest_confirm = ["google_calendar_status", "google_list_events", "google_create_event"]

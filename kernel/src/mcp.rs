@@ -167,7 +167,7 @@ impl McpClient {
                 "capabilities": {},
                 "clientInfo": {
                     "name": "Kerna",
-                    "version": "0.1.0"
+                    "version": env!("CARGO_PKG_VERSION")
                 }
             },
             "id": id

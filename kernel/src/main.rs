@@ -42,7 +42,7 @@ use watchdog::WatchdogEngine;
     about = "Kerna — The Developer Runtime for Autonomous AI Agents",
     long_about = "Kerna is the runtime for autonomous AI agents. Build them, run them, remember everything, and stay in control."
 )]
-#[command(version = "0.1.0")]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -106,6 +106,16 @@ enum Commands {
         /// Enable Converse Mode to pause for user confirmation before executing tools
         #[arg(long)]
         converse: bool,
+
+        /// Refuse approval-required calls instead of prompting on stdin. Use
+        /// this for desktop, daemon, or other detached invocations.
+        #[arg(long)]
+        non_interactive: bool,
+
+        /// Queue approval-required actions in the local SQLite ledger for the
+        /// desktop control surface instead of reading from stdin.
+        #[arg(long, conflicts_with = "non_interactive")]
+        approval_queue: bool,
 
         /// Privacy routing mode (e.g. "public", "project", "private", "local-only")
         #[arg(long)]
@@ -206,6 +216,12 @@ enum Commands {
     Routine {
         #[command(subcommand)]
         action: RoutineCommands,
+    },
+
+    /// Inspect or decide pending local approval requests
+    Approval {
+        #[command(subcommand)]
+        action: ApprovalCommands,
     },
 
     /// Browse and install plugins from the registry
@@ -329,13 +345,39 @@ pub enum RoutineCommands {
     List,
     /// Add a routine from a template, or a custom one with --cron and --goal
     Add {
-        /// Template name (daily-digest, morning-news, weekly-review). Omit to use --cron/--goal.
+        /// Template name (morning-brief, meeting-prep, research-brief, daily-digest, morning-news, weekly-review). Omit to use --cron/--goal.
         #[arg(index = 1)]
         template: Option<String>,
         #[arg(long)]
         cron: Option<String>,
         #[arg(long)]
         goal: Option<String>,
+        /// Reviewed tools this custom routine may use (repeat for each tool).
+        /// Built-in templates supply their own allowlist.
+        #[arg(long = "allow-tool")]
+        allow_tool: Vec<String>,
+    },
+    /// Show a routine's scope and whether it can safely run unattended
+    Preview {
+        #[arg(index = 1)]
+        index: usize,
+    },
+    /// Enable a reviewed routine only when every allowed tool is explicitly
+    /// auto-approved for unattended use
+    Enable {
+        #[arg(index = 1)]
+        index: usize,
+    },
+    /// Pause a routine without deleting its reviewed scope or schedule
+    Disable {
+        #[arg(index = 1)]
+        index: usize,
+    },
+    /// Run a reviewed routine once now, using the same scoped non-interactive
+    /// policy as the daemon
+    Run {
+        #[arg(index = 1)]
+        index: usize,
     },
     /// Remove a routine by its list index
     Remove {
@@ -344,24 +386,87 @@ pub enum RoutineCommands {
     },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum ApprovalCommands {
+    List,
+    Approve {
+        #[arg(index = 1)]
+        id: String,
+    },
+    Deny {
+        #[arg(index = 1)]
+        id: String,
+    },
+}
+
 /// Built-in routine templates → (cron, goal). Cron is 6-field (sec min hour
 /// day month day-of-week), matching tokio-cron-scheduler.
-fn routine_template(name: &str) -> Option<(&'static str, &'static str)> {
+struct RoutineTemplate {
+    cron: &'static str,
+    goal: &'static str,
+    allowed_tools: &'static [&'static str],
+}
+
+fn routine_template(name: &str) -> Option<RoutineTemplate> {
     match name {
-        "daily-digest" => Some((
-            "0 0 8 * * *",
-            "Summarize my unread emails and today's calendar, then list my top 3 priorities for the day.",
-        )),
-        "morning-news" => Some((
-            "0 0 7 * * *",
-            "Search the web for today's most important AI news and summarize the top 5 items with links.",
-        )),
-        "weekly-review" => Some((
-            "0 0 17 * * Fri",
-            "Review my notes from this week and write a short summary of what I worked on and what's next.",
-        )),
+        "morning-brief" => Some(RoutineTemplate {
+            cron: "0 0 8 * * Mon-Fri",
+            goal: "Create a concise morning brief from the local calendar, notes, and weather when those reviewed tools are available. State which sources were unavailable. Prioritize the three most important actions. Do not modify or send anything.",
+            allowed_tools: &["list_events", "list_notes", "search_notes", "get_weather"],
+        }),
+        "meeting-prep" => Some(RoutineTemplate {
+            cron: "0 0 8 * * Mon-Fri",
+            goal: "Prepare a concise briefing for today's upcoming meetings from the local calendar and relevant notes. For each meeting, identify the purpose, relevant context, and suggested agenda questions. Do not modify or send anything.",
+            allowed_tools: &["list_events", "list_notes", "read_note", "search_notes"],
+        }),
+        "research-brief" => Some(RoutineTemplate {
+            cron: "0 0 8 * * Mon",
+            goal: "Research the user's chosen topic using the reviewed search and web-reading tools. Produce a concise, cited weekly brief with source links, key takeaways, and open questions. Do not modify or publish anything.",
+            allowed_tools: &["web_search", "read_page_text"],
+        }),
+        "daily-digest" => Some(RoutineTemplate {
+            cron: "0 0 8 * * *",
+            goal: "Summarize today's local calendar and notes, then list the top three priorities. Do not modify or send anything.",
+            allowed_tools: &["list_events", "list_notes", "search_notes"],
+        }),
+        "morning-news" => Some(RoutineTemplate {
+            cron: "0 0 7 * * *",
+            goal: "Search the web for today's most important AI news and summarize the top five items with source links. Do not modify or publish anything.",
+            allowed_tools: &["web_search", "read_page_text"],
+        }),
+        "weekly-review" => Some(RoutineTemplate {
+            cron: "0 0 17 * * Fri",
+            goal: "Review the user's local notes from this week and summarize what was worked on and what comes next. Do not modify or send anything.",
+            allowed_tools: &["list_notes", "read_note", "search_notes"],
+        }),
         _ => None,
     }
+}
+
+fn routine_name(schedule: &config::ScheduleConfig) -> &str {
+    if schedule.name.trim().is_empty() {
+        &schedule.goal
+    } else {
+        &schedule.name
+    }
+}
+
+/// Background execution has no interactive approval path. Every reviewed tool
+/// therefore needs an explicit auto-approve policy before a routine can run.
+fn routine_enablement_gaps(
+    config: &config::Config,
+    schedule: &config::ScheduleConfig,
+) -> Vec<String> {
+    if schedule.allowed_tools.is_empty() {
+        return vec!["no reviewed tool allowlist".to_string()];
+    }
+
+    schedule
+        .allowed_tools
+        .iter()
+        .filter(|tool| config.check_permission(tool) != "auto_approve")
+        .cloned()
+        .collect()
 }
 
 #[derive(Subcommand, Debug)]
@@ -651,6 +756,9 @@ fn command_needs_mcp(command: &Option<Commands>) -> bool {
     matches!(
         command,
         Some(Commands::Run { .. })
+            | Some(Commands::Routine {
+                action: RoutineCommands::Run { .. }
+            })
             | Some(Commands::Serve { .. })
             | Some(Commands::Daemon)
             | Some(Commands::Top)
@@ -664,6 +772,20 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let mut config = Config::load();
+
+    // Manifests narrow the effective runtime policy (tools, approval-required
+    // operations, and secret passthrough). They are not persisted back to the
+    // user's config; this keeps explicit user intent separate from derived
+    // plugin declarations. Configuration-management commands intentionally use
+    // the unmodified config so adding a plugin cannot rewrite existing grants.
+    let needs_effective_manifest_policy =
+        command_needs_mcp(&cli.command) || matches!(&cli.command, Some(Commands::Gateway));
+    if needs_effective_manifest_policy {
+        if let Err(e) = plugin_manifest::apply_to_config(&mut config) {
+            eprintln!("[-] Refusing to load plugin manifests: {}", e);
+            std::process::exit(1);
+        }
+    }
 
     // Initialize Memory Engine
     let memory = Arc::new(MemoryEngine::new(&config.db_path)?);
@@ -711,7 +833,10 @@ async fn main() -> Result<()> {
             gateways::start_channels(config.clone(), memory.clone(), mcp_registry.clone());
 
             println!("╔══════════════════════════════════════════════════════════════╗");
-            println!("║                  Kerna Daemon v0.1.0                        ║");
+            println!(
+                "║                  Kerna Daemon v{}                        ║",
+                env!("CARGO_PKG_VERSION")
+            );
             println!("╠══════════════════════════════════════════════════════════════╣");
             println!("║  Database:    {:<45} ║", config.db_path);
             println!(
@@ -791,6 +916,8 @@ async fn main() -> Result<()> {
         Some(Commands::Run {
             goal,
             converse,
+            non_interactive,
+            approval_queue,
             privacy,
         }) => {
             if converse {
@@ -936,6 +1063,13 @@ async fn main() -> Result<()> {
             }
 
             let scheduler = TaskScheduler::new(config, memory.clone(), mcp_registry.clone(), None)?;
+            let scheduler = if approval_queue {
+                scheduler.approval_queue()
+            } else if non_interactive {
+                scheduler.non_interactive()
+            } else {
+                scheduler
+            };
             match scheduler.run_goal(&final_goal).await {
                 Ok(task_id) => println!("[+] Task completed: {}", task_id),
                 Err(e) => {
@@ -1333,7 +1467,9 @@ async fn main() -> Result<()> {
             );
             println!(
                 "  Active key: {}",
-                if config.llm_api_key.is_empty() {
+                if config.llm_provider == "mock" {
+                    "\x1b[32mnot required (Demo mode)\x1b[0m"
+                } else if config.llm_api_key.is_empty() {
                     "\x1b[31mMISSING\x1b[0m"
                 } else {
                     "\x1b[32mOK\x1b[0m"
@@ -1401,6 +1537,86 @@ async fn main() -> Result<()> {
                 valid_plugins,
                 config.mcp_servers.len()
             );
+
+            if !config.mcp_servers.is_empty() {
+                println!("Connector setup:");
+                for server in &config.mcp_servers {
+                    let (declared_secrets, manifest_issue) =
+                        match plugin_manifest::load_for_server(server) {
+                            Ok(Some((_path, manifest))) => (manifest.plugin.secrets, None),
+                            Ok(None) => (server.secrets.clone(), None),
+                            Err(error) => (Vec::new(), Some(error.to_string())),
+                        };
+                    if let Some(issue) = manifest_issue {
+                        println!(
+                            "  - {:<16} \x1b[31mmanifest error\x1b[0m ({})",
+                            server.name, issue
+                        );
+                        continue;
+                    }
+
+                    let not_configured: Vec<&String> = declared_secrets
+                        .iter()
+                        .filter(|secret| !server.secrets.contains(*secret))
+                        .collect();
+                    let effective_secrets: Vec<&String> = server
+                        .secrets
+                        .iter()
+                        .filter(|secret| declared_secrets.contains(*secret))
+                        .collect();
+                    let ignored_config_secrets: Vec<&String> = server
+                        .secrets
+                        .iter()
+                        .filter(|secret| !declared_secrets.contains(*secret))
+                        .collect();
+                    let missing_environment: Vec<&String> = effective_secrets
+                        .iter()
+                        .filter(|secret| {
+                            std::env::var(secret.as_str())
+                                .map(|value| value.trim().is_empty())
+                                .unwrap_or(true)
+                        })
+                        .copied()
+                        .collect();
+
+                    if !not_configured.is_empty() {
+                        println!(
+                            "  - {:<16} \x1b[31mnot configured\x1b[0m (declare: {})",
+                            server.name,
+                            not_configured
+                                .iter()
+                                .map(|secret| secret.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    } else if !missing_environment.is_empty() {
+                        println!(
+                            "  - {:<16} \x1b[33mneeds setup\x1b[0m (missing: {})",
+                            server.name,
+                            missing_environment
+                                .iter()
+                                .map(|secret| secret.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    } else if effective_secrets.is_empty() {
+                        println!("  - {:<16} ready (no secrets required)", server.name);
+                    } else {
+                        println!("  - {:<16} \x1b[32mready\x1b[0m", server.name);
+                    }
+
+                    if !ignored_config_secrets.is_empty() {
+                        println!(
+                            "      ignored by manifest: {}",
+                            ignored_config_secrets
+                                .iter()
+                                .map(|secret| secret.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+                }
+            }
         }
 
         Some(Commands::Policy { action }) => {
@@ -1805,13 +2021,12 @@ async fn main() -> Result<()> {
                     .find(|s| s.name == name)
                     .map(|s| s.secrets.clone())
                     .unwrap_or_default();
-                let manifest_path = format!("plugins/{}/manifest.toml", name);
-                if let Ok(m) =
-                    plugin_manifest::PluginManifest::load(std::path::Path::new(&manifest_path))
-                {
-                    for s in m.plugin.secrets {
-                        if !names.contains(&s) {
-                            names.push(s);
+                if let Some(server) = config.mcp_servers.iter().find(|s| s.name == name) {
+                    if let Ok(Some((_, m))) = plugin_manifest::load_for_server(server) {
+                        for s in m.plugin.secrets {
+                            if !names.contains(&s) {
+                                names.push(s);
+                            }
                         }
                     }
                 }
@@ -1826,8 +2041,21 @@ async fn main() -> Result<()> {
                 SecretsCommands::Add { plugin } => {
                     let secrets = plugin_secrets(&plugin);
                     if config.mcp_servers.iter().all(|s| s.name != plugin)
-                        && !std::path::Path::new(&format!("plugins/{}/manifest.toml", plugin))
-                            .exists()
+                        && crate::plugin_manifest::find_for_server(&config::McpServerConfig {
+                            name: plugin.clone(),
+                            command: String::new(),
+                            args: vec![],
+                            enabled: true,
+                            capabilities: vec![],
+                            allowed_paths: vec![],
+                            approval_required: vec![],
+                            allow_tools: vec![],
+                            deny_tools: vec![],
+                            secrets: vec![],
+                            runtime_mode: "native".to_string(),
+                            docker_image: "ubuntu:latest".to_string(),
+                        })
+                        .is_none()
                     {
                         eprintln!(
                             "[-] Plugin '{}' is not configured and has no manifest. Add it first: kerna mcp add {} <command> [args...]",
@@ -1949,7 +2177,7 @@ async fn main() -> Result<()> {
             RoutineCommands::List => {
                 println!("Scheduled routines:\n");
                 if config.schedules.is_empty() {
-                    println!("  (none). Add one: kerna routine add daily-digest");
+                    println!("  (none). Add one: kerna routine add morning-brief");
                 }
                 for (i, s) in config.schedules.iter().enumerate() {
                     let state = if s.enabled { "on" } else { "off" };
@@ -1963,32 +2191,166 @@ async fn main() -> Result<()> {
                 template,
                 cron,
                 goal,
+                allow_tool,
             } => {
-                let (cron_expr, goal_text) = if let Some(t) = template.as_deref() {
+                let (routine_name, cron_expr, goal_text, allowed_tools) = if let Some(t) =
+                    template.as_deref()
+                {
                     match routine_template(t) {
-                        Some((c, g)) => (c.to_string(), g.to_string()),
+                        Some(template) => (
+                            t.to_string(),
+                            template.cron.to_string(),
+                            template.goal.to_string(),
+                            template
+                                .allowed_tools
+                                .iter()
+                                .map(|tool| (*tool).to_string())
+                                .collect(),
+                        ),
                         None => {
                             eprintln!(
-                                "[-] Unknown template '{}'. Available: daily-digest, morning-news, weekly-review.\n    Or add a custom routine: kerna routine add --cron \"0 8 * * *\" --goal \"...\"",
+                                "[-] Unknown template '{}'. Available: morning-brief, meeting-prep, research-brief, daily-digest, morning-news, weekly-review.\n    Or add a custom routine: kerna routine add --cron \"0 0 8 * * *\" --goal \"...\"",
                                 t
                             );
                             std::process::exit(1);
                         }
                     }
                 } else if let (Some(c), Some(g)) = (cron.clone(), goal.clone()) {
-                    (c, g)
+                    ("custom".to_string(), c, g, allow_tool)
                 } else {
                     eprintln!("[-] Provide a template name, or both --cron and --goal.");
                     std::process::exit(1);
                 };
                 config.schedules.push(config::ScheduleConfig {
+                    name: routine_name.clone(),
                     cron: cron_expr.clone(),
                     goal: goal_text.clone(),
-                    enabled: true,
+                    allowed_tools,
+                    enabled: false,
                 });
                 config.save();
-                println!("[+] Added routine ({}): {}", cron_expr, goal_text);
-                println!("    It runs when the daemon is active:  kerna daemon");
+                let index = config.schedules.len() - 1;
+                println!(
+                    "[+] Added paused routine '{}' ({}): {}",
+                    routine_name, cron_expr, goal_text
+                );
+                println!(
+                    "    Reviewed tools: {}",
+                    config.schedules[index].allowed_tools.join(", ")
+                );
+                println!("    Preview policy: kerna routine preview {}", index);
+                println!("    Enable after review: kerna routine enable {}", index);
+            }
+            RoutineCommands::Preview { index } => {
+                let Some(schedule) = config.schedules.get(index) else {
+                    eprintln!(
+                        "[-] No routine at index {} (see: kerna routine list).",
+                        index
+                    );
+                    std::process::exit(1);
+                };
+                println!("Routine [{}]: {}", index, routine_name(schedule));
+                println!(
+                    "  State: {}",
+                    if schedule.enabled {
+                        "enabled"
+                    } else {
+                        "paused"
+                    }
+                );
+                println!("  Schedule: {}", schedule.cron);
+                println!("  Goal: {}", schedule.goal);
+                println!(
+                    "  Reviewed tools: {}",
+                    if schedule.allowed_tools.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        schedule.allowed_tools.join(", ")
+                    }
+                );
+                let gaps = routine_enablement_gaps(&config, schedule);
+                if gaps.is_empty() {
+                    println!("  Policy: ready for unattended execution (all reviewed tools are explicitly auto-approved).");
+                } else {
+                    println!(
+                        "  Policy: not ready. The following must be explicitly auto-approved: {}",
+                        gaps.join(", ")
+                    );
+                    println!("  Keep write/send/delete tools out of routine allowlists. Review your kerna.toml before enabling.");
+                }
+            }
+            RoutineCommands::Enable { index } => {
+                let Some(schedule) = config.schedules.get(index) else {
+                    eprintln!(
+                        "[-] No routine at index {} (see: kerna routine list).",
+                        index
+                    );
+                    std::process::exit(1);
+                };
+                let gaps = routine_enablement_gaps(&config, schedule);
+                if !gaps.is_empty() {
+                    eprintln!(
+                        "[-] Routine '{}' remains paused. Explicit auto-approval is required for: {}.\n    Run `kerna routine preview {}` for the reviewed scope.",
+                        routine_name(schedule),
+                        gaps.join(", "),
+                        index
+                    );
+                    std::process::exit(1);
+                }
+                let name = routine_name(schedule).to_string();
+                config.schedules[index].enabled = true;
+                config.save();
+                println!("[+] Enabled routine '{}'. It will run only through its reviewed tool allowlist while `kerna daemon` is active.", name);
+            }
+            RoutineCommands::Disable { index } => {
+                if index < config.schedules.len() {
+                    let name = routine_name(&config.schedules[index]).to_string();
+                    config.schedules[index].enabled = false;
+                    config.save();
+                    println!("[+] Paused routine '{}'.", name);
+                } else {
+                    eprintln!(
+                        "[-] No routine at index {} (see: kerna routine list).",
+                        index
+                    );
+                    std::process::exit(1);
+                }
+            }
+            RoutineCommands::Run { index } => {
+                let Some(schedule) = config.schedules.get(index) else {
+                    eprintln!(
+                        "[-] No routine at index {} (see: kerna routine list).",
+                        index
+                    );
+                    std::process::exit(1);
+                };
+                let gaps = routine_enablement_gaps(&config, schedule);
+                if !gaps.is_empty() {
+                    eprintln!(
+                            "[-] Routine '{}' cannot run unattended. Explicit auto-approval is required for: {}.\n    Run `kerna routine preview {}` for the reviewed scope.",
+                            routine_name(schedule),
+                            gaps.join(", "),
+                            index
+                        );
+                    std::process::exit(1);
+                }
+
+                let name = routine_name(schedule).to_string();
+                let goal = schedule.goal.clone();
+                let allowed_tools = schedule.allowed_tools.clone();
+                let scheduler =
+                    TaskScheduler::new(config.clone(), memory.clone(), mcp_registry.clone(), None)?
+                        .restrict_to_tools(allowed_tools)
+                        .non_interactive();
+                match scheduler.run_goal(&goal).await {
+                    Ok(task_id) => {
+                        println!("[+] Routine '{}' completed. Task ID: {}", name, task_id)
+                    }
+                    Err(e) => {
+                        eprintln!("[-] Routine '{}' failed: {}", name, e);
+                        std::process::exit(1);
+                    }
+                }
             }
             RoutineCommands::Remove { index } => {
                 if index < config.schedules.len() {
@@ -2000,6 +2362,34 @@ async fn main() -> Result<()> {
                         "[-] No routine at index {} (see: kerna routine list).",
                         index
                     );
+                    std::process::exit(1);
+                }
+            }
+        },
+
+        Some(Commands::Approval { action }) => match action {
+            ApprovalCommands::List => {
+                let pending = memory.list_pending_approvals()?;
+                if pending.is_empty() {
+                    println!("No pending approvals.");
+                }
+                for (id, task_id, tool, args) in pending {
+                    println!("{}  {}\n  task: {}\n  args: {}", id, tool, task_id, args);
+                }
+            }
+            ApprovalCommands::Approve { id } => {
+                if memory.decide_pending_approval(&id, true)? {
+                    println!("[+] Approved approval {}.", id);
+                } else {
+                    eprintln!("[-] Approval {} is no longer pending.", id);
+                    std::process::exit(1);
+                }
+            }
+            ApprovalCommands::Deny { id } => {
+                if memory.decide_pending_approval(&id, false)? {
+                    println!("[+] Denied approval {}.", id);
+                } else {
+                    eprintln!("[-] Approval {} is no longer pending.", id);
                     std::process::exit(1);
                 }
             }
@@ -2625,6 +3015,69 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod routine_template_tests {
+    use super::{routine_enablement_gaps, routine_template};
+    use crate::config::{Config, PermissionRule, ScheduleConfig};
+
+    #[test]
+    fn daily_productivity_templates_are_available_and_read_only() {
+        for name in ["morning-brief", "meeting-prep", "research-brief"] {
+            let template = routine_template(name)
+                .unwrap_or_else(|| panic!("daily productivity template '{name}' should exist"));
+            assert_eq!(template.cron.split_whitespace().count(), 6);
+            assert!(!template.allowed_tools.is_empty());
+            assert!(
+                template.goal.contains("Do not modify") || template.goal.contains("Do not publish")
+            );
+        }
+    }
+
+    #[test]
+    fn routine_enablement_requires_an_explicit_read_allowlist_policy() {
+        let schedule = ScheduleConfig {
+            name: "brief".to_string(),
+            cron: "0 0 8 * * Mon-Fri".to_string(),
+            goal: "Read my calendar".to_string(),
+            allowed_tools: vec!["list_events".to_string(), "list_notes".to_string()],
+            enabled: false,
+        };
+        let mut config = Config::default();
+        assert_eq!(
+            routine_enablement_gaps(&config, &schedule),
+            vec!["list_events".to_string(), "list_notes".to_string()]
+        );
+
+        config.permissions = vec![
+            PermissionRule {
+                tool: "list_events".to_string(),
+                action: "auto_approve".to_string(),
+            },
+            PermissionRule {
+                tool: "list_notes".to_string(),
+                action: "auto_approve".to_string(),
+            },
+        ];
+        assert!(routine_enablement_gaps(&config, &schedule).is_empty());
+    }
+
+    #[test]
+    fn legacy_unscoped_routine_cannot_be_enabled() {
+        let config = Config::default();
+        let schedule = ScheduleConfig {
+            name: String::new(),
+            cron: "0 0 8 * * *".to_string(),
+            goal: "Legacy task".to_string(),
+            allowed_tools: vec![],
+            enabled: true,
+        };
+        assert_eq!(
+            routine_enablement_gaps(&config, &schedule),
+            vec!["no reviewed tool allowlist".to_string()]
+        );
+    }
 }
 
 #[cfg(test)]

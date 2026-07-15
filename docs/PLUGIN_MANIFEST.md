@@ -1,39 +1,77 @@
 # Kerna Plugin Manifest (`manifest.toml`)
 
-Plugins running under Kerna MUST declare their required capabilities and metadata in a `manifest.toml` file. If a plugin does not provide this manifest, Kerna runs it under **Legacy Warning** mode, assuming full capability access but flagging the plugin in risk assessments.
+Each curated Kerna MCP plugin includes a `manifest.toml` beside its entrypoint.
+The manifest is a **runtime contract**: it declares the MCP tools the plugin is
+allowed to expose, operations that need confirmation, and environment-variable
+names it may receive. Kerna applies those declarations as restrictions on the
+effective runtime configuration.
 
-## Example Manifest
+A manifest is found beside a configured entrypoint first, then in Kerna's
+shipped `plugins/<name>_mcp/` or `plugins/<name>/` directories. A discovered
+manifest that cannot be parsed prevents that plugin from starting; it is never
+silently treated as legacy.
+
+## Example
 
 ```toml
-name = "github-plugin"
+[plugin]
+name = "calendar"
 version = "1.0.0"
-description = "Interact with GitHub repositories and issues."
-author = "Your Name"
+kind = "tool.mcp"
+entrypoint = "mcp_server.py"
+source = "kerna-starter-pack"
+trust = "verified"
 
-[capabilities]
-# Explicitly list the capabilities this plugin requires
-network_outbound = ["api.github.com", "raw.githubusercontent.com"]
-fs_read = [".git/config", "src/"]
-fs_write = []
-shell = false
-env = ["GITHUB_TOKEN"]
+# These are MCP tool names, not broad OS privileges.
+capabilities = ["list_events", "add_event"]
+requires_approval = ["add_event"]
 
-[approval]
-# Require explicit user approval for specific high-risk actions
-require_for = ["github/create_repository", "github/delete_repository"]
+# Names only. Values remain in the host environment and are never serialized
+# into `kerna.toml` or displayed by Kerna.
+secrets = ["CALENDAR_TOKEN"]
+
+network_allowlist = ["calendar.example.com"]
+declared_outputs = ["text"]
+max_output_bytes = 50000
 ```
 
-## Capability Types
+## Enforcement semantics
 
-- **`network_outbound`**: A list of allowed hostnames. Wildcards (e.g. `*.github.com`) are permitted but discouraged.
-- **`fs_read`**: A list of paths the plugin is allowed to read from. Kerna mounts these paths read-only in the sandbox.
-- **`fs_write`**: A list of paths the plugin is allowed to write to. Kerna maps these paths with write permissions.
-- **`shell`**: Boolean. If true, the plugin is permitted to execute arbitrary shell commands (extremely high risk).
-- **`env`**: A list of environment variables the plugin requires. Kerna will only forward these specific variables from the host.
+For a plugin with a manifest:
 
-## Enforcement
+- The effective `capabilities` and `allow_tools` are the intersection of the
+  user's configuration and the manifest declaration. If the user leaves either
+  list empty, the manifest list becomes the limit. Configuration cannot expand
+  the declared tool set.
+- Manifest `requires_approval` values are added to the server's approval list.
+  They can only add confirmation gates.
+- A secret is forwarded only when it appears in **both** the configured server
+  entry and the manifest. This requires explicit user configuration and plugin
+  disclosure.
+- A manifest with no declared tool capabilities blocks all tool calls. This is
+  suitable for a resource-only server and avoids accidental empty-list grants.
+- `deny_tools`, global permissions, budget limits, folder boundaries, and other
+  runtime policy still apply after the manifest contract.
 
-When a plugin is initialized, Kerna reads the manifest and computes a **Risk Card**. During execution, Kerna enforces these capabilities:
-- Network requests are monitored via the gateway layer (if applicable).
-- File system access is physically constrained using directory isolation (`sandbox.rs`).
-- Unapproved tools trigger an immediate task abort.
+The manifest is not a sandbox. Its network, allowed-path, output, and trust
+metadata are shown in risk assessment and guide policy, but a native child
+process is not made OS-safe merely by declaring those values. Use a hardened
+runtime mode where available and grant only reviewed plugins.
+
+## Legacy plugins
+
+Third-party MCP servers without a manifest remain supported for compatibility,
+but Kerna marks them as **Legacy Warning** and relies entirely on explicit
+`kerna.toml` policy, filters, budgets, and the selected runtime boundary. Treat
+them as unreviewed until they have a tested manifest and connector record.
+
+## Author checklist
+
+1. Put `manifest.toml` next to the plugin entrypoint.
+2. List every tool the server may expose under `capabilities`.
+3. List every state-changing or externally consequential tool under
+   `requires_approval`.
+4. Declare only the environment-variable names genuinely needed.
+5. Document network destinations and output types where applicable.
+6. Test the plugin against malformed requests, denial, timeout, cancellation,
+   and output-size limits before publishing it.

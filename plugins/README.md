@@ -6,7 +6,11 @@ Nothing loads automatically: Kerna is fail-closed, so you add the plugins you wa
 
 ## Tool packs (fastest way to get useful tools)
 
-A pack installs a curated set of plugins in one command, declares any secrets, and applies fail-closed permissions (read tools become `require_confirmation`; nothing is auto-approved).
+A pack installs a curated set of plugins in one command, declares any secrets,
+and applies fail-closed permissions (read tools become
+`require_confirmation`; nothing is auto-approved). The productivity pack is
+local-first: notes and calendar work without cloud credentials, while search
+is optional.
 
 ```bash
 kerna pack list                    # productivity, dev
@@ -17,7 +21,8 @@ kerna mcp risk search              # read the risk card
 
 | Pack | Plugins |
 |------|---------|
-| **productivity** | search, notes, web |
+| **productivity** | search, notes, web, calendar, weather |
+| **google-workspace** | Google Calendar via OAuth; read-only consent by default |
 | **dev** | files, git, http |
 
 ## Zero-dependency plugins (Python standard library only)
@@ -32,6 +37,7 @@ kerna mcp risk search              # read the risk card
 | **http** | `http_get`, `http_post_json` | Generic REST/JSON caller. Optional `KERNA_HTTP_ALLOWLIST` restricts hosts. |
 | **email** | `send_email`, `list_recent_emails`, `read_email` | IMAP/SMTP. Needs `EMAIL_ADDRESS` + `EMAIL_PASSWORD` (app password). `send_email` requires your approval. |
 | **calendar** | `list_events`, `add_event` | Local iCalendar `.ics` file (`KERNA_CALENDAR_FILE`, default `./calendar.ics`). Nothing leaves your machine. |
+| **google-calendar** | `google_calendar_status`, `google_list_events`, `google_create_event` | OAuth Google Calendar. Read-only consent by default; creating an event needs a write grant and per-action approval. |
 | **weather** | `get_weather` | Current + 3-day outlook via wttr.in. No API key. |
 | **sqlite** | `list_tables`, `sql_query` | Read-only SQL against `KERNA_SQLITE_DB` (SELECT/WITH/PRAGMA/EXPLAIN only). |
 
@@ -45,6 +51,44 @@ Then inspect and grant:
 kerna mcp list
 kerna mcp risk files          # read the risk card before granting anything
 ```
+
+For an unattended briefing, add a paused routine, inspect its exact read-only
+tool allowlist, then explicitly enable it only after setting those read tools
+to `auto_approve`:
+
+```bash
+kerna routine add morning-brief
+kerna routine preview 0
+kerna routine enable 0
+```
+
+## Google Calendar (OAuth)
+
+The curated Google connector is separate from the local-first productivity
+pack. It is an OAuth Desktop-client flow with PKCE; no Google credential is
+ever written to `kerna.toml` or a task trace.
+
+1. In Google Cloud, enable the Calendar API and create an OAuth **Desktop app**
+   client. Copy its client ID.
+2. Install the connector and inspect its risk card:
+
+   ```bash
+   kerna pack install google-workspace
+   kerna mcp risk google-calendar
+   ```
+
+3. Connect with the default read-only scope. On Windows, `--save` stores the
+   refresh token in your user environment; restart Kerna after consent.
+
+   ```bash
+   python plugins/google_calendar_mcp/connect.py --client-id "YOUR_CLIENT_ID" --save
+   ```
+
+   Use `--allow-write` only if you need event creation. Kerna still requires a
+   separate approval for every `google_create_event`, and calendar invitations
+   default to **no notifications**. On non-Windows systems, the helper asks you
+   to deliberately opt into printing an environment value for secure-shell
+   setup; it never writes a token to project files.
 
 ## Wrapped official servers (need Node/npx)
 

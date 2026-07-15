@@ -1,6 +1,6 @@
 use crate::events::{Event, EventSink};
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -210,6 +210,24 @@ impl MemoryEngine {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS pending_approvals (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                tool TEXT NOT NULL,
+                args_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                decided_at DATETIME,
+                FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+            );",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_approvals_status ON pending_approvals(status, created_at);",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -339,6 +357,72 @@ impl MemoryEngine {
             tasks.push(r?);
         }
         Ok(tasks)
+    }
+
+    /// Create a durable approval request. Arguments are still subject to event
+    /// redaction when recorded separately; this row is shown only in the local
+    /// approval surface so the user can judge the actual proposed action.
+    pub fn create_pending_approval(
+        &self,
+        task_id: Uuid,
+        tool: &str,
+        args_json: &str,
+    ) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
+        let conn = self.get_conn();
+        conn.execute(
+            "INSERT INTO pending_approvals (id, task_id, tool, args_json) VALUES (?1, ?2, ?3, ?4)",
+            params![id, task_id.to_string(), tool, args_json],
+        )?;
+        Ok(id)
+    }
+
+    pub fn pending_approval_decision(&self, id: &str) -> Result<Option<bool>> {
+        let conn = self.get_conn();
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM pending_approvals WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(match status.as_deref() {
+            Some("approved") => Some(true),
+            Some("denied") | Some("expired") => Some(false),
+            _ => None,
+        })
+    }
+
+    pub fn expire_pending_approval(&self, id: &str) -> Result<()> {
+        let conn = self.get_conn();
+        conn.execute(
+            "UPDATE pending_approvals SET status = 'expired', decided_at = CURRENT_TIMESTAMP
+             WHERE id = ?1 AND status = 'pending'",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_pending_approvals(&self) -> Result<Vec<(String, String, String, String)>> {
+        let conn = self.get_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, task_id, tool, args_json FROM pending_approvals WHERE status = 'pending' ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn decide_pending_approval(&self, id: &str, approved: bool) -> Result<bool> {
+        let conn = self.get_conn();
+        let status = if approved { "approved" } else { "denied" };
+        let changed = conn.execute(
+            "UPDATE pending_approvals SET status = ?1, decided_at = CURRENT_TIMESTAMP WHERE id = ?2 AND status = 'pending'",
+            params![status, id],
+        )?;
+        Ok(changed == 1)
     }
 
     /// The most recently created task's id, if any. Powers the `last` alias.
@@ -770,8 +854,15 @@ impl EventSink for MemoryEngine {
         let conn = self.get_conn();
 
         let budget_snapshot_str = event.budget_snapshot_json.map(|v| v.to_string());
-
-        let payload_str = event.payload_json.to_string();
+        let (safe_payload, payload_was_redacted) =
+            crate::events::redact_payload(&event.payload_json);
+        let payload_str = safe_payload.to_string();
+        let redaction_status = match (event.redaction_status, payload_was_redacted) {
+            (Some(status), true) => Some(format!("{}; payload_redacted", status)),
+            (Some(status), false) => Some(status),
+            (None, true) => Some("payload_redacted".to_string()),
+            (None, false) => None,
+        };
 
         conn.execute(
             "INSERT INTO events (
@@ -793,7 +884,7 @@ impl EventSink for MemoryEngine {
                 event.risk_score,
                 event.parent_event_id,
                 event.correlation_id,
-                event.redaction_status,
+                redaction_status,
                 budget_snapshot_str,
                 payload_str
             ],
@@ -874,6 +965,75 @@ mod tests {
         let logs = mem.get_task_logs(&task_id.to_string()).unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].2, "Testing task log");
+    }
+
+    #[test]
+    fn test_pending_approval_has_one_terminal_decision() {
+        let mem = setup_test_db("test_pending_approvals");
+        let task_id = Uuid::new_v4();
+        mem.create_task(task_id, None, "approval test").unwrap();
+
+        let approval_id = mem
+            .create_pending_approval(task_id, "list_events", r#"{\"date\":\"today\"}"#)
+            .unwrap();
+        assert_eq!(mem.pending_approval_decision(&approval_id).unwrap(), None);
+
+        let pending = mem.list_pending_approvals().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, approval_id);
+        assert_eq!(pending[0].2, "list_events");
+
+        assert!(mem.decide_pending_approval(&approval_id, true).unwrap());
+        assert_eq!(
+            mem.pending_approval_decision(&approval_id).unwrap(),
+            Some(true)
+        );
+        assert!(mem.list_pending_approvals().unwrap().is_empty());
+        assert!(
+            !mem.decide_pending_approval(&approval_id, false).unwrap(),
+            "a decision must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn test_event_payload_credentials_are_redacted_before_persistence() {
+        let mem = setup_test_db("test_event_redaction");
+        let task_id = Uuid::new_v4();
+        mem.create_task(task_id, None, "redaction test").unwrap();
+        mem.record(Event {
+            event_id: Uuid::new_v4().to_string(),
+            task_id: task_id.to_string(),
+            session_id: None,
+            sequence: 1,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            event_type: "tool.call.requested".to_string(),
+            actor: "llm".to_string(),
+            severity: "info".to_string(),
+            model: None,
+            tool: Some("example".to_string()),
+            policy_decision: None,
+            risk_score: None,
+            parent_event_id: None,
+            correlation_id: None,
+            redaction_status: None,
+            budget_snapshot_json: None,
+            payload_json: serde_json::json!({
+                "args": r#"{"token":"must-not-persist","message":"safe"}"#
+            }),
+        })
+        .unwrap();
+
+        let events = mem.get_events(&task_id.to_string()).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].redaction_status.as_deref(),
+            Some("payload_redacted")
+        );
+        assert!(!events[0]
+            .payload_json
+            .to_string()
+            .contains("must-not-persist"));
+        assert!(events[0].payload_json.to_string().contains("[REDACTED]"));
     }
 
     #[test]

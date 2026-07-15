@@ -8,6 +8,7 @@ use crate::sandbox::ProcessSandbox;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -49,16 +50,31 @@ pub struct TaskScheduler {
     /// When true, there's no human at a terminal to answer approval prompts
     /// (e.g. a messaging-channel or daemon-driven run). Anything that would
     /// require confirmation is denied fail-closed instead of blocking on stdin.
-    non_interactive: bool,
+    approval_mode: ApprovalMode,
+    /// Optional per-run allowlist. Routines use this to constrain both what
+    /// the model can discover and what it can invoke, independently of the
+    /// user's broader interactive policy.
+    allowed_tools: Option<HashSet<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalMode {
+    Terminal,
+    Deny,
+    Queue,
 }
 
 impl TaskScheduler {
     pub fn new(
-        config: Config,
+        mut config: Config,
         memory: Arc<MemoryEngine>,
         mcp_registry: Arc<Mutex<McpRegistry>>,
         session_id: Option<String>,
     ) -> Result<Self> {
+        // The scheduler owns a by-value runtime config, so applying manifest
+        // restrictions here cannot mutate the user's saved configuration. This
+        // also protects library callers that construct a scheduler directly.
+        crate::plugin_manifest::apply_to_config(&mut config)?;
         let sandbox = ProcessSandbox::new(
             &config.sandbox_dir,
             config.runtime_mode.clone(),
@@ -78,7 +94,8 @@ impl TaskScheduler {
             permissions,
             session_id,
             http_client,
-            non_interactive: false,
+            approval_mode: ApprovalMode::Terminal,
+            allowed_tools: None,
         })
     }
 
@@ -86,8 +103,30 @@ impl TaskScheduler {
     /// channel / daemon). Approval-required tools are then denied fail-closed
     /// rather than blocking on an interactive prompt that no one can answer.
     pub fn non_interactive(mut self) -> Self {
-        self.non_interactive = true;
+        self.approval_mode = ApprovalMode::Deny;
         self
+    }
+
+    /// Persist approval-required actions for a local control surface to review.
+    /// The task remains paused until an explicit recorded decision arrives.
+    pub fn approval_queue(mut self) -> Self {
+        self.approval_mode = ApprovalMode::Queue;
+        self
+    }
+
+    /// Limit this scheduler to the exact tools a caller reviewed for this run.
+    /// The allowlist is enforced at discovery *and* invocation time so an LLM
+    /// cannot expand a routine's authority by emitting a fabricated call.
+    pub fn restrict_to_tools(mut self, tools: impl IntoIterator<Item = String>) -> Self {
+        self.allowed_tools = Some(tools.into_iter().collect());
+        self
+    }
+
+    fn tool_is_allowed(&self, tool_name: &str) -> bool {
+        self.allowed_tools
+            .as_ref()
+            .map(|tools| tools.contains(tool_name))
+            .unwrap_or(true)
     }
 
     /// Run a goal using an agentic tool-call loop.
@@ -169,7 +208,16 @@ impl TaskScheduler {
                     "required": ["goal"]
                 }
             }
-        }));
+            }));
+            // The model only sees the reviewed routine surface. The same check
+            // below remains authoritative in case a provider returns a tool
+            // call that was not advertised.
+            all_tools.retain(|tool| {
+                tool["function"]["name"]
+                    .as_str()
+                    .map(|name| self.tool_is_allowed(name))
+                    .unwrap_or(false)
+            });
 
             self.memory.update_task_status(task_id, "running")?;
 
@@ -324,7 +372,12 @@ impl TaskScheduler {
                             payload_json: json!({ "args": tool_args_str }),
                         });
 
-                        let perm_level = self.permissions.check(tool_name, server_name.as_deref());
+                        let routine_allows_tool = self.tool_is_allowed(tool_name);
+                        let perm_level = if routine_allows_tool {
+                            self.permissions.check(tool_name, server_name.as_deref())
+                        } else {
+                            PermissionLevel::Deny
+                        };
 
                         // 2. Emit tool.policy.checked
                         event_seq += 1;
@@ -339,7 +392,11 @@ impl TaskScheduler {
                             severity: if perm_level == PermissionLevel::Deny { "warning".to_string() } else { "info".to_string() },
                             model: None,
                             tool: Some(tool_name.clone()),
-                            policy_decision: Some(format!("{:?}", perm_level)),
+                            policy_decision: Some(if routine_allows_tool {
+                                format!("{:?}", perm_level)
+                            } else {
+                                "DeniedByRoutineAllowlist".to_string()
+                            }),
                             risk_score: None,
                             parent_event_id: Some(parent_evt_id.clone()),
                             correlation_id: Some(tc.id.clone()),
@@ -362,7 +419,7 @@ impl TaskScheduler {
                         if self.config.converse || perm_level == PermissionLevel::RequireConfirmation {
                             // No terminal to approve at (messaging channel / daemon):
                             // deny fail-closed instead of blocking on stdin.
-                            if self.non_interactive {
+                            if self.approval_mode == ApprovalMode::Deny {
                                 println!("❌ {} (needs approval; denied in non-interactive mode)", display_name);
                                 let _ = self.memory.log_message(
                                     task_id,
@@ -380,8 +437,39 @@ impl TaskScheduler {
                                 });
                                 continue;
                             }
-                            println!("⚠️ ACTION REQUIRES APPROVAL: {} {}", tool_name, tool_args_str);
-                            let approved = PermissionManager::prompt_approval(tool_name, tool_args_str)?;
+                            let approved = if self.approval_mode == ApprovalMode::Queue {
+                                let approval_id = self.memory.create_pending_approval(
+                                    task_id,
+                                    tool_name,
+                                    tool_args_str,
+                                )?;
+                                println!("⚠️ ACTION QUEUED FOR APPROVAL: {} ({})", tool_name, approval_id);
+                                let _ = self.memory.log_message(
+                                    task_id,
+                                    "INFO",
+                                    &format!("Approval requested for tool '{}' ({})", tool_name, approval_id),
+                                );
+                                let deadline = tokio::time::Instant::now()
+                                    + std::time::Duration::from_secs(300);
+                                loop {
+                                    if let Some(decision) = self.memory.pending_approval_decision(&approval_id)? {
+                                        break decision;
+                                    }
+                                    if tokio::time::Instant::now() >= deadline {
+                                        let _ = self.memory.expire_pending_approval(&approval_id);
+                                        let _ = self.memory.log_message(
+                                            task_id,
+                                            "WARN",
+                                            &format!("Approval '{}' expired after five minutes", approval_id),
+                                        );
+                                        break false;
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                }
+                            } else {
+                                println!("⚠️ ACTION REQUIRES APPROVAL: {} {}", tool_name, tool_args_str);
+                                PermissionManager::prompt_approval(tool_name, tool_args_str)?
+                            };
                             if !approved {
                                 println!("❌ {} (Rejected)", display_name);
                                 messages.push(ChatMessage {
@@ -815,6 +903,12 @@ impl TaskScheduler {
         tool_name: &str,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value> {
+        if !self.tool_is_allowed(tool_name) {
+            return Err(anyhow!(
+                "Tool '{}' is not in this routine's reviewed allowlist",
+                tool_name
+            ));
+        }
         // Check MCP registry first
         {
             let mut registry = self.mcp_registry.lock().await;
@@ -1313,6 +1407,50 @@ fn call_mock(messages: &[ChatMessage]) -> Result<(ChatMessage, u64)> {
             "fs.write".to_string(),
             serde_json::json!({ "root": root, "path": path, "content": content }).to_string(),
         )
+    } else if last_user_msg == "MOCK_CALENDAR_LIST" {
+        // Test-only trigger for exercising the local productivity pack through
+        // the complete scheduler/MCP/policy path without a network model.
+        ("list_events".to_string(), "{}".to_string())
+    } else if last_user_msg == "MOCK_GOOGLE_CALENDAR_STATUS" {
+        // Deterministic live-acceptance triggers let a cohort validate the
+        // reviewed connector without needing a model to infer a tool name.
+        ("google_calendar_status".to_string(), "{}".to_string())
+    } else if last_user_msg == "MOCK_GOOGLE_CALENDAR_LIST" {
+        ("google_list_events".to_string(), "{}".to_string())
+    } else if last_user_msg == "MOCK_GOOGLE_CALENDAR_CREATE" {
+        // A clearly disposable future event for an isolated test calendar.
+        // The connector still defaults to no invitations and policy still
+        // requires an explicit approval before this call can execute.
+        (
+            "google_create_event".to_string(),
+            serde_json::json!({
+                "summary": "Kerna cohort acceptance test — delete me",
+                "description": "Created only to verify Kerna's approval-gated Google Calendar workflow.",
+                "start": "2030-01-15T09:00:00+00:00",
+                "end": "2030-01-15T09:15:00+00:00",
+                "time_zone": "UTC",
+                "send_updates": "none"
+            })
+            .to_string(),
+        )
+    } else if last_user_msg == "MOCK_NOTES_LIST" {
+        ("list_notes".to_string(), "{}".to_string())
+    } else if last_user_msg == "MOCK_NOTES_ADD" {
+        // Test-only trigger for proving that a useful local write remains
+        // approval-gated all the way through the scheduler and MCP sandbox.
+        (
+            "add_note".to_string(),
+            serde_json::json!({
+                "title": "cohort-capture",
+                "content": "Approved note captured by the Kerna cohort workflow."
+            })
+            .to_string(),
+        )
+    } else if last_user_msg == "MOCK_COMMAND_ECHO" {
+        (
+            "run_command".to_string(),
+            serde_json::json!({ "command": "echo", "args": ["approved"] }).to_string(),
+        )
     } else if last_user_msg.contains("memory_writes") {
         return Ok((
             ChatMessage {
@@ -1366,6 +1504,51 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
         }
+    }
+
+    #[test]
+    fn mock_note_capture_targets_the_approval_gated_note_tool() {
+        let (reply, _) = call_mock(&[msg("user", Some("MOCK_NOTES_ADD"))]).unwrap();
+        let call = &reply.tool_calls.unwrap()[0];
+        assert_eq!(call.function.name, "add_note");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&call.function.arguments).unwrap(),
+            serde_json::json!({
+                "title": "cohort-capture",
+                "content": "Approved note captured by the Kerna cohort workflow."
+            })
+        );
+    }
+
+    #[test]
+    fn mock_google_acceptance_goals_target_the_reviewed_connector_tools() {
+        let status = call_mock(&[msg("user", Some("MOCK_GOOGLE_CALENDAR_STATUS"))])
+            .unwrap()
+            .0
+            .tool_calls
+            .unwrap()
+            .remove(0);
+        assert_eq!(status.function.name, "google_calendar_status");
+
+        let list = call_mock(&[msg("user", Some("MOCK_GOOGLE_CALENDAR_LIST"))])
+            .unwrap()
+            .0
+            .tool_calls
+            .unwrap()
+            .remove(0);
+        assert_eq!(list.function.name, "google_list_events");
+
+        let create = call_mock(&[msg("user", Some("MOCK_GOOGLE_CALENDAR_CREATE"))])
+            .unwrap()
+            .0
+            .tool_calls
+            .unwrap()
+            .remove(0);
+        assert_eq!(create.function.name, "google_create_event");
+        let arguments: serde_json::Value =
+            serde_json::from_str(&create.function.arguments).unwrap();
+        assert_eq!(arguments["send_updates"], "none");
+        assert_eq!(arguments["time_zone"], "UTC");
     }
 
     #[test]
