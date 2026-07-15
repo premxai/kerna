@@ -2,6 +2,14 @@
 
 All notable changes to Kerna will be documented in this file.
 
+## [v0.2.3] - 2026-07-15
+
+### Fixed
+- Published CLI installers and the npm wrapper now install the reviewed
+  curated-plugin bundle alongside the binary. A clean installation can use
+  `kerna pack install productivity` without a source checkout or environment
+  override.
+
 ## [v0.2.2] - 2026-07-15
 
 ### Changed

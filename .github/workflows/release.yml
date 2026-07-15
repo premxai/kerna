@@ -107,9 +107,37 @@ jobs:
             dist/${{ matrix.asset }}
             dist/${{ matrix.asset }}.sha256
 
+  plugins:
+    name: Package curated plugins
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Archive plugin bundle
+        shell: bash
+        run: |
+          mkdir -p dist
+          git archive --format=zip --prefix=plugins/ HEAD:plugins > dist/kerna-plugins.zip
+          unzip -l dist/kerna-plugins.zip | grep -q 'plugins/packs/productivity.toml'
+          sha256sum dist/kerna-plugins.zip > dist/kerna-plugins.zip.sha256
+
+      - name: Upload plugin bundle to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          name: Kerna ${{ inputs.release_tag || github.ref_name }}
+          generate_release_notes: true
+          overwrite_files: true
+          files: |
+            dist/kerna-plugins.zip
+            dist/kerna-plugins.zip.sha256
+
   desktop:
     name: Build desktop ${{ matrix.name }}
-    needs: build
+    needs: plugins
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

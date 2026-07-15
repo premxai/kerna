@@ -48,6 +48,8 @@ file copied from `target/`.
 4. Open the GitHub release and confirm every expected asset is present before
    sharing its URL:
    - CLI binary plus `<asset>.sha256` for Linux, macOS, and Windows;
+   - `kerna-plugins.zip` plus `kerna-plugins.zip.sha256`; extract the verified
+     archive beside a manually installed CLI so curated packs are available;
    - native desktop installer(s) plus a platform-specific
      `kerna-desktop-*-SHA256SUMS` file.
 
@@ -59,6 +61,7 @@ checksum. On PowerShell:
 ```powershell
 Get-FileHash .\kerna-windows-x86_64.exe -Algorithm SHA256
 Get-FileHash .\Kerna_0.2.0_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\kerna-plugins.zip -Algorithm SHA256
 Get-Content .\kerna-desktop-windows-SHA256SUMS
 ```
 

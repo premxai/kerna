@@ -86,7 +86,7 @@ npm install -g @premxai/kerna
 cargo install --git https://github.com/premxai/kerna --bin kerna
 ```
 
-**Prebuilt binaries** for manual download: the [Releases](https://github.com/premxai/kerna/releases) page has `kerna-linux-x86_64`, `kerna-macos-arm64`, `kerna-macos-x86_64`, and `kerna-windows-x86_64.exe`.
+**Prebuilt binaries** for manual download: the [Releases](https://github.com/premxai/kerna/releases) page has `kerna-linux-x86_64`, `kerna-macos-arm64`, `kerna-macos-x86_64`, and `kerna-windows-x86_64.exe`. The install scripts and npm package also download the matching `kerna-plugins.zip` beside the binary, so curated packs work immediately. For a manual install, verify and extract that archive beside the binary before running `kerna pack install productivity`.
 
 Then verify: `kerna --version` — and you're ready for `kerna init`.
 

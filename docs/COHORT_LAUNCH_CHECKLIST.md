@@ -53,7 +53,8 @@ fails, stop expansion and file the receipt as a launch blocker.
 ## Controlled-cohort distribution checks
 
 1. Create the cohort tag and confirm the release contains the platform-specific
-   CLI, desktop installer, and corresponding SHA-256 checksum file.
+   CLI, desktop installer, the curated `kerna-plugins.zip` bundle, and a
+   corresponding SHA-256 checksum file for each downloaded artifact.
 2. Verify the downloaded CLI checksum before installing it. Verify the desktop
    installer against the release's `SHA256SUMS` file before sharing it with a
    cohort member.

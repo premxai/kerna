@@ -35,8 +35,9 @@ pub struct PackPlugin {
     pub suggest_confirm: Vec<String>,
 }
 
-/// Resolve Kerna's plugins directory: `$KERNA_PLUGINS_DIR`, else the `plugins`
-/// dir next to the repo the binary was built in, else `./plugins`.
+/// Resolve Kerna's plugins directory: `$KERNA_PLUGINS_DIR`, then a bundled
+/// `plugins` directory beside an installed binary, then a source-tree checkout,
+/// and finally `./plugins` for local development.
 pub fn plugins_dir() -> PathBuf {
     if let Ok(d) = std::env::var("KERNA_PLUGINS_DIR") {
         if !d.trim().is_empty() {
@@ -45,14 +46,27 @@ pub fn plugins_dir() -> PathBuf {
     }
     if let Ok(exe) = std::env::current_exe() {
         // <repo>/target/<profile>/kerna(.exe) → <repo>/plugins
-        if let Some(repo) = exe.ancestors().nth(3) {
-            let cand = repo.join("plugins");
-            if cand.exists() {
-                return cand;
-            }
+        if let Some(cand) = discover_plugins_dir(&exe) {
+            return cand;
         }
     }
     PathBuf::from("plugins")
+}
+
+fn discover_plugins_dir(exe: &std::path::Path) -> Option<PathBuf> {
+    // Installed releases extract `kerna-plugins.zip` beside the binary.
+    if let Some(bin_dir) = exe.parent() {
+        let bundled = bin_dir.join("plugins");
+        if bundled.is_dir() {
+            return Some(bundled);
+        }
+    }
+
+    // <repo>/target/<profile>/kerna(.exe) resolves to <repo>/plugins.
+    exe.ancestors()
+        .nth(3)
+        .map(|repo| repo.join("plugins"))
+        .filter(|candidate| candidate.is_dir())
 }
 
 fn packs_dir() -> PathBuf {
@@ -157,6 +171,19 @@ pub fn install(config: &mut Config, pack: &Pack) -> InstallReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_binary_discovers_sibling_plugin_bundle() {
+        let root = std::env::temp_dir().join(format!("kerna-packs-{}", uuid::Uuid::new_v4()));
+        let bin_dir = root.join("bin");
+        let bundled = bin_dir.join("plugins");
+        std::fs::create_dir_all(&bundled).unwrap();
+        let exe = bin_dir.join(format!("kerna{}", std::env::consts::EXE_SUFFIX));
+
+        assert_eq!(discover_plugins_dir(&exe), Some(bundled.clone()));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     fn sample_pack() -> Pack {
         Pack {

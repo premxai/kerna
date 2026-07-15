@@ -6,12 +6,14 @@
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
+const { execFileSync } = require("child_process");
 
 const REPO = "premxai/kerna";
 const VERSION = process.env.KERNA_VERSION || require("./package.json").version;
 const binDir = path.join(__dirname, "bin");
 const isWindows = process.platform === "win32";
 const outFile = path.join(binDir, isWindows ? "kerna.exe" : "kerna");
+const pluginsZip = path.join(binDir, "kerna-plugins.zip");
 
 function assetName() {
   const p = process.platform;
@@ -59,6 +61,43 @@ function download(url, dest, redirectsLeft) {
   });
 }
 
+function extractPlugins() {
+  try {
+    if (isWindows) {
+      const quote = (value) => "'" + value.replace(/'/g, "''") + "'";
+      execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "Expand-Archive -LiteralPath " + quote(pluginsZip) + " -DestinationPath " + quote(binDir) + " -Force",
+        ],
+        { stdio: "inherit" }
+      );
+    } else {
+      execFileSync(
+        "python3",
+        [
+          "-c",
+          "import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])",
+          pluginsZip,
+          binDir,
+        ],
+        { stdio: "inherit" }
+      );
+    }
+  } catch (e) {
+    fail("plugin bundle extraction failed: " + e.message);
+  } finally {
+    fs.rmSync(pluginsZip, { force: true });
+  }
+
+  if (!fs.existsSync(path.join(binDir, "plugins", "packs"))) {
+    fail("plugin bundle did not contain curated packs");
+  }
+}
+
 async function main() {
   fs.mkdirSync(binDir, { recursive: true });
 
@@ -89,6 +128,17 @@ async function main() {
     await download(url, outFile, 5);
     if (!isWindows) fs.chmodSync(outFile, 0o755);
     console.log("[kerna] Installed: " + outFile);
+
+    const pluginsUrl =
+      "https://github.com/" +
+      REPO +
+      "/releases/download/v" +
+      VERSION +
+      "/kerna-plugins.zip";
+    console.log("[kerna] Downloading curated plugins (v" + VERSION + ")…");
+    await download(pluginsUrl, pluginsZip, 5);
+    extractPlugins();
+    console.log("[kerna] Installed curated plugins: " + path.join(binDir, "plugins"));
   } catch (e) {
     fail("download failed: " + e.message + " (is release v" + VERSION + " published?)");
   }

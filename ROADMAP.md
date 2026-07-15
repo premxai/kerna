@@ -2,7 +2,7 @@
 
 Kerna is transitioning from a proof-of-concept into hardened developer infrastructure. We expect rapid evolution of the internal APIs before stabilizing at `v1.0.0`.
 
-## v0.2.2 (Current: controlled productivity cohort)
+## v0.2.3 (Current: controlled productivity cohort)
 - Local-first notes, calendar, weather, web research, and optional Google Calendar.
 - Fail-closed MCP manifests, explicit approvals, scoped read-only routines, and task receipts.
 - Local desktop control surface for tasks, connector health, routines, and approvals.

@@ -62,6 +62,38 @@ fi
 
 chmod +x "$target"
 
+# Curated packs are external MCP processes, shipped beside the binary rather
+# than compiled into the trust layer. Extract them in the same directory so the
+# CLI discovers them without an environment-variable setup step.
+plugins_asset="kerna-plugins.zip"
+plugins_zip="$BIN_DIR/$plugins_asset"
+if [ "$VERSION" = "latest" ]; then
+  plugins_url="https://github.com/$REPO/releases/latest/download/$plugins_asset"
+else
+  plugins_url="https://github.com/$REPO/releases/download/$VERSION/$plugins_asset"
+fi
+say "Downloading curated Kerna plugins from $plugins_url"
+if command -v curl >/dev/null 2>&1; then
+  curl -fsSL "$plugins_url" -o "$plugins_zip" || err "plugin bundle download failed"
+elif command -v wget >/dev/null 2>&1; then
+  wget -qO "$plugins_zip" "$plugins_url" || err "plugin bundle download failed"
+else
+  err "need curl or wget to download curated plugins"
+fi
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$plugins_zip" "$BIN_DIR" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    archive.extractall(sys.argv[2])
+PY
+elif command -v unzip >/dev/null 2>&1; then
+  unzip -oq "$plugins_zip" -d "$BIN_DIR"
+else
+  err "need python3 or unzip to extract curated plugins"
+fi
+rm -f "$plugins_zip"
+[ -d "$BIN_DIR/plugins/packs" ] || err "curated plugins were not installed"
+
 # --- verify + PATH hint -----------------------------------------------------
 say "Installed: $target"
 "$target" --version || err "the installed binary did not run"

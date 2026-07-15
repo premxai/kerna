@@ -36,6 +36,29 @@ if ($env:KERNA_LOCAL_BIN) {
 Write-Host "Installed: $target" -ForegroundColor Cyan
 & $target --version
 
+# Curated packs are external MCP processes, shipped as a release bundle rather
+# than compiled into the trust-layer binary. Keep them beside the executable so
+# the CLI discovers them without requiring KERNA_PLUGINS_DIR.
+$pluginsAsset = 'kerna-plugins.zip'
+$pluginsZip = Join-Path $binDir $pluginsAsset
+$pluginsUrl = if ($version -eq 'latest') {
+    "https://github.com/$repo/releases/latest/download/$pluginsAsset"
+} else {
+    "https://github.com/$repo/releases/download/$version/$pluginsAsset"
+}
+Write-Host "Downloading curated Kerna plugins from $pluginsUrl" -ForegroundColor Cyan
+try {
+    Invoke-WebRequest -Uri $pluginsUrl -OutFile $pluginsZip -UseBasicParsing
+    Expand-Archive -LiteralPath $pluginsZip -DestinationPath $binDir -Force
+} catch {
+    Write-Error "Plugin bundle download or extraction failed. $_"
+} finally {
+    Remove-Item -LiteralPath $pluginsZip -Force -ErrorAction SilentlyContinue
+}
+if (-not (Test-Path -LiteralPath (Join-Path $binDir 'plugins\packs'))) {
+    Write-Error "Curated plugins were not installed."
+}
+
 # Add to the user PATH if it isn't already there.
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($userPath -notlike "*$binDir*") {
