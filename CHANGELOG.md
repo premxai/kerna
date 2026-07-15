@@ -2,6 +2,13 @@
 
 All notable changes to Kerna will be documented in this file.
 
+## [v0.2.1] - 2026-07-15
+
+### Changed
+- Queued approval decisions are now recorded in each task receipt before a
+  tool may run, including approved, denied, and expired outcomes. This closes
+  the audit trail between a reviewed action and its execution.
+
 ## [v0.2.0] - 2026-07-15
 
 ### Added
