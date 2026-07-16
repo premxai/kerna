@@ -46,6 +46,10 @@ button { font: inherit; }
 .site-nav a { color: #c7c7be; font-size: .82rem; font-weight: 500; }
 .site-nav a:hover, .site-nav a[aria-current="page"] { color: var(--lime); }
 .nav-download { border: 1px solid var(--line); color: var(--paper) !important; padding: .55rem .75rem; }
+.site-nav .github-link { align-items: center; border: 1px solid var(--line); color: var(--text-secondary); display: inline-flex; font-family: var(--mono); font-size: .67rem; gap: .36rem; letter-spacing: 0; min-height: 34px; padding: .45rem .58rem; }
+.site-nav .github-link:hover { border-color: var(--accent); color: var(--text-primary); }
+.github-link > svg { fill: currentColor; height: 15px; width: 15px; }
+.github-stars { align-items: center; color: var(--accent); display: inline-flex; font-size: .62rem; gap: .18rem; }
 .menu-toggle { background: transparent; border: 0; color: var(--paper); display: none; font-size: .95rem; padding: .5rem; }
 
 .page-shell { overflow: hidden; }
@@ -203,6 +207,7 @@ button { font: inherit; }
   .site-nav { background: var(--ink); border: 1px solid var(--line); display: none; flex-direction: column; gap: .1rem; padding: .65rem; position: absolute; right: 0; top: 55px; width: 210px; }
   .site-nav.open { display: flex; }
   .site-nav a { padding: .75rem; width: 100%; }
+  .site-nav .github-link { justify-content: flex-start; padding: .75rem; width: 100%; }
   .hero { min-height: 0; padding-top: 4rem; }
   .hero-grid, .approval-stage, .download-grid, .privacy-grid { grid-template-columns: 1fr; }
   .hero-grid, .hero-copy, .hero-copy .intro { max-width: calc(100vw - 32px); width: calc(100vw - 32px); }

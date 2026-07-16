@@ -28,3 +28,33 @@ document.querySelectorAll(".copy").forEach((button) => {
     }
   });
 });
+
+const githubStars = document.querySelectorAll("[data-github-stars]");
+
+if (githubStars.length) {
+  const cacheKey = "kerna-github-stars";
+  const cacheLifetime = 15 * 60 * 1000;
+
+  const showStars = (count) => {
+    const formatted = Number(count).toLocaleString();
+    githubStars.forEach((starCount) => {
+      starCount.textContent = formatted;
+      starCount.closest(".github-link")?.setAttribute("aria-label", `View Kerna on GitHub. ${formatted} stars.`);
+    });
+  };
+
+  try {
+    const cached = JSON.parse(window.localStorage.getItem(cacheKey) || "null");
+    if (cached && Date.now() - cached.savedAt < cacheLifetime) showStars(cached.count);
+  } catch {}
+
+  fetch("https://api.github.com/repos/premxai/kerna", { headers: { Accept: "application/vnd.github+json" } })
+    .then((response) => (response.ok ? response.json() : Promise.reject(response)))
+    .then((repository) => {
+      showStars(repository.stargazers_count);
+      try {
+        window.localStorage.setItem(cacheKey, JSON.stringify({ count: repository.stargazers_count, savedAt: Date.now() }));
+      } catch {}
+    })
+    .catch(() => {});
+}
