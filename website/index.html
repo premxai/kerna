@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Kerna is the local-first trust layer for useful AI work. Connect MCP tools, govern each action, and keep a receipt." />
+    <title>Kerna | AI work, with a receipt</title>
+    <link rel="stylesheet" href="styles.css?v=3" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="site-header">
+      <a class="brand" href="index.html" aria-label="Kerna home"><span class="brand-mark" aria-hidden="true"></span>Kerna</a>
+      <button class="menu-toggle" type="button" aria-controls="site-nav" aria-expanded="false">Menu</button>
+      <nav class="site-nav" id="site-nav" aria-label="Primary navigation">
+        <a href="how-it-works.html">How it works</a><a href="workflows.html">Workflows</a><a href="privacy.html">No account</a><a class="nav-download" href="download.html">Download</a>
+      </nav>
+    </header>
+    <main id="main" class="page-shell">
+      <section class="hero rail">
+        <div class="hero-grid">
+          <div class="hero-copy">
+            <p class="eyebrow">A trust layer for AI agents</p>
+            <h1 class="display">Give AI work.<br />Keep the <em>keys.</em></h1>
+            <p class="intro">Kerna connects your models and MCP tools, stops unreviewed actions, and leaves a readable receipt for every run.</p>
+            <div class="actions"><a class="button" href="download.html">Download Kerna</a><a class="button ghost" href="how-it-works.html">See the control loop</a></div>
+            <div class="hero-install"><span>Install with npm</span><div class="command-row"><code>npm install -g @premxai/kerna</code><button class="copy" type="button" aria-label="Copy npm install command" title="Copy command">Copy</button></div><p class="install-hint">No account required. Your workspace stays on your machine.</p></div>
+          </div>
+          <figure class="hero-art"><img src="assets/onboarding-terminal.png" alt="Kerna terminal output showing workspace initialization and installation of the productivity pack." /><figcaption>Actual first-run output: a fail-closed workspace and curated productivity tools.</figcaption></figure>
+        </div>
+      </section>
+      <section class="install-deck" aria-labelledby="install-title">
+        <div class="install-deck-heading"><p class="eyebrow">Install Kerna</p><h2 id="install-title" class="display">Choose the path that fits your machine.</h2><p>Every option installs the same verified runtime. Copy a command, then initialize a local workspace.</p></div>
+        <div class="install-command-grid">
+          <article><p class="command-label">npm <span class="command-status">Publish required</span></p><div class="command-row"><code>npm install -g @premxai/kerna</code><button class="copy" type="button" aria-label="Copy npm install command" title="Copy command">Copy</button></div><p>Node.js 16+ on Windows, macOS, or Linux.</p></article>
+          <article><p class="command-label">macOS / Linux</p><div class="command-row"><code>curl -fsSL https://raw.githubusercontent.com/premxai/kerna/main/install.sh | sh</code><button class="copy" type="button" aria-label="Copy macOS and Linux install command" title="Copy command">Copy</button></div><p>Downloads the matching release binary and plugins.</p></article>
+          <article><p class="command-label">Windows PowerShell</p><div class="command-row"><code>irm https://raw.githubusercontent.com/premxai/kerna/main/install.ps1 | iex</code><button class="copy" type="button" aria-label="Copy Windows install command" title="Copy command">Copy</button></div><p>Installs into your user location and adds a PATH hint.</p></article>
+          <article><p class="command-label">Source fallback</p><div class="command-row"><code>cargo install --git https://github.com/premxai/kerna --bin kerna</code><button class="copy" type="button" aria-label="Copy source install command" title="Copy command">Copy</button></div><p>For unsupported platforms or source-based development.</p></article>
+          <article><p class="command-label">Create your workspace</p><div class="command-row"><code>kerna init --ci --provider mock</code><button class="copy" type="button" aria-label="Copy workspace initialization command" title="Copy command">Copy</button></div><p>Start with a deterministic demo provider and fail-closed policy.</p></article>
+          <article><p class="command-label">Install productivity tools</p><div class="command-row"><code>kerna pack install productivity</code><button class="copy" type="button" aria-label="Copy productivity pack command" title="Copy command">Copy</button></div><p>Add local notes, calendar, weather, web reading, and optional search.</p></article>
+        </div>
+      </section>
+      <section class="proof-line" aria-label="Kerna principles"><div class="proof-label">THE<br />CONTROL<br />PLANE</div><div><strong>Local-first</strong><p>Policies, receipts, and workspace data are yours to inspect locally.</p></div><div><strong>Fail-closed</strong><p>Ungoverned tools do not run. Consequential actions pause for review.</p></div><div><strong>Model-flexible</strong><p>Use the provider and MCP tools that fit the work, without giving up the guardrails.</p></div></section>
+      <section class="section rail"><div class="section-title"><p class="eyebrow">One loop, made visible</p><h2 class="display">Useful work should not require a leap of faith.</h2><p class="intro">Kerna is not another chat window. It is the narrow control plane between an agent and the tools that can change your world.</p></div><div class="workflow-ribbon"><article><span class="number">01</span><h3>Ask</h3><p>Describe an outcome. Kerna discovers only the tools your workspace has explicitly allowed.</p></article><article><span class="number">02</span><h3>Check</h3><p>Policy, scope, and budget are evaluated before an MCP tool ever runs.</p></article><article><span class="number">03</span><h3>Decide</h3><p>Writes and external actions can stop in a local approval queue for a human choice.</p></article><article><span class="number">04</span><h3>Receipt</h3><p>Review the outcome, decisions, and trace without treating an agent as a black box.</p></article></div></section>
+      <section class="approval-stage"><div class="vertical">THE MOMENT THAT MATTERS</div><div class="approval-copy"><p class="eyebrow">Approval is a feature</p><h2 class="display">When work becomes consequential, the machine should ask.</h2><p>Writing a note, creating a calendar event, or reaching an external service can be queued for a clear, one-time decision. If the answer is no, nothing happens.</p><a class="button" href="how-it-works.html">Follow one run</a></div><div class="approval-receipt"><figure class="real-capture"><img src="assets/connector-risk-card.png" alt="Kerna notes connector risk card showing read-only tools and an approval-required add note tool." /><figcaption>Actual connector review: reads are visible, writes explicitly require approval.</figcaption></figure></div></section>
+      <section class="section rail"><div class="section-title"><p class="eyebrow">First useful run</p><h2 class="display">From install to a governed task.</h2><p class="intro">Start in demo mode or bring your own provider. Curated packs keep local productivity tools close to hand.</p></div><div class="onboarding"><div>ONBOARDING<br />IN THREE MOVES</div><article><span class="step-num">01 / INSTALL</span><h3>Put the runtime on your machine.</h3><div class="code">npm install -g @premxai/kerna</div></article><article><span class="step-num">02 / CONNECT</span><h3>Choose a pack, then inspect its risk.</h3><div class="code">kerna pack install productivity<br /><span>kerna mcp risk google-calendar</span></div></article><article><span class="step-num">03 / REVIEW</span><h3>Run work and keep the receipt.</h3><div class="code">kerna run "Prepare my morning brief"<br /><span>kerna trace last</span></div></article></div></section>
+      <section class="quiet-cta"><div><p class="eyebrow">Start with a bounded job</p><h2>Make your first routine useful before making it automatic.</h2></div><div><p>Explore read-first workflows for meeting preparation, research, and a calm daily brief.</p><a class="button ghost" href="workflows.html">Explore workflows</a></div></section>
+    </main>
+    <footer class="site-footer"><div class="footer-inner"><div><a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true"></span>Kerna</a><p>A local-first trust layer for AI work.<br />MIT OR Apache-2.0.</p></div><nav class="footer-links" aria-label="Footer navigation"><a href="how-it-works.html">How it works</a><a href="workflows.html">Workflows</a><a href="download.html">Download</a><a href="privacy.html">No account</a><a href="https://github.com/premxai/kerna">GitHub</a></nav></div></footer>
+    <script src="site.js"></script>
+  </body>
+</html>

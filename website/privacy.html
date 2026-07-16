@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Kerna is local-first: no login is required for the first release." />
+    <title>No account required | Kerna</title>
+    <link rel="stylesheet" href="styles.css?v=2" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="site-header">
+      <a class="brand" href="index.html" aria-label="Kerna home"><span class="brand-mark" aria-hidden="true"></span>Kerna</a>
+      <button class="menu-toggle" type="button" aria-controls="site-nav" aria-expanded="false">Menu</button>
+      <nav class="site-nav" id="site-nav" aria-label="Primary navigation">
+        <a href="how-it-works.html">How it works</a><a href="workflows.html">Workflows</a><a aria-current="page" href="privacy.html">No account</a><a class="nav-download" href="download.html">Download</a>
+      </nav>
+    </header>
+    <main id="main" class="page-shell">
+      <section class="page-hero rail"><p class="eyebrow">The account question</p><h1 class="display">No login.<br />No cloud profile.<br />No trade.</h1><p class="intro">For this local-first release, Kerna does not need signup. You initialize a workspace on your machine, bring the model provider you choose, and retain the ability to inspect or remove your local data.</p></section>
+      <section class="section rail">
+        <div class="section-title"><p class="eyebrow">What this means in practice</p><h2 class="display">The product works without becoming another identity system.</h2><p class="intro">Avoiding accounts removes a first-run barrier and respects the product’s trust posture. It also means user count needs an honest definition.</p></div>
+        <div class="privacy-grid">
+          <div>NO<br />ACCOUNT<br />REQUIRED</div>
+          <article><span class="number">01 / INSTALL COUNTS</span><h2>Useful, but not users.</h2><p>GitHub Release download totals and npm’s aggregate package-download reports tell us that artifacts were fetched. They cannot distinguish one person reinstalling from ten people trying Kerna, nor prove that anyone completed a useful task.</p></article>
+          <article><span class="number">02 / ACTIVE USE</span><h2>Measure with consent.</h2><p>If Kerna later adds telemetry, it should be opt-in, anonymous, and content-free: product version, platform, a rotating random install identifier, and outcome counters such as first receipt completed. Never send goals, tool arguments, task traces, tokens, or workspace contents.</p></article>
+          <article><span class="number">03 / COHORT EVIDENCE</span><h2>Learn from real outcomes.</h2><p>For the first cohort, the reliable signal is a voluntary acceptance record: whether each participant reached a useful local result in 15 minutes, understood approvals, and reported a privacy or policy issue.</p></article>
+          <article><span class="number">04 / FUTURE ACCOUNTS</span><h2>Add only for a clear job.</h2><p>A future shared-policy, team governance, or hosted-connector experience may need identity. That is a separate product decision with a clear data model, not a default requirement for personal Kerna use.</p></article>
+        </div>
+      </section>
+      <section class="approval-stage"><div class="vertical">LOCAL-FIRST BY DEFAULT</div><div class="approval-copy"><p class="eyebrow">A better north star</p><h2 class="display">Optimize for useful, safe outcomes, not raw tool calls.</h2><p>Track activation through a first useful receipt, retention through recurring reviewed routines, and trust through clear approvals and zero unapproved external side effects. None of those require reading a person’s work.</p><a class="button" href="workflows.html">See meaningful workflows</a></div><div class="approval-receipt"><article class="receipt"><div class="receipt-head"><span class="check">✓</span><div><h3>Privacy posture</h3><p class="tiny">First cohort</p></div></div><dl><div><dt>Account</dt><dd>not required</dd></div><div><dt>Workspace</dt><dd>local</dd></div><div><dt>Telemetry</dt><dd>not required</dd></div><div><dt>Evidence</dt><dd>opt-in outcome</dd></div></dl><p class="receipt-foot">✓ never substitute downloads for trust</p></article></div></section>
+      <section class="quiet-cta"><div><p class="eyebrow">Ready to try it</p><h2>Install the runtime, then decide exactly what it can touch.</h2></div><div><p>Start locally. You can inspect the source, the release assets, and every subsequent task receipt.</p><a class="button ghost" href="download.html">Download Kerna</a></div></section>
+    </main>
+    <footer class="site-footer"><div class="footer-inner"><div><a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true"></span>Kerna</a><p>A local-first trust layer for AI work.</p></div><nav class="footer-links" aria-label="Footer navigation"><a href="how-it-works.html">How it works</a><a href="workflows.html">Workflows</a><a href="download.html">Download</a><a href="https://github.com/premxai/kerna">GitHub</a></nav></div></footer>
+    <script src="site.js"></script>
+  </body>
+</html>

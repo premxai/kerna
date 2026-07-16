@@ -1,5 +1,7 @@
 # Kerna
 
+Website: https://premxai.github.io/kerna/
+
 **The Runtime Trust Layer for AI Agents**
 
 AI agents can think, but they run with no seatbelt: full system access, no memory of what they did, no way to prove what happened. Kerna is the runtime that wraps *any* model or MCP tool stack in a hard safety boundary — budgets, fail-closed permissions, full event traces, and process isolation — so you can run autonomous agents without fearing destructive commands or losing the record.

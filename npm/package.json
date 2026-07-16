@@ -1,7 +1,7 @@
 {
   "name": "@premxai/kerna",
   "version": "0.2.3",
-  "description": "Kerna — the runtime trust layer for AI agents. Fail-closed permissions, budgets, full event traces, and MCP process isolation around any model or tool stack.",
+  "description": "Kerna is the runtime trust layer for AI agents. Fail-closed permissions, budgets, full event traces, and MCP process isolation around any model or tool stack.",
   "bin": {
     "kerna": "bin/cli.js"
   },

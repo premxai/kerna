@@ -6,6 +6,7 @@
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
+const crypto = require("crypto");
 const { execFileSync } = require("child_process");
 
 const REPO = "premxai/kerna";
@@ -61,6 +62,25 @@ function download(url, dest, redirectsLeft) {
   });
 }
 
+function verifySha256(file, sidecar) {
+  const expected = fs.readFileSync(sidecar, "utf8").trim().split(/\s+/)[0].toLowerCase();
+  const actual = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  if (!/^[a-f0-9]{64}$/.test(expected) || actual !== expected) {
+    fail("SHA-256 verification failed for " + path.basename(file));
+  }
+}
+
+async function downloadVerified(url, dest) {
+  const sidecar = dest + ".sha256";
+  try {
+    await download(url, dest, 5);
+    await download(url + ".sha256", sidecar, 5);
+    verifySha256(dest, sidecar);
+  } finally {
+    fs.rmSync(sidecar, { force: true });
+  }
+}
+
 function extractPlugins() {
   try {
     if (isWindows) {
@@ -76,16 +96,20 @@ function extractPlugins() {
         { stdio: "inherit" }
       );
     } else {
-      execFileSync(
-        "python3",
-        [
-          "-c",
-          "import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])",
-          pluginsZip,
-          binDir,
-        ],
-        { stdio: "inherit" }
-      );
+      try {
+        execFileSync(
+          "python3",
+          [
+            "-c",
+            "import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])",
+            pluginsZip,
+            binDir,
+          ],
+          { stdio: "inherit" }
+        );
+      } catch {
+        execFileSync("unzip", ["-oq", pluginsZip, "-d", binDir], { stdio: "inherit" });
+      }
     }
   } catch (e) {
     fail("plugin bundle extraction failed: " + e.message);
@@ -123,9 +147,9 @@ async function main() {
     "/" +
     asset;
 
-  console.log("[kerna] Downloading " + asset + " (v" + VERSION + ")…");
+  console.log("[kerna] Downloading " + asset + " (v" + VERSION + ")...");
   try {
-    await download(url, outFile, 5);
+    await downloadVerified(url, outFile);
     if (!isWindows) fs.chmodSync(outFile, 0o755);
     console.log("[kerna] Installed: " + outFile);
 
@@ -135,8 +159,8 @@ async function main() {
       "/releases/download/v" +
       VERSION +
       "/kerna-plugins.zip";
-    console.log("[kerna] Downloading curated plugins (v" + VERSION + ")…");
-    await download(pluginsUrl, pluginsZip, 5);
+    console.log("[kerna] Downloading curated plugins (v" + VERSION + ")...");
+    await downloadVerified(pluginsUrl, pluginsZip);
     extractPlugins();
     console.log("[kerna] Installed curated plugins: " + path.join(binDir, "plugins"));
   } catch (e) {
