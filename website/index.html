@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Kerna is the local-first trust layer for useful AI work. Connect MCP tools, govern each action, and keep a receipt." />
     <title>Kerna | AI work, with a receipt</title>
-    <link rel="stylesheet" href="styles.css?v=3" />
+    <link rel="stylesheet" href="styles.css?v=4" />
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
@@ -24,7 +24,6 @@
             <h1 class="display">Give AI work.<br />Keep the <em>keys.</em></h1>
             <p class="intro">Kerna connects your models and MCP tools, stops unreviewed actions, and leaves a readable receipt for every run.</p>
             <div class="actions"><a class="button" href="download.html">Download Kerna</a><a class="button ghost" href="how-it-works.html">See the control loop</a></div>
-            <div class="hero-install"><span>Install with npm</span><div class="command-row"><code>npm install -g @premxai/kerna</code><button class="copy" type="button" aria-label="Copy npm install command" title="Copy command">Copy</button></div><p class="install-hint">No account required. Your workspace stays on your machine.</p></div>
           </div>
           <figure class="hero-art"><img src="assets/onboarding-terminal.png" alt="Kerna terminal output showing workspace initialization and installation of the productivity pack." /><figcaption>Actual first-run output: a fail-closed workspace and curated productivity tools.</figcaption></figure>
         </div>
@@ -32,7 +31,7 @@
       <section class="install-deck" aria-labelledby="install-title">
         <div class="install-deck-heading"><p class="eyebrow">Install Kerna</p><h2 id="install-title" class="display">Choose the path that fits your machine.</h2><p>Every option installs the same verified runtime. Copy a command, then initialize a local workspace.</p></div>
         <div class="install-command-grid">
-          <article><p class="command-label">npm <span class="command-status">Publish required</span></p><div class="command-row"><code>npm install -g @premxai/kerna</code><button class="copy" type="button" aria-label="Copy npm install command" title="Copy command">Copy</button></div><p>Node.js 16+ on Windows, macOS, or Linux.</p></article>
+          <article><p class="command-label">npm</p><div class="command-row"><code>npm install -g @premxai/kerna</code><button class="copy" type="button" aria-label="Copy npm install command" title="Copy command">Copy</button></div><p>Node.js 16+ on Windows, macOS, or Linux.</p></article>
           <article><p class="command-label">macOS / Linux</p><div class="command-row"><code>curl -fsSL https://raw.githubusercontent.com/premxai/kerna/main/install.sh | sh</code><button class="copy" type="button" aria-label="Copy macOS and Linux install command" title="Copy command">Copy</button></div><p>Downloads the matching release binary and plugins.</p></article>
           <article><p class="command-label">Windows PowerShell</p><div class="command-row"><code>irm https://raw.githubusercontent.com/premxai/kerna/main/install.ps1 | iex</code><button class="copy" type="button" aria-label="Copy Windows install command" title="Copy command">Copy</button></div><p>Installs into your user location and adds a PATH hint.</p></article>
           <article><p class="command-label">Source fallback</p><div class="command-row"><code>cargo install --git https://github.com/premxai/kerna --bin kerna</code><button class="copy" type="button" aria-label="Copy source install command" title="Copy command">Copy</button></div><p>For unsupported platforms or source-based development.</p></article>
