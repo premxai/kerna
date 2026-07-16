@@ -185,7 +185,7 @@ button { font: inherit; }
 
 .privacy-grid { border-top: 1px solid var(--line); display: grid; grid-template-columns: 8% 1fr 1fr; margin-top: 4rem; }
 .privacy-grid > * { border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); padding: 1.5rem; }
-.privacy-grid > :first-child { border-left: 1px solid var(--line); color: var(--lime); font-family: var(--mono); font-size: .66rem; writing-mode: vertical-rl; }
+.privacy-grid > :first-child { border-left: 1px solid var(--line); color: var(--lime); font-family: var(--mono); font-size: .66rem; grid-row: 1 / span 2; writing-mode: vertical-rl; }
 .privacy-grid h2 { font-family: var(--display); font-size: 2.35rem; font-weight: 500; letter-spacing: -.04em; margin: 1.2rem 0 .7rem; }
 .privacy-grid p { color: var(--muted); font-size: .84rem; line-height: 1.55; }
 .privacy-grid .number { color: var(--lime); font-family: var(--mono); font-size: .7rem; }
@@ -249,4 +249,8 @@ button { font: inherit; }
   .workflow-item { grid-template-columns: 1fr; gap: .5rem; }
   .workflow-item aside { grid-column: auto; }
   .actions .button { width: 100%; justify-content: center; }
+}
+
+@media (max-width: 600px) {
+  .privacy-explainer .section-title h2 { font-size: 2.15rem; line-height: .98; }
 }
