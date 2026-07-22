@@ -64,6 +64,18 @@ jobs:
       run: cargo test --verbose
       working-directory: ./kernel
 
+    - name: Run Kerna Trust Bench
+      if: matrix.os == 'ubuntu-latest'
+      run: node benchmarks/kerna-trust/run.mjs --out reports/kerna-trust/ci.json
+
+    - name: Upload Kerna Trust Bench report
+      if: always() && matrix.os == 'ubuntu-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: kerna-trust-bench
+        path: reports/kerna-trust/ci.json
+        if-no-files-found: error
+
     - name: Install desktop dependencies
       run: npm ci
       working-directory: ./ui

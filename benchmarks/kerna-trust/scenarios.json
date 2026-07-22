@@ -1,0 +1,79 @@
+{
+  "name": "Kerna Trust Bench",
+  "version": "0.1.0",
+  "description": "Deterministic trust-runtime scenarios executed against Kerna's built-in MockMCP.",
+  "scenarios": [
+    {
+      "id": "allowed-tool-receipt",
+      "category": "success",
+      "test": "trust_layer_validation::test_mockmcp_echo_succeeds_and_appears_in_trace",
+      "claim": "An explicitly allowed tool can complete and is recorded in the task receipt."
+    },
+    {
+      "id": "approval-before-execution",
+      "category": "approval",
+      "test": "trust_layer_validation::test_queued_approval_is_recorded_before_tool_execution",
+      "claim": "An approval-required tool cannot start before an approved decision is recorded."
+    },
+    {
+      "id": "secret-boundary",
+      "category": "isolation",
+      "test": "trust_layer_validation::test_declared_secret_reaches_plugin_undeclared_does_not",
+      "claim": "A plugin receives declared secrets only; undeclared process secrets do not leak."
+    },
+    {
+      "id": "read-only-folder-boundary",
+      "category": "permissions",
+      "test": "trust_layer_validation::test_granted_folder_read_works_and_write_denied_when_readonly",
+      "claim": "A named read-only folder supports reads while writes and traversal are rejected."
+    },
+    {
+      "id": "tool-call-budget",
+      "category": "budget",
+      "test": "trust_layer_validation::test_budget_max_tool_calls_aborts",
+      "claim": "A run aborts before a tool executes when its tool-call budget is exhausted."
+    },
+    {
+      "id": "llm-call-budget",
+      "category": "budget",
+      "test": "trust_layer_validation::test_budget_max_llm_calls_aborts",
+      "claim": "A run aborts when its LLM-call budget is exhausted."
+    },
+    {
+      "id": "plugin-timeout",
+      "category": "isolation",
+      "test": "trust_layer_validation::test_mockmcp_hang_times_out_cleanly",
+      "claim": "A hung MCP process fails cleanly instead of leaving an unbounded run."
+    },
+    {
+      "id": "malformed-mcp-response",
+      "category": "resilience",
+      "test": "trust_layer_validation::test_mockmcp_invalid_json_fails_cleanly",
+      "claim": "Malformed MCP output fails closed and does not corrupt the task loop."
+    },
+    {
+      "id": "trace-decision-chain",
+      "category": "observability",
+      "test": "trust_layer_validation::test_kerna_trace_output",
+      "claim": "Receipts preserve request, policy, budget, and tool-start events in order."
+    },
+    {
+      "id": "destructive-command-denial",
+      "category": "permissions",
+      "test": "trust_layer_validation::test_policy_simulation",
+      "claim": "A destructive command outside the workspace is rejected by policy simulation."
+    },
+    {
+      "id": "connector-risk-card",
+      "category": "governance",
+      "test": "trust_layer_validation::test_mcp_risk_card_generation",
+      "claim": "A configured connector produces a risk card for operator review."
+    },
+    {
+      "id": "explicit-tool-deny-list",
+      "category": "permissions",
+      "test": "trust_layer_validation::test_mcp_filter_deny_blocks_tool",
+      "claim": "A connector-level deny list prevents a named tool from being invoked."
+    }
+  ]
+}

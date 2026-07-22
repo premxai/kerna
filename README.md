@@ -16,6 +16,7 @@
   <a href="https://github.com/premxai/kerna/releases">Releases</a> ·
   <a href="https://www.npmjs.com/package/@premxai/kerna">npm</a> ·
   <a href="docs/USING_KERNA.md">Usage guide</a> ·
+  <a href="docs/BENCHMARKS.md">Benchmarks</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
@@ -192,7 +193,7 @@ npm run dev
 
 ## Project status
 
-Kerna `v0.2.3` is the current public release. The core runtime, verified release artifacts, npm launcher, curated plugin bundle, website, and launch workflows are available now. See [releases](https://github.com/premxai/kerna/releases), [open issues](https://github.com/premxai/kerna/issues), and the [launch checklist](docs/COHORT_LAUNCH_CHECKLIST.md) for current work.
+Kerna `v0.2.3` is the current public release. The core runtime, verified release artifacts, npm launcher, curated plugin bundle, website, and launch workflows are available now. See [releases](https://github.com/premxai/kerna/releases), [open issues](https://github.com/premxai/kerna/issues), the [benchmark methodology](docs/BENCHMARKS.md), and the [launch checklist](docs/COHORT_LAUNCH_CHECKLIST.md) for current work.
 
 ## Contributing
 
