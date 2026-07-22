@@ -31,6 +31,23 @@ if (selectedScenarios.length === 0) {
   process.exit(2);
 }
 
+// Integration tests spawn the compiled `kerna mockmcp` executable as their
+// external stdio process. Build it first so a standalone benchmark run cannot
+// accidentally exercise a binary left over from an older source revision.
+process.stdout.write("[kerna-trust] Building Kerna child-process fixture ... ");
+const build = spawnSync("cargo", ["build", "--bin", "kerna"], {
+  cwd: join(repositoryRoot, "kernel"),
+  encoding: "utf8",
+  timeout: 120_000
+});
+if (build.status !== 0 || build.error) {
+  const output = `${build.stdout ?? ""}${build.stderr ?? ""}`.trim();
+  console.log("FAILED");
+  console.error(output || build.error?.message || "cargo build failed");
+  process.exit(1);
+}
+console.log("ready");
+
 const startedAt = new Date();
 const results = [];
 

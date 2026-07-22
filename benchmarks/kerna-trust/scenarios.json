@@ -52,6 +52,30 @@
       "claim": "Malformed MCP output fails closed and does not corrupt the task loop."
     },
     {
+      "id": "oversized-tool-output",
+      "category": "resilience",
+      "test": "trust_layer_validation::test_mockmcp_huge_output_exceeds_budget",
+      "claim": "An oversized MCP response exceeds the configured output budget and fails closed."
+    },
+    {
+      "id": "stdout-noise-tolerance",
+      "category": "protocol",
+      "test": "trust_layer_validation::test_mcp_protocol_ignores_stdout_noise",
+      "claim": "Non-JSON stdout noise cannot prevent Kerna from matching the intended MCP response."
+    },
+    {
+      "id": "response-id-flood",
+      "category": "protocol",
+      "test": "trust_layer_validation::test_mcp_protocol_rejects_response_id_flood",
+      "claim": "A flood of unrelated JSON-RPC response ids is bounded and rejected."
+    },
+    {
+      "id": "duplicate-tool-declaration",
+      "category": "protocol",
+      "test": "trust_layer_validation::test_mcp_protocol_deduplicates_hostile_tool_declarations",
+      "claim": "A connector cannot register the same MCP tool name more than once."
+    },
+    {
       "id": "trace-decision-chain",
       "category": "observability",
       "test": "trust_layer_validation::test_kerna_trace_output",

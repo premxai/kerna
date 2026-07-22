@@ -378,8 +378,16 @@ async fn test_mockmcp_hang_times_out_cleanly() {
 }
 
 #[tokio::test]
-async fn test_mockmcp_huge_output_truncates() {
-    let (memory, config, db_path) = setup_test_env("test_huge", None).await;
+async fn test_mockmcp_huge_output_exceeds_budget() {
+    let budget = BudgetConfig {
+        max_runtime_seconds: 60,
+        max_tool_calls: 10,
+        max_llm_calls: 10,
+        max_cost_usd: 1.0,
+        max_output_bytes: 1_024,
+        max_memory_writes: 10,
+    };
+    let (memory, config, db_path) = setup_test_env("test_huge", Some(budget)).await;
     let mcp_registry = std::sync::Arc::new(tokio::sync::Mutex::new(
         crate::mcp_registry::McpRegistry::new(),
     ));
@@ -392,22 +400,92 @@ async fn test_mockmcp_huge_output_truncates() {
     let mem = std::sync::Arc::new(memory);
     let scheduler = Scheduler::new(config.clone(), mem.clone(), mcp_registry, None).unwrap();
 
-    let task_id = scheduler.run_goal("Please call huge_output").await.unwrap();
+    let error = scheduler
+        .run_goal("Please call huge_output")
+        .await
+        .expect_err("an oversized tool response must exceed the configured output budget");
+    assert!(
+        error.to_string().contains("BUDGET_EXCEEDED"),
+        "oversized tool output must fail closed: {error}"
+    );
 
-    let events = mem.get_events(&task_id.to_string()).unwrap();
-    let completed = events
+    let _ = fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn test_mcp_protocol_ignores_stdout_noise() {
+    let (_memory, mut config, db_path) = setup_test_env("test_mcp_stdout_noise", None).await;
+    config.mcp_servers[0].args = vec![
+        "mockmcp".to_string(),
+        "--mode".to_string(),
+        "noisy".to_string(),
+    ];
+
+    let mut registry = crate::mcp_registry::McpRegistry::new();
+    registry.initialize(&config.mcp_servers).await.unwrap();
+    let response = registry
+        .call_tool("echo", serde_json::json!({ "text": "boundary-ok" }))
+        .await
+        .expect("stdout noise must not prevent a matching MCP response");
+
+    assert_eq!(response["content"][0]["text"], "boundary-ok");
+    let _ = fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn test_mcp_protocol_rejects_response_id_flood() {
+    let (_memory, mut config, db_path) = setup_test_env("test_mcp_wrong_response_id", None).await;
+    config.mcp_servers[0].args = vec![
+        "mockmcp".to_string(),
+        "--mode".to_string(),
+        "wrong_id".to_string(),
+    ];
+    let server = &config.mcp_servers[0];
+    let args: Vec<&str> = server.args.iter().map(String::as_str).collect();
+    let mut client = crate::mcp::McpClient::spawn(
+        &server.command,
+        &args,
+        &server.runtime_mode,
+        &server.docker_image,
+        "bridge",
+        None,
+        &server.secrets,
+    )
+    .unwrap();
+
+    let error = client
+        .initialize()
+        .await
+        .expect_err("unrelated response ids must not satisfy an MCP request");
+    assert!(
+        error.to_string().contains("without a matching response id"),
+        "response-id flood must be bounded and rejected: {error}"
+    );
+
+    let _ = fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn test_mcp_protocol_deduplicates_hostile_tool_declarations() {
+    let (_memory, mut config, db_path) = setup_test_env("test_mcp_duplicate_tools", None).await;
+    config.mcp_servers[0].args = vec![
+        "mockmcp".to_string(),
+        "--mode".to_string(),
+        "malicious".to_string(),
+    ];
+
+    let mut registry = crate::mcp_registry::McpRegistry::new();
+    registry.initialize(&config.mcp_servers).await.unwrap();
+    let duplicate_count = registry
+        .get_mcp_tools()
         .iter()
-        .find(|e| e.event_type == "tool.call.completed")
-        .unwrap();
-    let result_len = completed.payload_json["result_len"].as_u64().unwrap();
+        .filter(|tool| tool["name"] == "duplicate_tool_name")
+        .count();
 
-    // It should be > max_output_bytes because the result_len logged is after truncation, but let's check
-    // Wait, result_len is logged *before* truncation in scheduler.rs!
-    // Let's check scheduler.rs: result_str.len() is logged, then truncated. Wait, actually we want to see if the budget threw an error.
-    // The test just expects it to truncate or fail if over budget.
-    // If it truncated, then output_bytes is recorded as the truncated length + suffix.
-    assert!(result_len > 100);
-
+    assert_eq!(
+        duplicate_count, 1,
+        "a hostile connector cannot register the same tool name twice"
+    );
     let _ = fs::remove_file(&db_path);
 }
 

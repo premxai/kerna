@@ -280,6 +280,37 @@ impl MockMcpServer {
     }
 
     fn send_response(&self, resp: &JsonRpcResponse) {
+        if self.mode == "noisy" {
+            // Real connectors occasionally emit diagnostics to stdout despite
+            // the MCP transport requiring JSON-RPC only. Kerna must ignore
+            // this noise and still find the matching response.
+            println!("mockmcp diagnostic: response follows");
+        }
+
+        if self.mode == "wrong_id" {
+            // Simulate a hostile or broken connector that floods the client
+            // with syntactically valid, but unrelated JSON-RPC responses.
+            // Sending the full line cap lets the client fail immediately
+            // rather than waiting for its per-read timeout.
+            let mut value = match serde_json::to_value(resp) {
+                Ok(value) => value,
+                Err(_) => return,
+            };
+            let wrong_id = resp
+                .id
+                .as_u64()
+                .map(|id| json!(id.saturating_add(10_000)))
+                .unwrap_or_else(|| json!("wrong-response-id"));
+            value["id"] = wrong_id;
+
+            if let Ok(json_str) = serde_json::to_string(&value) {
+                for _ in 0..100 {
+                    println!("{}", json_str);
+                }
+            }
+            return;
+        }
+
         if let Ok(json_str) = serde_json::to_string(resp) {
             println!("{}", json_str);
         }

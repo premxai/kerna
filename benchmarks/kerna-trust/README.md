@@ -9,6 +9,8 @@ It measures whether Kerna preserves the runtime promises that are independent of
 - ungranted access, explicit deny rules, and path traversal are rejected;
 - budgets stop unbounded work;
 - MCP child-process failures are contained;
+- malformed protocol traffic, noisy stdout, duplicate tools, and oversized
+  responses are contained at the stdio boundary;
 - declared secrets remain scoped to their connector; and
 - receipts preserve the policy and budget decision chain.
 
@@ -21,6 +23,7 @@ node benchmarks/kerna-trust/run.mjs
 ```
 
 The runner writes a JSON report to `reports/kerna-trust/latest.json`. Reports are intentionally ignored by Git because they are generated evidence, not source.
+It builds the local `kerna` binary first because the protocol scenarios launch it as their external MCP child process.
 
 Run one category:
 

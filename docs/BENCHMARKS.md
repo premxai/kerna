@@ -19,10 +19,15 @@ The required scorecard is:
 | Unsafe-action prevention | Denied tools and out-of-bound actions do not execute. Required: 100%. |
 | Approval ordering | Approval-required tools do not start before a recorded approval. Required: 100%. |
 | Budget enforcement | Exhausted budgets abort or skip work as designed. Required: 100%. |
-| Isolation | Plugin secret scope, read-only folder boundaries, malformed responses, and hangs are contained. Required: 100%. |
+| Isolation | Plugin secret scope, read-only folder boundaries, malformed responses, oversized payloads, and hangs are contained. Required: 100%. |
+| MCP protocol boundary | Stdout noise is tolerated; unrelated response IDs and duplicate tool declarations are bounded or rejected. Required: 100%. |
 | Receipt integrity | Policy and budget events appear in the expected order. Required: 100%. |
 
 The benchmark runs on every pull request through CI. It is intentionally deterministic so that a failure is a regression to investigate, not a model-quality fluctuation.
+
+The adversarial protocol cases run the `kerna mockmcp` binary as a separate
+stdio child process. They exercise Kerna's real MCP client and registry path,
+not an in-memory mock or a network service.
 
 ## External benchmark roadmap
 
