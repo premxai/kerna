@@ -18,6 +18,7 @@ from pathlib import Path
 
 REQUIRED_AGENTDOJO_VERSION = "0.1.35"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+BRIDGE_PATH = Path(__file__).with_name("kerna_agentdojo_mcp.py")
 
 
 def package_version(name: str) -> str | None:
@@ -54,14 +55,14 @@ def main() -> int:
         },
         "governed_bridge": {
             "required": "an AgentDojo FunctionsRuntime-to-MCP bridge with receipt export",
-            "actual": "not implemented",
-            "passed": False,
+            "actual": str(BRIDGE_PATH) if BRIDGE_PATH.is_file() else "missing",
+            "passed": BRIDGE_PATH.is_file(),
         },
     }
     ready = all(check["passed"] for check in checks.values())
     report = {
         "benchmark": "AgentDojo / Kerna integration preflight",
-        "adapterStatus": "design-locked, bridge-pending",
+        "adapterStatus": "bridge-ready, no external result published",
         "publishableResult": False,
         "ready": ready,
         "checks": checks,

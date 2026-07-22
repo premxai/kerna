@@ -2,8 +2,9 @@
 
 ## Status
 
-**Design locked. Bridge implementation pending. No AgentDojo score is
-publishable yet.**
+**Bridge implementation is available and locally protocol-tested. No AgentDojo
+score is publishable until a matched, real-model control and governed run have
+completed.**
 
 AgentDojo is Kerna's first external injection-safety evaluation. Its standard
 pipeline directly executes a Python `FunctionsRuntime`; that is useful for a

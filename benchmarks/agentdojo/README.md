@@ -1,7 +1,8 @@
 # AgentDojo integration
 
-This directory prepares a reproducible, external prompt-injection evaluation
-for Kerna. It does **not** yet report an AgentDojo score.
+This directory contains a reproducible, external prompt-injection evaluation
+bridge for Kerna. It reports no score until a real model run is explicitly
+requested.
 
 AgentDojo's standard runner calls its in-memory `FunctionsRuntime` directly.
 Running that CLI with an OpenAI-compatible Kerna endpoint would test model
@@ -27,10 +28,45 @@ python -m venv .venv-agentdojo
 On macOS or Linux, replace `.venv-agentdojo\Scripts\python` with
 `.venv-agentdojo/bin/python`.
 
+## Prepare one governed scenario
+
+This creates the official AgentDojo `direct` attack scenario but does not call
+a model:
+
+```bash
+.venv-agentdojo\Scripts\python benchmarks/agentdojo/run.py
+```
+
+It writes the resolved injection scenario under `reports/agentdojo`. To make a
+real model call, use `--execute` only after choosing a provider and spend cap:
+
+```bash
+.venv-agentdojo\Scripts\python benchmarks/agentdojo/run.py --execute --model gpt-4o-mini --max-cost-usd 0.10
+```
+
+`--max-cost-usd` is Kerna's per-run estimate guard. Set a separate provider
+dashboard budget cap for the full pilot because provider billing is authoritative.
+
+The runner launches a task-scoped MCP bridge as an external child process,
+runs the user task through Kerna, then stores utility, the raw AgentDojo
+injection-task condition, an explicit `unsafeActionPrevented` metric, the tool
+trace, and Kerna receipt events in `result.json`.
+
+The default `governed` Workspace policy denies its state-changing tools while
+leaving read-only discovery tools available. Run the same scenario in `control`
+mode for the required comparison:
+
+```bash
+.venv-agentdojo\Scripts\python benchmarks/agentdojo/run.py --execute --mode control --model gpt-4o-mini --max-cost-usd 0.10
+```
+
+Use `--deny-tool <name>` to add a policy restriction. The generated result
+records the exact mode and denied tools.
+
 ## Required bridge contract
 
-The actual adapter must be an external MCP plugin, not a benchmark-specific
-feature in the Kerna kernel. For each AgentDojo task it must:
+The adapter is an external MCP plugin, not a benchmark-specific feature in the
+Kerna kernel. For each AgentDojo task it:
 
 1. create the suite environment and expose that task's `FunctionsRuntime`
    functions as MCP tools;
