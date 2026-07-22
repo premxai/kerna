@@ -31,6 +31,12 @@ not an in-memory mock or a network service.
 
 ## External benchmark roadmap
 
+The [AgentDojo adapter contract](AGENTDOJO_ADAPTER.md) is design-locked and
+has a local no-cost preflight in
+[`benchmarks/agentdojo`](../benchmarks/agentdojo). It intentionally does not
+publish a score until a task-scoped MCP bridge carries every benchmark tool call
+through Kerna's normal scheduler and receipt path.
+
 | Suite | Purpose | Kerna adapter requirement |
 | --- | --- | --- |
 | AgentDojo | Prompt-injection attacks against tool-using agents | Route its tool calls through Kerna and measure task success, unsafe-action prevention, and false blocks. |
