@@ -121,6 +121,29 @@ is a restart and child-process lifecycle signal. It does not claim external
 provider availability, model reliability, scheduler reliability, or a general
 operating-system orphan-process guarantee.
 
+## BFCL provider compatibility pilot
+
+**Status:** runner prepared; no model result has been published.
+
+| Field | Planned configuration |
+| --- | --- |
+| Framework | `bfcl-eval==2025.12.17` |
+| Default provider/model baseline | OpenAI, `gpt-4.1-nano-2025-04-14-FC` |
+| Category | Non-live `simple_python` |
+| Fixed pilot size | 10 cases |
+| Inference concurrency | 1 |
+| Public score | None until a reviewed run is committed |
+
+The reproducible harness is in [`benchmarks/bfcl`](../benchmarks/bfcl). Its
+preflight makes no model calls. The execution command is deliberately bounded
+to ten fixed cases, writes raw evaluator output only to ignored reports, and
+requires an API key already present in the executing terminal.
+
+BFCL measures the named provider/model's native function-calling compatibility.
+It is not a Kerna security, utility, or policy-enforcement result, and it must
+not be used to claim that Kerna made a model more capable. A ten-case partial
+score is a pilot, not an official BFCL leaderboard score.
+
 ## AgentDojo external evaluation
 
 **Status:** completed external control matrix; no Kerna protection rate
