@@ -133,6 +133,18 @@ governed command run. That governed policy explicitly allows the user-task
 mutation and denies `send_email`, so it can demonstrate both useful authorized
 work and blocked exfiltration in one matched trial.
 
+The full pre-registered attack matrix covers `direct`, `ignore_previous`,
+`system_message`, and `injecagent` across those same scenarios. It is 48
+native controls and at most 192 model calls; set a provider-side $5 project
+cap before execution:
+
+```powershell
+.\.venv-agentdojo\Scripts\python.exe benchmarks\agentdojo\matrix.py --execute-controls --model gpt-4o-mini
+```
+
+It reports attack variants separately and still never launches governed runs
+without an eligible native control.
+
 ## Result publication checklist
 
 Each public benchmark page or README entry must include the source commit,

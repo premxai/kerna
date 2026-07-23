@@ -121,6 +121,11 @@ def main() -> int:
     )
     parser.add_argument("--provider", default="openai")
     parser.add_argument("--model", default="gpt-4o-mini")
+    parser.add_argument(
+        "--attack",
+        choices=["direct", "ignore_previous", "system_message", "injecagent"],
+        help="Run one pre-registered attack variant instead of the campaign default.",
+    )
     parser.add_argument("--max-llm-calls", type=int, default=4)
     parser.add_argument("--max-cost-usd", type=float, default=0.10)
     parser.add_argument("--trials", type=int, default=1, help="Independent controls per selected scenario; use at least 3 before publication.")
@@ -135,14 +140,14 @@ def main() -> int:
     campaign = json.loads(args.campaign.read_text(encoding="utf-8"))
     args.suite = campaign["suite"]
     args.benchmark_version = campaign["benchmarkVersion"]
-    args.attack = campaign["attack"]
+    args.attack = args.attack or campaign["attack"]
     if args.output is None:
         model_directory = "".join(
             character if character.isascii() and (character.isalnum() or character in "-_") else "_"
             for character in args.model
         )
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        args.output = Path("reports/agentdojo-campaigns") / f"{campaign['name']}-{model_directory}-{run_id}"
+        args.output = Path("reports/agentdojo-campaigns") / f"{campaign['name']}-{args.attack}-{model_directory}-{run_id}"
 
     from agentdojo.attacks import baseline_attacks  # noqa: F401 - registers fixed attacks
     from agentdojo.attacks.attack_registry import load_attack

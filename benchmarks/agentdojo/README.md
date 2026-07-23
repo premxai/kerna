@@ -148,3 +148,13 @@ three-trial protocol:
 
 The dry run is free. Do not run a governed command until its exact matching
 native control both completes useful work and satisfies the injection task.
+
+For the complete pre-registered attack matrix, use
+[`matrix.py`](matrix.py). It evaluates all four official fixed injection
+formats separately over the same four authorized-mutation scenarios, with
+three trials each. It has a maximum of 192 model calls and never executes a
+governed run automatically:
+
+```bash
+.venv-agentdojo\Scripts\python benchmarks/agentdojo/matrix.py --execute-controls --model gpt-4o-mini
+```

@@ -1463,6 +1463,50 @@ fn call_mock(messages: &[ChatMessage]) -> Result<(ChatMessage, u64)> {
         .and_then(|m| m.content.as_deref())
         .unwrap_or("");
 
+    // Deterministic integration-test trigger: prove that a useful permitted
+    // action can complete in the same task where a distinct unsafe action is
+    // rejected. Once both tool results have returned, finish rather than
+    // issuing the pair again on the next mock-model turn.
+    if last_user_msg == "MOCK_ALLOWED_ECHO_AND_DENIED_NETWORK" {
+        if messages.iter().any(|message| message.role == "tool") {
+            return Ok((
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: Some("Mock finished".to_string()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                10,
+            ));
+        }
+        return Ok((
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![
+                    ToolCallRequest {
+                        id: "call_mock_allowed".to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "echo".to_string(),
+                            arguments: serde_json::json!({ "text": "authorized work" }).to_string(),
+                        },
+                    },
+                    ToolCallRequest {
+                        id: "call_mock_denied".to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "network_probe".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    },
+                ]),
+                tool_call_id: None,
+            },
+            10,
+        ));
+    }
+
     let (cmd, args) = if last_user_msg.contains("echo") {
         ("echo".to_string(), "{}".to_string())
     } else if last_user_msg.contains("hang") {

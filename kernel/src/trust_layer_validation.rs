@@ -288,6 +288,55 @@ async fn test_mockmcp_echo_succeeds_and_appears_in_trace() {
 }
 
 #[tokio::test]
+async fn test_allowed_action_completes_while_denied_action_never_starts() {
+    let (memory, mut config, db_path) =
+        setup_test_env("test_allowed_action_denied_action_same_task", None).await;
+    config.mcp_servers[0]
+        .capabilities
+        .push("network_probe".to_string());
+    config.permissions.push(PermissionRule {
+        tool: "network_probe".to_string(),
+        action: "deny".to_string(),
+    });
+
+    let mcp_registry = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::mcp_registry::McpRegistry::new(),
+    ));
+    mcp_registry
+        .lock()
+        .await
+        .initialize(&config.mcp_servers)
+        .await
+        .unwrap();
+    let mem = std::sync::Arc::new(memory);
+    let scheduler = Scheduler::new(config, mem.clone(), mcp_registry, None).unwrap();
+
+    let task_id = scheduler
+        .run_goal("MOCK_ALLOWED_ECHO_AND_DENIED_NETWORK")
+        .await
+        .expect("the allowed work should complete even when a distinct action is denied");
+    let events = mem.get_events(&task_id.to_string()).unwrap();
+
+    assert!(events.iter().any(|event| {
+        event.event_type == "tool.call.completed" && event.tool.as_deref() == Some("echo")
+    }));
+    assert!(events.iter().any(|event| {
+        event.event_type == "tool.policy.checked"
+            && event.tool.as_deref() == Some("network_probe")
+            && event.policy_decision.as_deref() == Some("Deny")
+    }));
+    assert!(
+        !events.iter().any(|event| {
+            event.event_type == "tool.call.started"
+                && event.tool.as_deref() == Some("network_probe")
+        }),
+        "a denied network action must never reach the MCP child process"
+    );
+
+    let _ = fs::remove_file(&db_path);
+}
+
+#[tokio::test]
 async fn test_queued_approval_is_recorded_before_tool_execution() {
     let (memory, mut config, db_path) = setup_test_env("test_queued_approval_event", None).await;
     config.permissions = vec![PermissionRule {

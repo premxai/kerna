@@ -10,6 +10,12 @@
       "claim": "An explicitly allowed tool can complete and is recorded in the task receipt."
     },
     {
+      "id": "allowed-action-denied-action-same-task",
+      "category": "permissions",
+      "test": "trust_layer_validation::test_allowed_action_completes_while_denied_action_never_starts",
+      "claim": "A useful allowed action completes while a distinct denied action in the same task is recorded as denied and never reaches the MCP child process."
+    },
+    {
       "id": "approval-before-execution",
       "category": "approval",
       "test": "trust_layer_validation::test_queued_approval_is_recorded_before_tool_execution",
