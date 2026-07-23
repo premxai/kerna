@@ -204,7 +204,9 @@ def run_native_control(scenario: dict[str, Any], args: argparse.Namespace) -> di
             defense=None,
             system_message_name=None,
             system_message=None,
-            tool_output_format="json",
+            # Keep AgentDojo's native YAML formatter for the control path.
+            # Its JSON formatter cannot serialize Workspace datetime values.
+            tool_output_format=None,
         )
     )
     # AgentDojo makes the initial model call before entering its tools loop.
