@@ -26,6 +26,7 @@ This is the execution order and publication contract for Kerna's complete benchm
 | --- | --- | --- |
 | Runtime boundary | Published | Kerna Trust Bench: 17 / 17 deterministic scenarios pass |
 | MCP compatibility | Published, scoped core | Official core client conformance: 2 / 2 scenarios pass through the stdio bridge |
+| Performance | Published, scoped transport baseline | 30 process runs and 900 MockMCP echo calls on the named Windows host |
 | Tool-use safety | External control matrix published | AgentDojo: 48 native trials, 35 useful, 0 injected tasks satisfied |
 | Remaining scorecards | Planned | No public result before an adapter and protocol exist |
 

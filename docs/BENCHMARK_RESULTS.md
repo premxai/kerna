@@ -64,6 +64,28 @@ native remote HTTP transport, OAuth, SSE reconnection, elicitation, resources,
 or prompts. Those features have no passing conformance claim until product
 support and their individual official scenarios are added.
 
+## MCP transport performance
+
+**Status:** baseline published for the isolated stdio client path.
+
+| Field | Result |
+| --- | --- |
+| Source revision | `93c80bc` |
+| Host | Windows 11, Intel Core i7-14700HX, 28 logical CPUs, 16 GB RAM |
+| Fixture | Built-in MockMCP `echo` |
+| Process runs | 30 |
+| Tool calls | 900 |
+| Spawn plus MCP initialization, p50 / p95 | 17.233 ms / 24.158 ms |
+| Tool discovery, p50 / p95 | 0.329 ms / 2.102 ms |
+| Echo tool call, p50 / p95 | 0.056 ms / 0.130 ms |
+
+The complete redacted aggregate is
+[`mcp-stdio-performance-windows-20260723.json`](benchmark-data/mcp-stdio-performance-windows-20260723.json).
+This measures Kerna's isolated stdio client, initialization, discovery, and
+local tool-call path only. It excludes scheduler work, SQLite, provider and
+model latency, remote network time, and concurrency. It is a baseline for
+future same-machine release comparisons, not a universal performance claim.
+
 ## AgentDojo external evaluation
 
 **Status:** completed external control matrix; no Kerna protection rate
