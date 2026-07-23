@@ -635,6 +635,14 @@ pub enum McpCommands {
         #[command(subcommand)]
         action: FilterCommands,
     },
+    /// Run the official core MCP client conformance scenarios through a
+    /// benchmark-only streamable-HTTP-to-stdio bridge.
+    #[command(hide = true)]
+    ConformanceClient {
+        /// URL supplied by the official MCP conformance scenario server.
+        #[arg(index = 1)]
+        server_url: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1427,6 +1435,59 @@ async fn main() -> Result<()> {
                         );
                     } else {
                         eprintln!("[-] MCP server '{}' not found in config.", name);
+                    }
+                }
+                Some(McpCommands::ConformanceClient { server_url }) => {
+                    // Kerna intentionally owns a process-isolated stdio MCP
+                    // boundary. The conformance framework provides a local HTTP
+                    // test server, so the benchmark starts a pinned bridge as
+                    // the untrusted child process rather than adding a remote
+                    // transport to Kerna's production configuration surface.
+                    let remote_args = ["--yes", "mcp-remote@0.1.38", server_url.as_str()];
+                    let npx_command = if cfg!(windows) { "npx.cmd" } else { "npx" };
+                    let mut client = mcp::McpClient::spawn(
+                        npx_command,
+                        &remote_args,
+                        "native",
+                        "",
+                        "bridge",
+                        None,
+                        &[],
+                    )?;
+                    client.initialize().await?;
+                    let tools = client.list_tools().await?;
+
+                    match std::env::var("MCP_CONFORMANCE_SCENARIO")
+                        .unwrap_or_else(|_| "initialize".to_string())
+                        .as_str()
+                    {
+                        "initialize" => {}
+                        "tools_call" => {
+                            if !tools.iter().any(|tool| tool.name == "add_numbers") {
+                                anyhow::bail!(
+                                    "MCP conformance tools_call scenario did not expose add_numbers"
+                                );
+                            }
+                            let result = client
+                                .call_tool("add_numbers", serde_json::json!({ "a": 40, "b": 2 }))
+                                .await?;
+                            let expected = result
+                                .pointer("/content/0/text")
+                                .and_then(serde_json::Value::as_str)
+                                .map(|text| text.contains("42"))
+                                .unwrap_or(false);
+                            if !expected {
+                                anyhow::bail!(
+                                    "MCP conformance tools_call scenario returned an unexpected result"
+                                );
+                            }
+                        }
+                        scenario => {
+                            anyhow::bail!(
+                                "Unsupported MCP conformance scenario '{}'; Kerna currently validates only the official core stdio-compatible scenarios",
+                                scenario
+                            );
+                        }
                     }
                 }
                 None | Some(McpCommands::List) => {

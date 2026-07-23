@@ -5,6 +5,12 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
+/// Current MCP protocol revision advertised by Kerna's stdio client.
+///
+/// The client continues to accept an older revision returned by a compatible
+/// server; negotiation is completed by the server's initialize response.
+pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct McpTool {
     pub name: String,
@@ -163,7 +169,7 @@ impl McpClient {
             "jsonrpc": "2.0",
             "method": "initialize",
             "params": {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {
                     "name": "Kerna",

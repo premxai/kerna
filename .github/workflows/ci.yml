@@ -68,12 +68,24 @@ jobs:
       if: matrix.os == 'ubuntu-latest'
       run: node benchmarks/kerna-trust/run.mjs --out reports/kerna-trust/ci.json
 
+    - name: Run official MCP core client conformance
+      if: matrix.os == 'ubuntu-latest'
+      run: node benchmarks/mcp-conformance/run.mjs --out reports/mcp-conformance/ci
+
     - name: Upload Kerna Trust Bench report
       if: always() && matrix.os == 'ubuntu-latest'
       uses: actions/upload-artifact@v4
       with:
         name: kerna-trust-bench
         path: reports/kerna-trust/ci.json
+        if-no-files-found: error
+
+    - name: Upload MCP conformance report
+      if: always() && matrix.os == 'ubuntu-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: mcp-conformance
+        path: reports/mcp-conformance/ci
         if-no-files-found: error
 
     - name: Validate AgentDojo bridge scripts
