@@ -15,7 +15,7 @@ This is the execution order and publication contract for Kerna's complete benchm
 | Budget accuracy | Are all hard limits enforced? | Deterministic budget tests | Configured versus observed limits | 100% enforcement |
 | Observability | Can each decision be reconstructed? | Receipt completeness and replay suite | Execution trace versus SQLite receipts | 100% required-event coverage |
 | Tool correctness | Can providers make valid tool calls? | BFCL | Provider/model configurations | Publish compatibility and schema validity |
-| Tool-agent utility | Does governance preserve multi-step work? | tau-bench via an MCP adapter | Native, permissive, governed | Completion and false-block rate |
+| Tool-agent utility | Does governance preserve multi-step work? | tau3 via an MCP gateway adapter | Native, permissive, governed | Completion and false-block rate |
 | Tool-use safety | Does Kerna stop demonstrated unsafe work? | AgentDojo and ToolEmu via MCP adapters | Matched native and governed runs | Only publish prevention with successful control attacks |
 | Browser and desktop | Does Kerna support productivity at the computer boundary? | WASP, WebArena, then OSWorld | Same task and model in each arm | Only after supported plugins ship |
 | Terminal and coding | Does Kerna govern terminal/coding tools? | Terminal-use suite, then SWE-bench | Same task and model in each arm | Only after an official product pack ships |
@@ -31,6 +31,7 @@ This is the execution order and publication contract for Kerna's complete benchm
 | Performance | Published, scoped transport baseline | 30 process runs and 900 MockMCP echo calls on the named Windows host |
 | Reliability | Published, scoped restart soak | 120 clean Kerna/MockMCP restarts and 2,400 local tool calls |
 | Tool correctness | Published, bounded provider pilot | BFCL: 10 / 10 fixed non-live function-call cases for `gpt-4.1-nano-2025-04-14-FC` |
+| Tool-agent utility | Prepared, no score published | Pinned tau3 native retail control and gateway-adapter invariants |
 | Tool-use safety | External control matrix published | AgentDojo: 48 native trials, 35 useful, 0 injected tasks satisfied |
 | Remaining scorecards | Planned | No public result before an adapter and protocol exist |
 
@@ -99,7 +100,7 @@ These are release gates, not marketing percentages. A failure blocks release.
 ### Phase 2: provider and tool compatibility
 
 1. Run BFCL for every provider/model Kerna documents as supported.
-2. Build a tau-bench MCP adapter.
+2. Build a tau3 MCP gateway adapter.
 3. Run a pre-registered native, permissive, and governed utility pilot.
 4. Publish compatibility by provider/model, never as evidence that Kerna made a model more intelligent.
 
@@ -128,7 +129,7 @@ Do not run OSWorld or SWE-bench merely for a familiar name. They are costly and 
 | 2 | Performance, budget, receipt, and soak runners | Free | Proves core runtime quality independent of a model |
 | 3 | Result schema and redaction validator | Free | Makes all public artifacts reproducible and safe |
 | 4 | BFCL provider pilot | Low API cost | Identifies viable tool-calling providers |
-| 5 | tau-bench MCP utility pilot | Moderate API cost | Measures multi-turn utility and governance overhead |
+| 5 | tau3 MCP utility pilot | Moderate API cost | Measures multi-turn utility and governance overhead |
 | 6 | AgentDojo expanded matrix | Controlled API cost | Gives a prevention rate only when controls are compromised |
 | 7 | ToolEmu adapter and evaluation | Moderate API cost | Adds an independent safety methodology |
 | 8 | WASP and WebArena | High setup/API cost | Covers browser workflows after product support |
@@ -144,7 +145,7 @@ Every result page includes the scorecard and claim, source revision, configurati
 - [ToolEmu](https://github.com/ryoungj/toolemu)
 - [MCP Conformance](https://www.npmjs.com/package/@modelcontextprotocol/conformance)
 - [BFCL](https://gorilla.cs.berkeley.edu/leaderboard)
-- [tau-bench](https://github.com/sierra-research/tau2-bench)
+- [tau3](https://github.com/sierra-research/tau2-bench)
 - [WASP](https://github.com/facebookresearch/wasp)
 - [WebArena](https://github.com/web-arena-x/webarena)
 - [OSWorld](https://github.com/xlang-ai/osworld)

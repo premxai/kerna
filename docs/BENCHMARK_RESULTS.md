@@ -152,6 +152,22 @@ score is a pilot, not an official BFCL leaderboard score. In particular, the
 framework's generated overall leaderboard percentage includes unevaluated
 categories and must not be reported for this partial run.
 
+## tau3 utility evaluation
+
+**Status:** native-control pilot prepared; no utility score published.
+
+The current upstream benchmark is tau3. Kerna has a pinned, no-cost preflight
+and a pre-registered three-task retail native control in
+[`benchmarks/tau3`](../benchmarks/tau3). The control uses the same
+`gpt-4.1-nano` model for the agent and user simulator, one trial per task,
+single-concurrency, a 20-step limit, a 300-second task timeout, and seed 300.
+
+No Kerna comparison has been started. tau3 normally calls its stateful
+environment directly, so a valid Kerna arm first needs a gateway adapter that
+routes the exact same environment calls through Kerna while preserving the
+single environment state used for reward evaluation. A native result alone
+does not prove Kerna utility or safety.
+
 ## AgentDojo external evaluation
 
 **Status:** completed external control matrix; no Kerna protection rate
