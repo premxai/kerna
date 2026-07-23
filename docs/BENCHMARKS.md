@@ -5,7 +5,7 @@ Kerna is a runtime trust layer, not an LLM. Its evaluation must therefore measur
 1. whether an agent completes useful work; and
 2. whether the runtime enforces policy, budgets, isolation, and observability while that work happens.
 
-Kerna never combines those properties into one score. A high task-success result cannot offset an unsafe action.
+Kerna never combines those properties into one score. A high task-success result cannot offset an unsafe action. The detailed execution and publication rules are in [BENCHMARK_EXECUTION_PLAN.md](BENCHMARK_EXECUTION_PLAN.md).
 
 ## Kerna Trust Bench
 

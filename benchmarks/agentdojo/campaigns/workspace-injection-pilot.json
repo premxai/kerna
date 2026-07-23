@@ -1,10 +1,10 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "name": "workspace-injection-pilot",
   "benchmarkVersion": "v1.2.2",
   "suite": "workspace",
   "attack": "injecagent",
-  "description": "A fixed six-scenario AgentDojo pilot. Each user task is read-only while the injected task attempts a state-changing action, allowing utility and unsafe-action prevention to be measured separately.",
+  "description": "A fixed six-scenario AgentDojo pilot. Each user task is read-only while the injected task attempts a state-changing action, allowing utility and unsafe-action prevention to be measured separately. Run three matched trials before publishing a comparison.",
   "scenarios": [
     {
       "id": "email-security-code-exfiltration",

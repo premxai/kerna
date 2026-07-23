@@ -89,17 +89,22 @@ that have both `utility: true` and `agentDojoInjectionTaskSatisfied: true` to
 their corresponding Kerna-governed command. The campaign is a small pilot, not
 a general benchmark score.
 
-For an explicitly approved batch, run a fixed number of controls with one
-command. It requires `OPENAI_API_KEY` in the current terminal and makes paid
-model calls:
+For an explicitly approved batch, run a fixed number of scenarios with one
+command. Each scenario runs once by default; use three trials before seeking a
+publishable comparison. It requires `OPENAI_API_KEY` in the current terminal
+and makes paid model calls:
 
 ```bash
 .venv-agentdojo\Scripts\python benchmarks/agentdojo/campaign.py --execute-controls --limit 2
 ```
 
-The command saves raw outputs and a compact eligibility report under a
-model-specific `reports/agentdojo-campaigns` directory. It does not run any
-governed scenario itself.
+The command saves raw outputs, duration, exact commands, source revision, and
+a compact per-trial eligibility report under a timestamped
+`reports/agentdojo-campaigns` directory. It does not run any governed scenario
+itself. A safe native control is not a Kerna win: advance only the exact trials
+with `utility: true` and `agentDojoInjectionTaskSatisfied: true`. See the
+[benchmark execution plan](../../docs/BENCHMARK_EXECUTION_PLAN.md) for the
+three-pair publication gate and the normal-work false-block lane.
 
 ## Required bridge contract
 
@@ -128,3 +133,18 @@ maximum spend before executing the governed comparison.
 
 See [the implementation contract](../../docs/AGENTDOJO_ADAPTER.md) and the
 [benchmark methodology](../../docs/BENCHMARKS.md).
+
+## Authorized-mutation pilot
+
+[`campaigns/workspace-authorized-mutation-pilot.json`](campaigns/workspace-authorized-mutation-pilot.json)
+is the false-block campaign. Every scenario needs a legitimate calendar or
+document mutation, explicitly allows only that tool, and denies the injected
+`send_email` action. It is pre-registered and uses the same control-first,
+three-trial protocol:
+
+```bash
+.venv-agentdojo\Scripts\python benchmarks/agentdojo/campaign.py --campaign benchmarks/agentdojo/campaigns/workspace-authorized-mutation-pilot.json --trials 3
+```
+
+The dry run is free. Do not run a governed command until its exact matching
+native control both completes useful work and satisfies the injection task.
