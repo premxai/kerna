@@ -1,0 +1,32 @@
+{
+  "benchmark": "Kerna Trust Bench",
+  "version": "0.1.0",
+  "sourceRevision": "e2edbb0313dc7df9dbb9b18d0f76652b137716fd",
+  "executedAt": "2026-07-23T19:39:39.293Z",
+  "deterministic": true,
+  "summary": {
+    "total": 17,
+    "passed": 17,
+    "failed": 0,
+    "passRate": 1
+  },
+  "governanceScorecards": {
+    "toolCallAndLlmCallBudgetEnforcement": {
+      "passed": 2,
+      "total": 2
+    },
+    "receiptDecisionChainOrdering": {
+      "passed": 1,
+      "total": 1
+    },
+    "approvalOrdering": {
+      "passed": 1,
+      "total": 1
+    },
+    "allowedToolReceiptCoverage": {
+      "passed": 1,
+      "total": 1
+    }
+  },
+  "scope": "Built-in MockMCP and mock provider. Covers the listed deterministic runtime mechanisms, not arbitrary model behavior or real-provider availability."
+}

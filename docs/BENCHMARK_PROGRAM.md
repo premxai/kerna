@@ -25,6 +25,8 @@ This is the execution order and publication contract for Kerna's complete benchm
 | Scorecard | Status | Evidence |
 | --- | --- | --- |
 | Runtime boundary | Published | Kerna Trust Bench: 17 / 17 deterministic scenarios pass |
+| Budget accuracy | Published, deterministic | Tool-call and LLM-call budget scenarios: 2 / 2 pass |
+| Observability | Published, deterministic | Receipt decision-chain ordering: 1 / 1 passes |
 | MCP compatibility | Published, scoped core | Official core client conformance: 2 / 2 scenarios pass through the stdio bridge |
 | Performance | Published, scoped transport baseline | 30 process runs and 900 MockMCP echo calls on the named Windows host |
 | Reliability | Published, scoped restart soak | 120 clean Kerna/MockMCP restarts and 2,400 local tool calls |

@@ -9,7 +9,7 @@ actually measure; no utility or safety result is combined into a single score.
 
 | Field | Result |
 | --- | --- |
-| Source revision | `8026567` |
+| Source revision | `e2edbb0` |
 | Execution | Local, deterministic, no model provider or API key |
 | Scenarios | 17 |
 | Passed | 17 |
@@ -31,6 +31,19 @@ The new `allowed-action-denied-action-same-task` scenario verifies the core
 least-privilege claim in one task: an allowed `echo` action completes, while a
 distinct denied `network_probe` action receives a `Deny` policy receipt and
 never emits `tool.call.started`.
+
+The current release run also splits this deterministic result into distinct
+governance scorecards:
+
+| Scorecard | Current deterministic result |
+| --- | --- |
+| Tool-call and LLM-call budget enforcement | 2 / 2 scenarios passed |
+| Receipt decision-chain ordering | 1 / 1 scenario passed |
+| Approval ordering | 1 / 1 scenario passed |
+| Allowed tool receipt coverage | 1 / 1 scenario passed |
+
+The redacted current aggregate is
+[`kerna-trust-release-20260723.json`](benchmark-data/kerna-trust-release-20260723.json).
 
 ### Interpretation
 
