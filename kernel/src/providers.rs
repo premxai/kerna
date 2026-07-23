@@ -275,6 +275,9 @@ pub fn estimate_cost_usd(model: &str, total_tokens: u64) -> Option<f64> {
         ("gpt-4o-mini", 0.30),
         ("gpt-4o", 5.00),
         ("gpt-4.1-mini", 0.40),
+        // GPT-4.1 nano is $0.10 input / $0.40 output per 1M tokens.
+        // Keep the table's documented blended-estimate convention.
+        ("gpt-4.1-nano", 0.25),
         ("gpt-4.1", 5.00),
         ("o1-mini", 3.00),
         ("o1", 15.00),
@@ -372,6 +375,7 @@ mod tests {
     #[test]
     fn cost_known_and_unknown() {
         assert!(estimate_cost_usd("gpt-4o-mini", 1_000_000).is_some());
+        assert!(estimate_cost_usd("gpt-4.1-nano", 1_000_000).is_some());
         assert!(estimate_cost_usd("some-random-model", 1000).is_none());
     }
 }
