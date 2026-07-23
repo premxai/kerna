@@ -643,6 +643,13 @@ pub enum McpCommands {
         #[arg(index = 1)]
         server_url: String,
     },
+    /// Measure the isolated stdio MCP client path against the built-in MockMCP.
+    #[command(hide = true)]
+    BenchmarkEcho {
+        /// Number of echo calls made after a single initialization.
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=10_000))]
+        iterations: u32,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1489,6 +1496,58 @@ async fn main() -> Result<()> {
                             );
                         }
                     }
+                }
+                Some(McpCommands::BenchmarkEcho { iterations }) => {
+                    // This intentionally benchmarks only the process-isolated
+                    // stdio client path. It is deterministic, has no provider
+                    // call, and does not represent scheduler or model latency.
+                    let executable = std::env::current_exe()?;
+                    let executable = executable
+                        .to_str()
+                        .ok_or_else(|| anyhow::anyhow!("Kerna executable path is not UTF-8"))?;
+                    let args = ["mockmcp"];
+                    let started = std::time::Instant::now();
+                    let mut client = mcp::McpClient::spawn(
+                        executable,
+                        &args,
+                        "native",
+                        "",
+                        "bridge",
+                        None,
+                        &[],
+                    )?;
+                    client.initialize().await?;
+                    let initialized_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+                    let discovery_started = std::time::Instant::now();
+                    let tools = client.list_tools().await?;
+                    let discovery_ms = discovery_started.elapsed().as_secs_f64() * 1000.0;
+                    if !tools.iter().any(|tool| tool.name == "echo") {
+                        anyhow::bail!("MockMCP benchmark fixture did not expose echo");
+                    }
+
+                    let mut calls_ms = Vec::with_capacity(iterations as usize);
+                    for _ in 0..iterations {
+                        let call_started = std::time::Instant::now();
+                        let result = client
+                            .call_tool("echo", serde_json::json!({ "message": "benchmark" }))
+                            .await?;
+                        if result.is_null() {
+                            anyhow::bail!("MockMCP benchmark echo returned null");
+                        }
+                        calls_ms.push(call_started.elapsed().as_secs_f64() * 1000.0);
+                    }
+
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "benchmark": "kerna-mcp-stdio-echo",
+                            "protocolVersion": mcp::MCP_PROTOCOL_VERSION,
+                            "initializationMs": initialized_ms,
+                            "toolDiscoveryMs": discovery_ms,
+                            "toolCallMs": calls_ms,
+                        })
+                    );
                 }
                 None | Some(McpCommands::List) => {
                     println!("Kerna MCP Servers\n");

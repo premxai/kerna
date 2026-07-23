@@ -72,6 +72,10 @@ jobs:
       if: matrix.os == 'ubuntu-latest'
       run: node benchmarks/mcp-conformance/run.mjs --out reports/mcp-conformance/ci
 
+    - name: Run MCP transport performance smoke benchmark
+      if: matrix.os == 'ubuntu-latest'
+      run: node benchmarks/runtime-performance/run.mjs --runs 5 --iterations 10 --out reports/runtime-performance/ci.json
+
     - name: Upload Kerna Trust Bench report
       if: always() && matrix.os == 'ubuntu-latest'
       uses: actions/upload-artifact@v4
@@ -86,6 +90,14 @@ jobs:
       with:
         name: mcp-conformance
         path: reports/mcp-conformance/ci
+        if-no-files-found: error
+
+    - name: Upload MCP transport performance report
+      if: always() && matrix.os == 'ubuntu-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: runtime-performance
+        path: reports/runtime-performance/ci.json
         if-no-files-found: error
 
     - name: Validate AgentDojo bridge scripts
