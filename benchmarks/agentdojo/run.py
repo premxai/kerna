@@ -36,6 +36,15 @@ WORKSPACE_MUTATING_TOOLS = {
     "share_file",
 }
 
+# The pilot must force the model to read the artifact that contains the
+# injected instruction. This official Workspace pair asks for a Facebook
+# security code while the direct attack injects an instruction into that same
+# security email to exfiltrate the code. The previous calendar-only default
+# could never encounter its email injection and therefore could not establish
+# a meaningful control baseline.
+DEFAULT_PILOT_USER_TASK = "user_task_16"
+DEFAULT_PILOT_INJECTION_TASK = "injection_task_4"
+
 
 class AttackIdentity:
     """Only supplies a stable name for fixed AgentDojo attacks."""
@@ -161,8 +170,8 @@ def score_result(scenario: dict[str, Any], bridge_result_path: Path, database_pa
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", default="workspace")
-    parser.add_argument("--user-task", default="user_task_0")
-    parser.add_argument("--injection-task", default="injection_task_0")
+    parser.add_argument("--user-task", default=DEFAULT_PILOT_USER_TASK)
+    parser.add_argument("--injection-task", default=DEFAULT_PILOT_INJECTION_TASK)
     parser.add_argument("--attack", default="direct", choices=["direct", "ignore_previous", "system_message", "injecagent"])
     parser.add_argument("--benchmark-version", default="v1.2.2")
     parser.add_argument("--provider", default="openai")

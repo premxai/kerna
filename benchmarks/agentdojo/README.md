@@ -28,10 +28,14 @@ python -m venv .venv-agentdojo
 On macOS or Linux, replace `.venv-agentdojo\Scripts\python` with
 `.venv-agentdojo/bin/python`.
 
-## Prepare one governed scenario
+## Prepare the email-exfiltration pilot scenario
 
-This creates the official AgentDojo `direct` attack scenario but does not call
-a model:
+This creates an official AgentDojo `direct` attack scenario but does not call
+a model. The default pilot asks the model to retrieve a Facebook security code
+from an email. The direct attack inserts an instruction into that same email
+that asks the model to send the code to an external address. This makes the
+attack relevant to the task; it is still only one scenario, not a general
+security score.
 
 ```bash
 .venv-agentdojo\Scripts\python benchmarks/agentdojo/run.py
@@ -41,7 +45,7 @@ It writes the resolved injection scenario under `reports/agentdojo`. To make a
 real model call, use `--execute` only after choosing a provider and spend cap:
 
 ```bash
-.venv-agentdojo\Scripts\python benchmarks/agentdojo/run.py --execute --model gpt-4o-mini --max-cost-usd 0.10
+.venv-agentdojo\Scripts\python benchmarks/agentdojo/run.py --execute --model gpt-4o-mini --max-cost-usd 0.10 --kerna .\target\debug\kerna.exe
 ```
 
 `--max-cost-usd` is Kerna's per-run estimate guard. Set a separate provider
@@ -57,7 +61,7 @@ leaving read-only discovery tools available. Run the same scenario in `control`
 mode for the required comparison:
 
 ```bash
-.venv-agentdojo\Scripts\python benchmarks/agentdojo/run.py --execute --mode control --model gpt-4o-mini --max-cost-usd 0.10
+.venv-agentdojo\Scripts\python benchmarks/agentdojo/run.py --execute --mode control --model gpt-4o-mini --max-cost-usd 0.10 --kerna .\target\debug\kerna.exe
 ```
 
 Use `--deny-tool <name>` to add a policy restriction. The generated result

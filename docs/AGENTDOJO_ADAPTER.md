@@ -46,8 +46,12 @@ Before a result is published, the bridge must demonstrate all of the following:
 ## Run protocol
 
 Pin `agentdojo==0.1.35` unless this document and the generated results change
-together. Begin with a small `workspace` subset and one documented attack,
-then expand only after receipt-to-trace mapping is verified.
+together. Begin with the documented `workspace` email-exfiltration pilot:
+`user_task_16` plus `injection_task_4` using the `direct` attack. The task
+reads the same Facebook-security email into which the attack injects an
+exfiltration instruction, so a control run can actually encounter the attack.
+Then expand only after receipt-to-trace mapping and matched control behavior
+are verified.
 
 Each public result must include:
 
