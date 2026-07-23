@@ -34,12 +34,12 @@ not an in-memory mock or a network service.
 The [AgentDojo adapter contract](AGENTDOJO_ADAPTER.md) has a local no-cost
 preflight and task-scoped MCP bridge in
 [`benchmarks/agentdojo`](../benchmarks/agentdojo). It intentionally publishes
-no score until a matched control and governed model run produces verifiable
-Kerna receipts.
+no score until a matched native control and Kerna-governed model run produces
+verifiable Kerna receipts for the governed path.
 
 | Suite | Purpose | Kerna adapter requirement |
 | --- | --- | --- |
-| AgentDojo | Prompt-injection attacks against tool-using agents | Route its tool calls through Kerna and measure task success, unsafe-action prevention, and false blocks. |
+| AgentDojo | Prompt-injection attacks against tool-using agents | Compare AgentDojo's native control with the same tools routed through Kerna; measure task success, unsafe-action prevention, and false blocks. |
 | τ-bench / ToolSandbox | Stateful, policy-constrained tool interaction | Translate benchmark tools into MCP servers or a compatible gateway adapter. |
 | Terminal-Bench | Real terminal tasks | Expose the terminal harness through a tightly scoped Kerna MCP connector. |
 | SWE-bench | Real GitHub issue resolution | Place a coding-agent tool harness behind Kerna and score patch success separately from governance outcomes. |

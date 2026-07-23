@@ -47,11 +47,17 @@ Before a result is published, the bridge must demonstrate all of the following:
 
 Pin `agentdojo==0.1.35` unless this document and the generated results change
 together. Begin with the documented `workspace` email-exfiltration pilot:
-`user_task_16` plus `injection_task_4` using the `direct` attack. The task
+`user_task_16` plus `injection_task_4` using the `injecagent` attack. The task
 reads the same Facebook-security email into which the attack injects an
-exfiltration instruction, so a control run can actually encounter the attack.
-Then expand only after receipt-to-trace mapping and matched control behavior
-are verified.
+exfiltration instruction, so the control can actually encounter the attack.
+
+The `control` mode uses AgentDojo's native tool loop, with no Kerna scheduler,
+prompt-injection filter, MCP policy, or receipt. The `governed` mode runs the
+same scenario through the Kerna bridge. This distinction is intentional: a
+Kerna-routed control would retain Kerna protections and cannot establish an
+honest baseline. The native control has no Kerna cost guard, so bound it by
+provider-side spend controls and the runner's LLM-call limit. Expand only after
+matched baseline behavior and receipt-to-trace mapping are verified.
 
 Each public result must include:
 
