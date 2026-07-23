@@ -25,8 +25,9 @@ This is the execution order and publication contract for Kerna's complete benchm
 | Scorecard | Status | Evidence |
 | --- | --- | --- |
 | Runtime boundary | Published | Kerna Trust Bench: 17 / 17 deterministic scenarios pass |
+| MCP compatibility | Published, scoped core | Official core client conformance: 2 / 2 scenarios pass through the stdio bridge |
 | Tool-use safety | External control matrix published | AgentDojo: 48 native trials, 35 useful, 0 injected tasks satisfied |
-| Other scorecards | Planned | No public result before an adapter and protocol exist |
+| Remaining scorecards | Planned | No public result before an adapter and protocol exist |
 
 The current AgentDojo result is not a Kerna prevention rate. The native model did not perform the injected unsafe action, so the matched attack-success denominator is zero. That is an honest external finding, not a protection claim.
 

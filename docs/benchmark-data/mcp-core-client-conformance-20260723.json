@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-23T17:23:29Z",
+  "sourceRevision": "d78a1ff8a9c7885602c14b057adc723de8b3b166",
+  "kernaPackageVersion": "0.2.3",
+  "host": {
+    "operatingSystem": "Windows",
+    "execution": "local"
+  },
+  "framework": {
+    "package": "@modelcontextprotocol/conformance",
+    "version": "0.1.16",
+    "specVersion": "2025-06-18"
+  },
+  "transport": {
+    "kernaProductTransport": "stdio child process",
+    "testBridgePackage": "mcp-remote@0.1.38",
+    "bridgePurpose": "local HTTP conformance scenario server to isolated Kerna stdio client"
+  },
+  "scenarios": [
+    {
+      "name": "initialize",
+      "passed": true,
+      "validated": [
+        "protocolVersion",
+        "clientInfo",
+        "initialize response handling"
+      ]
+    },
+    {
+      "name": "tools_call",
+      "passed": true,
+      "validated": [
+        "tools/list",
+        "tools/call",
+        "add_numbers(40, 2) returns 42"
+      ]
+    }
+  ],
+  "result": {
+    "passedScenarios": 2,
+    "failedScenarios": 0,
+    "scope": "Official core client semantics through the test-only HTTP-to-stdio bridge."
+  },
+  "notClaimed": [
+    "native remote HTTP transport",
+    "OAuth",
+    "SSE reconnection",
+    "elicitation",
+    "resources",
+    "prompts"
+  ]
+}

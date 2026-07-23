@@ -38,6 +38,32 @@ This is a runtime-mechanism result. It demonstrates that the listed Kerna
 controls work deterministically for the included scenarios. It does not claim
 that an arbitrary model will complete arbitrary real-world work safely.
 
+## MCP core client conformance
+
+**Status:** passed for the supported stdio-client core.
+
+| Field | Result |
+| --- | --- |
+| Source revision | `d78a1ff` |
+| Kerna package version | `0.2.3` |
+| Host | Windows, local release run |
+| Official framework | `@modelcontextprotocol/conformance@0.1.16` |
+| MCP revision advertised by Kerna | `2025-06-18` |
+| Test transport | Pinned `mcp-remote@0.1.38` bridge from local HTTP scenario server to Kerna stdio child process |
+| Official core scenarios | 2 / 2 passed |
+
+The passed scenarios are `initialize` and `tools_call`. The latter verifies
+that Kerna discovered the official `add_numbers` tool and called it with
+`40 + 2 = 42`. The reproducible runner is
+[`benchmarks/mcp-conformance/run.mjs`](../benchmarks/mcp-conformance/run.mjs)
+and the committed aggregate is
+[`mcp-core-client-conformance-20260723.json`](benchmark-data/mcp-core-client-conformance-20260723.json).
+
+This is a **stdio-client semantic** result. Kerna does not currently advertise
+native remote HTTP transport, OAuth, SSE reconnection, elicitation, resources,
+or prompts. Those features have no passing conformance claim until product
+support and their individual official scenarios are added.
+
 ## AgentDojo external evaluation
 
 **Status:** completed external control matrix; no Kerna protection rate
