@@ -339,6 +339,10 @@ def main() -> int:
     }
 
     run_root = args.output.resolve() / f"{args.suite}-{args.user_task}-{args.injection_task}-{args.attack}-{args.mode}"
+    if sys.platform == "win32" and len(str(run_root)) > 240:
+        raise RuntimeError(
+            "AgentDojo artifact path is too long for Windows. Use a shorter --output directory."
+        )
     run_root.mkdir(parents=True, exist_ok=True)
     scenario_path = run_root / "scenario.json"
     bridge_result_path = run_root / "bridge-state.json"

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -65,7 +66,11 @@ def command_for(
     mode: str, scenario: dict[str, Any], args: argparse.Namespace, trial: int
 ) -> list[str]:
     """Create a command with an isolated artifact directory for one trial."""
-    artifact_root = args.output / "runs" / f"{scenario['id']}-{mode}-trial-{trial:02d}"
+    # Keep paths comfortably below Windows' common 260-character limit. The
+    # human-readable scenario ID remains in the enclosing plan and result;
+    # this short stable digest only names the on-disk trial directory.
+    scenario_digest = hashlib.sha256(scenario["id"].encode("utf-8")).hexdigest()[:8]
+    artifact_root = args.output / "runs" / f"{mode[0]}{trial:02d}-{scenario_digest}"
     command = [
         sys.executable,
         "benchmarks/agentdojo/run.py",
