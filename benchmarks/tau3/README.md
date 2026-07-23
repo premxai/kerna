@@ -6,19 +6,21 @@ is currently `1d244f5dca42944b67a379b44bfeb9f5748f189d`.
 
 ## What is pre-registered
 
-The first native control is intentionally small and reproducible:
+The first native calibration is intentionally small and reproducible:
 
 - domain: `retail`
 - task IDs: `0`, `1`, `2`
 - trials: one per task
-- agent and user simulator: `gpt-4.1-nano`
+- agent and user simulator: `gpt-4o-mini`
 - concurrency: one
-- max steps: 20
+- max steps: 60
 - timeout: 300 seconds per task
 - seed: 300
 
-This control measures only tau3 agent utility. It must finish and be reviewed
-before launching a matched Kerna arm.
+This calibration measures only tau3 agent utility. It must finish and be
+reviewed before pre-registering a matched Kerna arm. The first attempted
+configuration used `gpt-4.1-nano` with a 20-step limit; all three tasks hit
+that ceiling, so it is retained only as an unpublished calibration failure.
 
 ## Why a native result is not enough
 
@@ -68,6 +70,6 @@ already set:
 python benchmarks\tau3\run_native.py --execute
 ```
 
-This creates a native-control result only. Do not publish it as a Kerna result,
-and do not launch a governed comparison until the gateway adapter contract
-above is automated and verified.
+This creates a native-calibration result only. Do not publish it as a Kerna
+result, and do not launch a governed comparison until the gateway adapter
+contract above is automated and verified.

@@ -19,21 +19,24 @@ TASK_IDS = ["0", "1", "2"]
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true", help="make the bounded native-control provider calls")
-    parser.add_argument("--model", default="gpt-4.1-nano", help="same LiteLLM model for agent and user simulator")
+    parser.add_argument("--model", default="gpt-4o-mini", help="same LiteLLM model for agent and user simulator")
+    parser.add_argument("--max-steps", type=int, default=60, help="conversation-step limit for this calibration")
     parser.add_argument("--out", default="reports/tau3/native-control-plan.json", help="wrapper JSON report path")
     args = parser.parse_args()
+    if not 20 <= args.max_steps <= 200:
+        raise SystemExit("--max-steps must be 20..200")
     if not TAU_ROOT.is_dir():
         raise SystemExit("Pinned tau3 checkout is missing. Run preflight first.")
     uv = shutil.which("uv")
     if uv is None:
         raise SystemExit("uv is required for the pinned tau3 checkout")
 
-    run_name = "kerna-native-retail-pilot-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_name = "kerna-native-retail-calibration-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     report = {
-        "benchmark": "tau3 native retail utility control",
+        "benchmark": "tau3 native retail utility calibration",
         "version": 1,
         "executedAt": datetime.now(timezone.utc).isoformat(),
-        "classification": "Native tau3 control only. This does not invoke Kerna and cannot support a Kerna utility or safety claim.",
+        "classification": "Native tau3 calibration only. This does not invoke Kerna and cannot support a Kerna utility or safety claim.",
         "configuration": {
             "domain": "retail",
             "taskIds": TASK_IDS,
@@ -43,7 +46,7 @@ def main() -> int:
             "agentModel": args.model,
             "userModel": args.model,
             "maxConcurrency": 1,
-            "maxSteps": 20,
+            "maxSteps": args.max_steps,
             "maxErrors": 5,
             "timeoutSeconds": 300,
             "seed": 300,
@@ -62,6 +65,7 @@ def main() -> int:
 
     environment = os.environ.copy()
     environment["PYTHONUTF8"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8"
     command = [
         uv, "run", "tau2", "run",
         "--domain", "retail",
@@ -72,7 +76,7 @@ def main() -> int:
         "--num-trials", "1",
         "--task-ids", *TASK_IDS,
         "--max-concurrency", "1",
-        "--max-steps", "20",
+        "--max-steps", str(args.max_steps),
         "--max-errors", "5",
         "--timeout", "300",
         "--seed", "300",

@@ -159,8 +159,8 @@ categories and must not be reported for this partial run.
 The current upstream benchmark is tau3. Kerna has a pinned, no-cost preflight
 and a pre-registered three-task retail native control in
 [`benchmarks/tau3`](../benchmarks/tau3). The control uses the same
-`gpt-4.1-nano` model for the agent and user simulator, one trial per task,
-single-concurrency, a 20-step limit, a 300-second task timeout, and seed 300.
+`gpt-4o-mini` model for the agent and user simulator, one trial per task,
+single-concurrency, a 60-step limit, a 300-second task timeout, and seed 300.
 
 No Kerna comparison has been started. tau3 normally calls its stateful
 environment directly, so a valid Kerna arm first needs a gateway adapter that
