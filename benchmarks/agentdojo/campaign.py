@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -81,6 +83,17 @@ def main() -> int:
     parser.add_argument("--max-llm-calls", type=int, default=4)
     parser.add_argument("--max-cost-usd", type=float, default=0.10)
     parser.add_argument("--kerna", default=".\\target\\debug\\kerna.exe" if sys.platform == "win32" else "./target/debug/kerna")
+    parser.add_argument(
+        "--execute-controls",
+        action="store_true",
+        help="Run native control scenarios. This makes provider API calls.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Maximum number of control scenarios to run; required with --execute-controls.",
+    )
     args = parser.parse_args()
     require_agentdojo()
 
@@ -127,7 +140,65 @@ def main() -> int:
     args.output.mkdir(parents=True, exist_ok=True)
     plan_path = args.output / f"{campaign['name']}-plan.json"
     plan_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
-    print(json.dumps({"planned": True, "plan": str(plan_path.resolve()), "scenarioCount": len(planned_scenarios)}, indent=2))
+    if not args.execute_controls:
+        print(json.dumps({"planned": True, "plan": str(plan_path.resolve()), "scenarioCount": len(planned_scenarios)}, indent=2))
+        return 0
+
+    if args.limit <= 0:
+        raise RuntimeError("--execute-controls requires a positive --limit so campaign spend stays explicit.")
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY is not set in this terminal session.")
+
+    selected = planned_scenarios[: args.limit]
+    outcomes = []
+    for scenario in selected:
+        process = subprocess.run(
+            scenario["controlCommand"],
+            cwd=ROOT,
+            env=os.environ.copy(),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+        )
+        stdout_path = args.output / f"{scenario['id']}-control.stdout.txt"
+        stderr_path = args.output / f"{scenario['id']}-control.stderr.txt"
+        stdout_path.write_text(process.stdout, encoding="utf-8")
+        stderr_path.write_text(process.stderr, encoding="utf-8")
+        try:
+            result = json.loads(process.stdout)
+        except json.JSONDecodeError:
+            result = {}
+        eligible = bool(
+            process.returncode == 0
+            and result.get("utility") is True
+            and result.get("agentDojoInjectionTaskSatisfied") is True
+        )
+        outcomes.append(
+            {
+                "id": scenario["id"],
+                "returnCode": process.returncode,
+                "utility": result.get("utility"),
+                "agentDojoInjectionTaskSatisfied": result.get("agentDojoInjectionTaskSatisfied"),
+                "eligibleForGoverned": eligible,
+                "stdout": str(stdout_path.resolve()),
+                "stderr": str(stderr_path.resolve()),
+            }
+        )
+
+    outcome_path = args.output / f"{campaign['name']}-control-results.json"
+    outcome_path.write_text(json.dumps({"outcomes": outcomes}, indent=2), encoding="utf-8")
+    print(
+        json.dumps(
+            {
+                "completed": True,
+                "controlsRun": len(outcomes),
+                "eligibleForGoverned": [item["id"] for item in outcomes if item["eligibleForGoverned"]],
+                "results": str(outcome_path.resolve()),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

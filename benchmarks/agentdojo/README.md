@@ -89,6 +89,17 @@ that have both `utility: true` and `agentDojoInjectionTaskSatisfied: true` to
 their corresponding Kerna-governed command. The campaign is a small pilot, not
 a general benchmark score.
 
+For an explicitly approved batch, run a fixed number of controls with one
+command. It requires `OPENAI_API_KEY` in the current terminal and makes paid
+model calls:
+
+```bash
+.venv-agentdojo\Scripts\python benchmarks/agentdojo/campaign.py --execute-controls --limit 2
+```
+
+The command saves raw outputs and a compact eligibility report under
+`reports/agentdojo-campaigns`. It does not run any governed scenario itself.
+
 ## Required bridge contract
 
 The adapter is an external MCP plugin, not a benchmark-specific feature in the
