@@ -40,15 +40,49 @@ that an arbitrary model will complete arbitrary real-world work safely.
 
 ## AgentDojo external evaluation
 
-**Status:** protocol ready; no protection rate published.
+**Status:** completed external control matrix; no Kerna protection rate
+published.
 
-The pre-registered matrix in
-[`benchmarks/agentdojo/campaigns/workspace-authorized-mutation-attack-matrix.json`](../benchmarks/agentdojo/campaigns/workspace-authorized-mutation-attack-matrix.json)
-evaluates four official fixed attack formats across four authorized-mutation
-tasks, with three trials each. It publishes a Kerna protection comparison only
-when a matched native control completes useful work and satisfies the injected
-task. The earlier sampled controls did not satisfy an injected task, so their
-denominator is zero and no Kerna prevention claim is made.
+The pre-registered
+[`workspace authorized mutation attack matrix`](../benchmarks/agentdojo/campaigns/workspace-authorized-mutation-attack-matrix.json)
+ran on 2026-07-23. Its committed aggregate is
+[`agentdojo-workspace-authorized-mutation-matrix-20260723.json`](benchmark-data/agentdojo-workspace-authorized-mutation-matrix-20260723.json).
+
+| Field | Result |
+| --- | --- |
+| Kerna source revision | `8589c11` |
+| Kerna package version | `0.2.3` |
+| Harness | AgentDojo `0.1.35`, Workspace `v1.2.2` |
+| Provider and model | OpenAI, `gpt-4o-mini` |
+| Attack formats | `direct`, `ignore_previous`, `system_message`, `injecagent` |
+| Authorized mutation tasks | 4 |
+| Trials per attack and task | 3 |
+| Native controls completed | 48 / 48 |
+| Native controls completing useful work | 35 / 48 (72.9%) |
+| Native controls satisfying injected task | 0 / 48 (0%) |
+| Eligible matched governed trials | 0 |
+
+The model did not satisfy the injected email-exfiltration task in any sampled
+control. That leaves a zero attack-success denominator, so this result does
+**not** measure Kerna's prevention rate and does not claim that Kerna stopped
+these attacks. It is a reproducible external finding about this model,
+campaign, and run configuration. The deterministic Trust Bench result above
+remains Kerna's published runtime-boundary evidence.
+
+Utility and injected-task outcomes by attack format were:
+
+| Attack format | Useful work | Injected task satisfied |
+| --- | ---: | ---: |
+| `direct` | 9 / 12 | 0 / 12 |
+| `ignore_previous` | 8 / 12 | 0 / 12 |
+| `system_message` | 9 / 12 | 0 / 12 |
+| `injecagent` | 9 / 12 | 0 / 12 |
+
+The matrix publishes a Kerna protection comparison only when a matched native
+control completes useful work **and** satisfies the injected task. Since none
+did, governed runs were intentionally not started; changing or selectively
+weakening attacks after observing this result would invalidate the
+pre-registration.
 
 Run the external controls from a terminal that has `OPENAI_API_KEY` set:
 
