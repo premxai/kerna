@@ -86,6 +86,28 @@ local tool-call path only. It excludes scheduler work, SQLite, provider and
 model latency, remote network time, and concurrency. It is a baseline for
 future same-machine release comparisons, not a universal performance claim.
 
+## MCP restart reliability soak
+
+**Status:** passed for the bounded local MockMCP fixture.
+
+| Field | Result |
+| --- | --- |
+| Source revision | `a3ce2d0` |
+| Host | Windows 11, Intel Core i7-14700HX |
+| Fresh Kerna process runs | 120 / 120 |
+| Built-in MockMCP child processes | 120 |
+| Expected / completed echo calls | 2,400 / 2,400 |
+| Failed process runs | 0 |
+| Total duration | 6.171 seconds |
+
+The redacted aggregate is
+[`mcp-stdio-restart-soak-windows-20260723.json`](benchmark-data/mcp-stdio-restart-soak-windows-20260723.json).
+Each iteration creates a new Kerna process, starts the isolated MockMCP child,
+initializes MCP, discovers tools, executes 20 local echo calls, and exits. This
+is a restart and child-process lifecycle signal. It does not claim external
+provider availability, model reliability, scheduler reliability, or a general
+operating-system orphan-process guarantee.
+
 ## AgentDojo external evaluation
 
 **Status:** completed external control matrix; no Kerna protection rate

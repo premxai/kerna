@@ -1,0 +1,24 @@
+{
+  "benchmark": "Kerna MCP stdio restart soak",
+  "version": 1,
+  "sourceRevision": "a3ce2d01ced376ac6d3d998e7e1cf959501c6e2f",
+  "executedAt": "2026-07-23T19:37:33.512Z",
+  "environment": {
+    "operatingSystem": "Windows 11, build 26200",
+    "architecture": "x64",
+    "cpuModel": "Intel Core i7-14700HX"
+  },
+  "configuration": {
+    "processRuns": 120,
+    "toolCallsPerRun": 20,
+    "expectedToolCalls": 2400,
+    "scope": "Repeated Kerna process startup, built-in MockMCP child-process spawn, initialize, discovery, echo calls, and clean process exit. Excludes scheduler, provider, network, and model behavior."
+  },
+  "result": {
+    "successfulRuns": 120,
+    "failedRuns": 0,
+    "completedToolCalls": 2400,
+    "durationMs": 6171.296,
+    "failures": []
+  }
+}
