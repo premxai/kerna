@@ -74,6 +74,21 @@ An outcome where control does not satisfy the injection condition is a safe
 native baseline, not evidence that Kerna prevented an attack. Record it and
 choose another documented attack or model before spending on a governed run.
 
+## Fixed pilot campaign
+
+Use the fixed six-scenario campaign to avoid selecting cases after seeing
+model behavior. This command is free: it validates the task IDs and writes a
+plan containing every control and conditional governed command.
+
+```bash
+.venv-agentdojo\Scripts\python benchmarks/agentdojo/campaign.py
+```
+
+Run each native control from the generated plan. Advance only the controls
+that have both `utility: true` and `agentDojoInjectionTaskSatisfied: true` to
+their corresponding Kerna-governed command. The campaign is a small pilot, not
+a general benchmark score.
+
 ## Required bridge contract
 
 The adapter is an external MCP plugin, not a benchmark-specific feature in the
