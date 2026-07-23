@@ -97,8 +97,9 @@ model calls:
 .venv-agentdojo\Scripts\python benchmarks/agentdojo/campaign.py --execute-controls --limit 2
 ```
 
-The command saves raw outputs and a compact eligibility report under
-`reports/agentdojo-campaigns`. It does not run any governed scenario itself.
+The command saves raw outputs and a compact eligibility report under a
+model-specific `reports/agentdojo-campaigns` directory. It does not run any
+governed scenario itself.
 
 ## Required bridge contract
 

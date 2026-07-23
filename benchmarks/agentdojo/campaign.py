@@ -77,7 +77,11 @@ def command_for(mode: str, scenario: dict[str, Any], args: argparse.Namespace) -
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign", type=Path, default=DEFAULT_CAMPAIGN)
-    parser.add_argument("--output", type=Path, default=Path("reports/agentdojo-campaigns"))
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Report directory. Defaults to a model-specific directory under reports/agentdojo-campaigns.",
+    )
     parser.add_argument("--provider", default="openai")
     parser.add_argument("--model", default="gpt-4o-mini")
     parser.add_argument("--max-llm-calls", type=int, default=4)
@@ -101,6 +105,12 @@ def main() -> int:
     args.suite = campaign["suite"]
     args.benchmark_version = campaign["benchmarkVersion"]
     args.attack = campaign["attack"]
+    if args.output is None:
+        model_directory = "".join(
+            character if character.isascii() and (character.isalnum() or character in "-_") else "_"
+            for character in args.model
+        )
+        args.output = Path("reports/agentdojo-campaigns") / f"{campaign['name']}-{model_directory}"
 
     from agentdojo.attacks import baseline_attacks  # noqa: F401 - registers fixed attacks
     from agentdojo.attacks.attack_registry import load_attack
