@@ -7,8 +7,8 @@ use crate::permissions::{PermissionLevel, PermissionManager};
 use crate::sandbox::ProcessSandbox;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::collections::HashSet;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -36,6 +36,52 @@ pub struct ToolCallRequest {
 pub struct FunctionCall {
     pub name: String,
     pub arguments: String,
+}
+
+/// Convert runtime tool names into names accepted by OpenAI-compatible function
+/// calling APIs. MCP permits names such as `fs.read`; those are valid within
+/// Kerna but OpenAI requires `[a-zA-Z0-9_-]+`. The returned map translates a
+/// provider-facing name back to the authoritative runtime name before policy
+/// checks or execution.
+fn provider_tool_catalog(mut tools: Vec<Value>) -> (Vec<Value>, HashMap<String, String>) {
+    let mut provider_to_runtime = HashMap::new();
+    let mut used_names = HashSet::new();
+
+    for tool in &mut tools {
+        let Some(runtime_name) = tool["function"]["name"].as_str().map(str::to_string) else {
+            continue;
+        };
+
+        let mut base: String = runtime_name
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if base.is_empty() {
+            base = "tool".to_string();
+        }
+        base.truncate(64);
+
+        let mut provider_name = base.clone();
+        let mut suffix = 2_u32;
+        while used_names.contains(&provider_name) {
+            let suffix_text = format!("_{suffix}");
+            let prefix_len = 64_usize.saturating_sub(suffix_text.len());
+            provider_name = format!("{}{}", &base[..base.len().min(prefix_len)], suffix_text);
+            suffix += 1;
+        }
+
+        used_names.insert(provider_name.clone());
+        tool["function"]["name"] = json!(provider_name.clone());
+        provider_to_runtime.insert(provider_name, runtime_name);
+    }
+
+    (tools, provider_to_runtime)
 }
 
 pub struct TaskScheduler {
@@ -218,6 +264,7 @@ impl TaskScheduler {
                     .map(|name| self.tool_is_allowed(name))
                     .unwrap_or(false)
             });
+            let (all_tools, provider_tool_names) = provider_tool_catalog(all_tools);
 
             self.memory.update_task_status(task_id, "running")?;
 
@@ -300,7 +347,13 @@ impl TaskScheduler {
                     messages.push(response.clone());
 
                     for tc in tool_calls {
-                        let tool_name = &tc.function.name;
+                        // Keep the provider-safe name in the conversation so a
+                        // follow-up OpenAI-compatible request remains valid,
+                        // but resolve it to the runtime name before every
+                        // policy check, event, and execution path.
+                        let tool_name = provider_tool_names
+                            .get(&tc.function.name)
+                            .unwrap_or(&tc.function.name);
                         let tool_args_str = &tc.function.arguments;
 
                         let display_name = match tool_name.as_str() {
@@ -1549,6 +1602,26 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
         }
+    }
+
+    #[test]
+    fn provider_tool_catalog_uses_safe_unique_names_and_preserves_runtime_names() {
+        let tools = vec![
+            json!({"type": "function", "function": {"name": "fs.read"}}),
+            json!({"type": "function", "function": {"name": "fs_read"}}),
+            json!({"type": "function", "function": {"name": "calendar/send"}}),
+        ];
+
+        let (provider_tools, provider_to_runtime) = provider_tool_catalog(tools);
+        let names: Vec<&str> = provider_tools
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect();
+
+        assert_eq!(names, vec!["fs_read", "fs_read_2", "calendar_send"]);
+        assert_eq!(provider_to_runtime["fs_read"], "fs.read");
+        assert_eq!(provider_to_runtime["fs_read_2"], "fs_read");
+        assert_eq!(provider_to_runtime["calendar_send"], "calendar/send");
     }
 
     #[test]
