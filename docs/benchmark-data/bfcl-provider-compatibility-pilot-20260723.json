@@ -1,0 +1,49 @@
+{
+  "benchmark": "BFCL provider compatibility pilot",
+  "version": 1,
+  "sourceRevision": "ae905e97220a64108fac9281c314da7baff853f6",
+  "executedAt": "2026-07-23T21:03:15.095499+00:00",
+  "environment": {
+    "operatingSystem": "Windows, local user terminal"
+  },
+  "classification": "Provider/model native function-calling compatibility only. This is not a Kerna safety, utility, policy-enforcement, or official BFCL leaderboard result.",
+  "configuration": {
+    "framework": "bfcl-eval==2025.12.17",
+    "provider": "OpenAI",
+    "model": "gpt-4.1-nano-2025-04-14-FC",
+    "testCategory": "simple_python",
+    "caseIds": [
+      "simple_python_0",
+      "simple_python_1",
+      "simple_python_2",
+      "simple_python_3",
+      "simple_python_4",
+      "simple_python_5",
+      "simple_python_6",
+      "simple_python_7",
+      "simple_python_8",
+      "simple_python_9"
+    ],
+    "partialEvaluation": true,
+    "liveData": false,
+    "inferenceConcurrency": 1,
+    "commandTimeoutSeconds": 600
+  },
+  "result": {
+    "correctCount": 10,
+    "totalCount": 10,
+    "accuracy": 1.0,
+    "wrapperDurationSeconds": 37.984,
+    "providerBillingCostUsd": null,
+    "providerBillingCostNote": "The evaluator's generated score table reported 0.0, but this release aggregate does not treat that field as reconciled billing data."
+  },
+  "evidence": {
+    "scoreFile": "score/gpt-4.1-nano-2025-04-14-FC/non_live/BFCL_v4_simple_python_score.json",
+    "scoreFileSha256": "65b60faa8c74c47b09c35657fccc4cf72076fff9ea01d208238c66ccf347ecde"
+  },
+  "limitations": [
+    "This is a ten-case partial evaluation in one non-live category, not an official BFCL leaderboard score.",
+    "No Kerna runtime, policy, approval, budget, or receipt behavior is measured by this provider baseline.",
+    "The framework's generated overall leaderboard percentage includes unevaluated categories and is not reported here."
+  ]
+}

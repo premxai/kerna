@@ -123,17 +123,23 @@ operating-system orphan-process guarantee.
 
 ## BFCL provider compatibility pilot
 
-**Status:** runner prepared; no model result has been published.
+**Status:** passed bounded provider-compatibility pilot.
 
-| Field | Planned configuration |
+| Field | Result |
 | --- | --- |
 | Framework | `bfcl-eval==2025.12.17` |
-| Default provider/model baseline | OpenAI, `gpt-4.1-nano-2025-04-14-FC` |
+| Source revision | `ae905e9` |
+| Provider/model baseline | OpenAI, `gpt-4.1-nano-2025-04-14-FC` |
 | Category | Non-live `simple_python` |
-| Fixed pilot size | 10 cases |
+| Fixed pilot size | 10 cases, `simple_python_0` through `simple_python_9` |
 | Inference concurrency | 1 |
-| Public score | None until a reviewed run is committed |
+| Correct / total | 10 / 10 |
+| Pilot accuracy | 100% |
+| Full wrapper duration | 37.984 seconds |
+| Provider billing cost | Not reconciled by this pilot |
 
+The redacted aggregate is
+[`bfcl-provider-compatibility-pilot-20260723.json`](benchmark-data/bfcl-provider-compatibility-pilot-20260723.json).
 The reproducible harness is in [`benchmarks/bfcl`](../benchmarks/bfcl). Its
 preflight makes no model calls. The execution command is deliberately bounded
 to ten fixed cases, writes raw evaluator output only to ignored reports, and
@@ -142,7 +148,9 @@ requires an API key already present in the executing terminal.
 BFCL measures the named provider/model's native function-calling compatibility.
 It is not a Kerna security, utility, or policy-enforcement result, and it must
 not be used to claim that Kerna made a model more capable. A ten-case partial
-score is a pilot, not an official BFCL leaderboard score.
+score is a pilot, not an official BFCL leaderboard score. In particular, the
+framework's generated overall leaderboard percentage includes unevaluated
+categories and must not be reported for this partial run.
 
 ## AgentDojo external evaluation
 

@@ -45,13 +45,35 @@ def command_result(command: list[str], environment: dict[str, str], timeout_seco
         raise RuntimeError("BFCL command failed with exit code " + str(completed.returncode))
 
 
-def score_files(root: Path) -> list[dict[str, str]]:
+def source_revision() -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else "unknown"
+
+
+def score_files(root: Path) -> list[dict[str, object]]:
     files = []
     for path in sorted((root / "score").rglob("*.json")) if (root / "score").exists() else []:
+        summary = {}
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+            summary = {
+                key: parsed[key]
+                for key in ("accuracy", "correct_count", "total_count")
+                if key in parsed
+            }
+        except (OSError, json.JSONDecodeError):
+            summary = {}
         files.append(
             {
                 "path": path.relative_to(root).as_posix(),
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "summary": summary,
             }
         )
     return files
@@ -101,6 +123,7 @@ def main() -> int:
     planned = {
         "benchmark": "BFCL provider compatibility pilot",
         "version": 1,
+        "sourceRevision": source_revision(),
         "executedAt": datetime.now(timezone.utc).isoformat(),
         "classification": "Provider/model native function-calling compatibility only. Do not treat this as a Kerna safety, utility, or policy-enforcement score.",
         "configuration": {
