@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -44,10 +45,9 @@ def runtime_python() -> Path | None:
 
 def import_check(python: Path) -> dict[str, Any]:
     probe = (
-        "import importlib.util, json, sys; "
-        "print(json.dumps({'python': sys.version.split()[0], "
-        "'toolemu': importlib.util.find_spec('toolemu') is not None, "
-        "'procoder': importlib.util.find_spec('procoder') is not None}))"
+        "import json, sys; import procoder, toolemu; "
+        "from toolemu.agent_executor_builder import build_agent_executor; "
+        "print(json.dumps({'python': sys.version.split()[0], 'toolemu': True, 'procoder': True}))"
     )
     completed = subprocess.run(
         [str(python), "-c", probe], capture_output=True, text=True, check=False
@@ -81,6 +81,11 @@ def main() -> int:
         help="fail unless .venv-toolemu has both editable packages installed",
     )
     parser.add_argument(
+        "--require-provider",
+        action="store_true",
+        help="fail unless OPENAI_API_KEY is set for the bounded pilot runner",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=ROOT / "reports" / "toolemu" / "preflight.json",
@@ -99,6 +104,7 @@ def main() -> int:
 
     source_pinned = toolemu_head == TOOLEMU_REVISION
     promptcoder_pinned = promptcoder_head == PROMPTCODER_REVISION
+    provider_credential_present = bool(os.environ.get("OPENAI_API_KEY"))
     result = {
         "benchmark": "ToolEmu Kerna adapter preflight",
         "version": 1,
@@ -119,6 +125,7 @@ def main() -> int:
             "promptcoderCheckoutPresent": args.promptcoder_source.is_dir(),
             "promptcoderRevisionPinned": promptcoder_pinned,
             "isolatedRuntimeOperational": runtime["available"],
+            "providerCredentialPresent": provider_credential_present,
         },
         "sources": {
             "toolemu": {"path": str(args.toolemu_source), "head": toolemu_head},
@@ -126,10 +133,13 @@ def main() -> int:
         },
         "runtime": runtime,
         "readyForAdapterImplementation": source_pinned and promptcoder_pinned,
-        "readyForProviderExecution": False,
+        "readyForProviderExecution": source_pinned and promptcoder_pinned and runtime["available"] and provider_credential_present,
         "providerExecutionBlocker": (
-            "A Kerna MCP adapter and receipt/trace mapping have not been implemented. "
-            "Do not run ToolEmu as a Kerna benchmark before that boundary is verified."
+            "Set OPENAI_API_KEY in the executing terminal. The runner performs a "
+            "bounded Kerna permissive/governed pilot, not a native-agent comparison "
+            "or a publishable ToolEmu leaderboard score."
+            if not provider_credential_present
+            else "A provider-backed pilot may run, but no ToolEmu score is publishable until matched arms and evaluators are reviewed."
         ),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -137,6 +147,8 @@ def main() -> int:
     print(json.dumps(result, indent=2))
 
     if args.require_runtime and not runtime["available"]:
+        return 2
+    if args.require_provider and not provider_credential_present:
         return 2
     return 0 if result["readyForAdapterImplementation"] else 2
 

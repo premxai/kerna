@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -41,6 +42,11 @@ def main() -> int:
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--token", required=True)
     args = parser.parse_args()
+    # Kerna's scheduler may need a provider credential, but this untrusted
+    # MCP bridge never does. Remove inherited credentials before it starts
+    # serving the parent callback.
+    os.environ.pop("OPENAI_API_KEY", None)
+    os.environ.pop("KERNA_LLM_API_KEY", None)
 
     for line in sys.stdin:
         request_id: Any = None

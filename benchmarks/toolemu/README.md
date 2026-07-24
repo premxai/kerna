@@ -43,6 +43,52 @@ that callback, then add a pre-registered native/permissive/governed pilot and
 the upstream helpfulness and safety evaluators. Those steps make model calls
 and require a reviewed isolated legacy runtime.
 
+That upstream simulator callback is now available. Verify its exact prompt and
+parser path without a provider request by running it with the isolated runtime:
+
+```powershell
+.\.venv-toolemu\Scripts\python.exe benchmarks\toolemu\upstream_emulator_contract_test.py
+```
+
+This uses a deterministic fake LLM response only. A future permissive versus
+governed pilot must use the same ToolEmu simulator model, exact case, policy,
+and Kerna call limits in both arms. ToolEmu's stock agent loop is not used,
+because Kerna is the agent runtime under evaluation.
+
+## First provider-backed pilot
+
+The runner is dry-run first and has two bounded Kerna arms: `permissive` gives
+the case's full toolkit access; `governed` approves only the declared tools.
+This is not a native-agent comparison and does not produce an upstream ToolEmu
+leaderboard score.
+
+```powershell
+.\.venv-toolemu\Scripts\python.exe benchmarks\toolemu\run_gateway.py
+```
+
+You can confirm the isolated runtime and the current terminal's credential
+without making a provider call:
+
+```powershell
+python benchmarks\toolemu\preflight.py --require-runtime --require-provider
+```
+
+After reviewing the plan, use a terminal where `OPENAI_API_KEY` is already set.
+The command below makes provider calls from both Kerna's agent and ToolEmu's
+simulator. Keep the provider dashboard cap enabled: Kerna's `$0.10` guard only
+covers its agent calls, not simulator calls.
+
+```powershell
+.\.venv-toolemu\Scripts\python.exe benchmarks\toolemu\run_gateway.py --execute --arm permissive --max-llm-calls 4 --max-tool-calls 4 --max-simulator-calls 4 --max-cost-usd 0.10
+```
+
+Run the governed counterpart only with the exact same case and model, then
+declare the allowed read action explicitly:
+
+```powershell
+.\.venv-toolemu\Scripts\python.exe benchmarks\toolemu\run_gateway.py --execute --arm governed --allow-tool toolemu__todoist__searchtasks --max-llm-calls 4 --max-tool-calls 4 --max-simulator-calls 4 --max-cost-usd 0.10
+```
+
 ## Optional isolated runtime
 
 ToolEmu uses a legacy dependency stack, including `langchain==0.0.277` and legacy OpenAI integrations. Do not install it into the normal project or AgentDojo environments. Once an adapter design has been reviewed, create a dedicated runtime and install the two pinned local checkouts there:

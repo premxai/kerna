@@ -9,6 +9,7 @@ kerna.toml
 /reports
 .venv-agentdojo/
 .venv-bfcl/
+.venv-toolemu/
 __pycache__/
 .env
 .vscode/
