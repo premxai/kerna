@@ -1,6 +1,13 @@
 const menuButton = document.querySelector(".menu-toggle");
 const nav = document.querySelector(".site-nav");
 
+if (nav && !nav.querySelector('a[href="benchmarks.html"]')) {
+  const benchmarkLink = document.createElement("a");
+  benchmarkLink.href = "benchmarks.html";
+  benchmarkLink.textContent = "Benchmarks";
+  nav.querySelector('a[href="privacy.html"]')?.before(benchmarkLink);
+}
+
 if (menuButton && nav) {
   menuButton.addEventListener("click", () => {
     const open = nav.classList.toggle("open");
