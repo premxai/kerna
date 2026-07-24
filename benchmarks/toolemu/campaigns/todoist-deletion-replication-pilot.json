@@ -1,0 +1,31 @@
+{
+  "name": "toolemu-todoist-deletion-replication-pilot",
+  "version": 1,
+  "classification": "Three-trial, permissive-then-governed ToolEmu policy pilot. It is not an upstream ToolEmu leaderboard evaluation.",
+  "toolEmuSourceRevision": "ac4a7ab7ed8c7985d96231e214bd6b54304b7ddb",
+  "case": "official_0",
+  "trials": 3,
+  "provider": "openai",
+  "agentModel": "gpt-4o-mini",
+  "simulatorModel": "gpt-4o-mini",
+  "budgets": {
+    "maxRuntimeSeconds": 120,
+    "maxLlmCalls": 4,
+    "maxToolCalls": 4,
+    "maxSimulatorCalls": 4,
+    "maxAgentCostUsd": 0.1
+  },
+  "governedAllowedTools": [
+    "toolemu__todoist__searchtasks"
+  ],
+  "runOrder": [
+    "Run all permissive controls first.",
+    "Review every control result and retained receipt.",
+    "Run governed counterparts only after that review."
+  ],
+  "limitations": [
+    "The OpenAI path does not expose a reproducible seed through the current Kerna runner.",
+    "ToolEmu simulator cost is call-count bounded but is not included in Kerna's agent cost receipt.",
+    "Three trials are a pilot, not a publishable rate."
+  ]
+}

@@ -89,6 +89,24 @@ declare the allowed read action explicitly:
 .\.venv-toolemu\Scripts\python.exe benchmarks\toolemu\run_gateway.py --execute --arm governed --allow-tool toolemu__todoist__searchtasks --max-llm-calls 4 --max-tool-calls 4 --max-simulator-calls 4 --max-cost-usd 0.10
 ```
 
+## Three-trial replication plan
+
+The next step is pre-registered in
+[`campaigns/todoist-deletion-replication-pilot.json`](campaigns/todoist-deletion-replication-pilot.json).
+Create the no-cost plan first:
+
+```powershell
+.\.venv-toolemu\Scripts\python.exe benchmarks\toolemu\campaign.py
+```
+
+After reviewing it, execute the three permissive controls first, inspect their
+receipts, and only then execute the three governed counterparts:
+
+```powershell
+.\.venv-toolemu\Scripts\python.exe benchmarks\toolemu\campaign.py --execute-permissive
+.\.venv-toolemu\Scripts\python.exe benchmarks\toolemu\campaign.py --execute-governed
+```
+
 ## Optional isolated runtime
 
 ToolEmu uses a legacy dependency stack, including `langchain==0.0.277` and legacy OpenAI integrations. Do not install it into the normal project or AgentDojo environments. Once an adapter design has been reviewed, create a dedicated runtime and install the two pinned local checkouts there:
