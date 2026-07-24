@@ -106,12 +106,18 @@ def main() -> int:
             process_env = os.environ.copy()
             process_env["KERNA_LLM_API_KEY"] = process_env["OPENAI_API_KEY"]
             execution = subprocess.run([args.kerna, "run", case["User Instruction"]], cwd=run_dir, env=process_env, text=True, encoding="utf-8", errors="replace", capture_output=True)
-        with sqlite3.connect(run_dir / "kerna.db") as connection:
+        # sqlite3.Connection's context manager commits/rolls back but does not
+        # close the handle. Explicitly close it before TemporaryDirectory
+        # cleanup, otherwise Windows retains a lock on kerna.db.
+        connection = sqlite3.connect(run_dir / "kerna.db")
+        try:
             events = [
                 {"eventType": row[0], "tool": row[1], "policyDecision": row[2]}
                 for row in connection.execute("select event_type, tool, policy_decision from events order by sequence")
             ]
             task = connection.execute("select id, status, result_text from tasks order by created_at desc limit 1").fetchone()
+        finally:
+            connection.close()
         result = {
             **plan, "status": "completed" if execution.returncode == 0 else "failed", "returnCode": execution.returncode,
             "taskId": task[0] if task else None, "taskStatus": task[1] if task else None, "modelOutput": task[2] if task else None,
