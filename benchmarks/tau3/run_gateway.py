@@ -51,7 +51,11 @@ def mcp_schemas(orchestrator: Any) -> list[dict[str, Any]]:
 
 
 def compact_schemas(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{"name": item["name"], "inputSchema": item["inputSchema"]} for item in schemas]
+    """Compare schemas as a named set; MCP registry order is not contractual."""
+    return sorted(
+        ({"name": item["name"], "inputSchema": item["inputSchema"]} for item in schemas),
+        key=lambda item: item["name"],
+    )
 
 
 def main() -> int:

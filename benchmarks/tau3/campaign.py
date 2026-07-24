@@ -149,15 +149,22 @@ def main() -> int:
 
     if not controls_path.exists():
         raise SystemExit(f"Native controls are missing: {controls_path}. Run --execute-controls first.")
-    if governed_path.exists() and not args.force:
-        raise SystemExit(f"{governed_path} already exists. Review it or use a new --campaign-id; do not silently pool reruns.")
     controls = read_json(controls_path)
+    previous_records: dict[int, dict[str, Any]] = {}
+    if governed_path.exists() and not args.force:
+        previous_records = {record["trial"]: record for record in read_json(governed_path).get("records", [])}
     records: list[dict[str, Any]] = []
     for control in controls["records"]:
         if not control.get("eligibleForGoverned"):
             continue
         index, seed = control["trial"], control["seed"]
         wrapper = root / "governed" / f"trial-{index:02d}.json"
+        existing = previous_records.get(index)
+        reused = bool(existing and existing.get("returnCode") == 0 and wrapper.exists() and read_json(wrapper).get("status") == "completed")
+        if reused:
+            records.append({**existing, "reusedCompletedRun": True})
+            print(json.dumps({"phase": "governed", "trial": index, "seed": seed, "reward": existing.get("reward"), "reusedCompletedRun": True}))
+            continue
         code, detail = execute(
             [
                 sys.executable, str(GATEWAY_RUNNER), "--execute", "--model", args.model,
