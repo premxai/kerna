@@ -113,3 +113,25 @@ The runner uses tau3's pinned `uv` environment automatically. It creates an
 ignored raw result and a redacted wrapper at
 `reports/tau3/gateway-task-0.json`. Do not publish it until the native and
 gateway outputs are reviewed together and more trials are pre-registered.
+
+## Replication campaign
+
+One native success and one gateway outcome are observations, not a benchmark
+comparison. The campaign runs 20 pre-registered native controls for task `0`,
+using seeds `1000` through `1019`. A Kerna counterpart is run only for an
+exact native control that receives reward `1.0`; failed controls are retained
+and reported, never retried into a pooled result.
+
+Run the phases separately, reviewing native eligibility before provider spend
+on the gateway arm:
+
+```powershell
+python benchmarks\tau3\campaign.py
+python benchmarks\tau3\campaign.py --execute-controls
+python benchmarks\tau3\campaign.py --execute-governed
+```
+
+All campaign outputs remain under ignored `reports/tau3/campaigns/`. A reviewed
+aggregate must publish raw counts, control completion, governed retention,
+receipt coverage, blocks, cost, latency, the pinned revisions, and the
+limitation that this is one model and one retail task family.

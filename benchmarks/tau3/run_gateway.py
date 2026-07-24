@@ -59,6 +59,7 @@ def main() -> int:
     parser.add_argument("--execute", action="store_true", help="make the one bounded provider-backed matched trial")
     parser.add_argument("--model", default="gpt-4o-mini", help="same model for tau3 agent and user simulator")
     parser.add_argument("--max-steps", type=int, default=60, help="must match the corrected native control")
+    parser.add_argument("--seed", type=int, default=300, help="tau3 harness seed; must match its native control")
     parser.add_argument("--kerna", default="target/debug/kerna.exe", help="Kerna executable relative to repository root")
     parser.add_argument("--out", default="reports/tau3/gateway-task-0.json", help="redacted wrapper report path")
     args = parser.parse_args()
@@ -88,7 +89,7 @@ def main() -> int:
             "maxSteps": args.max_steps,
             "maxErrors": 5,
             "timeoutSeconds": 300,
-            "seed": 300,
+            "seed": args.seed,
             "policy": {"default": "deny", "autoApprove": TASK_TOOLS},
         },
     }
@@ -131,10 +132,10 @@ def main() -> int:
         max_errors=5,
         timeout=300,
         max_concurrency=1,
-        seed=300,
+        seed=args.seed,
     )
     task = get_tasks("retail", task_ids=[TASK_ID])[0]
-    orchestrator = build_text_orchestrator(config, task, seed=300, simulation_id=str(uuid.uuid4()))
+    orchestrator = build_text_orchestrator(config, task, seed=args.seed, simulation_id=str(uuid.uuid4()))
     source_schemas = mcp_schemas(orchestrator)
     active_call: ToolCall | None = None
 

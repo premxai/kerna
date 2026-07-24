@@ -20,7 +20,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true", help="make the bounded native-control provider calls")
     parser.add_argument("--model", default="gpt-4o-mini", help="same LiteLLM model for agent and user simulator")
+    parser.add_argument("--task-ids", nargs="+", default=TASK_IDS, help="tau3 retail task IDs; default is the original three-task calibration")
     parser.add_argument("--max-steps", type=int, default=60, help="conversation-step limit for this calibration")
+    parser.add_argument("--seed", type=int, default=300, help="tau3 harness seed; paired arms use the same value")
     parser.add_argument("--out", default="reports/tau3/native-control-plan.json", help="wrapper JSON report path")
     args = parser.parse_args()
     if not 20 <= args.max_steps <= 200:
@@ -31,7 +33,7 @@ def main() -> int:
     if uv is None:
         raise SystemExit("uv is required for the pinned tau3 checkout")
 
-    run_name = "kerna-native-retail-calibration-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_name = "kerna-native-retail-calibration-tasks-" + "-".join(args.task_ids) + "-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     report = {
         "benchmark": "tau3 native retail utility calibration",
         "version": 1,
@@ -39,7 +41,7 @@ def main() -> int:
         "classification": "Native tau3 calibration only. This does not invoke Kerna and cannot support a Kerna utility or safety claim.",
         "configuration": {
             "domain": "retail",
-            "taskIds": TASK_IDS,
+            "taskIds": args.task_ids,
             "trials": 1,
             "agent": "llm_agent",
             "user": "user_simulator",
@@ -49,7 +51,7 @@ def main() -> int:
             "maxSteps": args.max_steps,
             "maxErrors": 5,
             "timeoutSeconds": 300,
-            "seed": 300,
+            "seed": args.seed,
         },
     }
     output = (REPO_ROOT / args.out).resolve()
@@ -74,12 +76,12 @@ def main() -> int:
         "--user", "user_simulator",
         "--user-llm", args.model,
         "--num-trials", "1",
-        "--task-ids", *TASK_IDS,
+        "--task-ids", *args.task_ids,
         "--max-concurrency", "1",
         "--max-steps", str(args.max_steps),
         "--max-errors", "5",
         "--timeout", "300",
-        "--seed", "300",
+        "--seed", str(args.seed),
         "--save-to", run_name,
     ]
     completed = subprocess.run(command, cwd=TAU_ROOT, env=environment, check=False)
