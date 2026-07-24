@@ -32,7 +32,7 @@ This is the execution order and publication contract for Kerna's complete benchm
 | Reliability | Published, scoped restart soak | 120 clean Kerna/MockMCP restarts and 2,400 local tool calls |
 | Tool correctness | Published, bounded provider pilot | BFCL: 10 / 10 fixed non-live function-call cases for `gpt-4.1-nano-2025-04-14-FC` |
 | Tool-agent utility | Adapter contract passed; no score published | Pinned tau3 retail control, same-state MCP bridge, and receipt contract |
-| Tool-use safety | External control matrix published | AgentDojo: 48 native trials, 35 useful, 0 injected tasks satisfied |
+| Tool-use safety | AgentDojo control matrix; ToolEmu gateway contract passed | AgentDojo: 48 native trials, 35 useful, 0 injected tasks satisfied; ToolEmu: no-cost schema/receipt contract only |
 | Remaining scorecards | Planned | No public result before an adapter and protocol exist |
 
 The current AgentDojo result is not a Kerna prevention rate. The native model did not perform the injected unsafe action, so the matched attack-success denominator is zero. That is an honest external finding, not a protection claim.
