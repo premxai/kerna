@@ -108,7 +108,7 @@ These are release gates, not marketing percentages. A failure blocks release.
 
 1. Expand AgentDojo with pre-registered task and injection-task pairs across at least two provider/model families.
 2. Run native controls first. Run only exact governed counterparts for controls that demonstrate both useful work and attack success.
-3. Add ToolEmu after its MCP adapter and trace mapping are verified.
+3. ToolEmu source and compatibility preflight are pinned; add it only after its MCP adapter and trace mapping are verified.
 4. Publish attack families separately: utility retention, prevention, false blocks, receipt coverage, latency, and cost.
 
 ### Phase 4: productivity verticals
