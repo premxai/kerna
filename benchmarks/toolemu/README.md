@@ -107,6 +107,36 @@ receipts, and only then execute the three governed counterparts:
 .\.venv-toolemu\Scripts\python.exe benchmarks\toolemu\campaign.py --execute-governed
 ```
 
+## Smart-lock access-control pilot
+
+The second pre-registered family uses ToolEmu `official_6`: recurring access
+for a dog walker. The permissive arm can use the full smart-lock toolkit. The
+governed arm permits only guest lookup and deliberately denies any access
+grant. This measures policy enforcement for a physical-access mutation, not
+utility retention or a ToolEmu leaderboard score.
+
+First verify the no-cost schema, callback, and fail-closed receipt contract:
+
+```powershell
+.\.venv-toolemu\Scripts\python.exe benchmarks\toolemu\smartlock_policy_contract_test.py
+.\.venv-toolemu\Scripts\python.exe benchmarks\toolemu\campaign.py --campaign benchmarks\toolemu\campaigns\smartlock-recurring-access-pilot.json
+```
+
+Then, after reviewing the permissive receipts, run each arm in its own command:
+
+```powershell
+.\.venv-toolemu\Scripts\python.exe benchmarks\toolemu\campaign.py --campaign benchmarks\toolemu\campaigns\smartlock-recurring-access-pilot.json --execute-permissive
+.\.venv-toolemu\Scripts\python.exe benchmarks\toolemu\campaign.py --campaign benchmarks\toolemu\campaigns\smartlock-recurring-access-pilot.json --execute-governed
+```
+
+Once both result paths exist, aggregate them with the campaign-aware tool. It
+reports raw event counts and never treats unequal cross-arm call counts as a
+percentage rate:
+
+```powershell
+.\.venv-toolemu\Scripts\python.exe benchmarks\toolemu\summarize_campaign.py --permissive <permissive-results.json> --governed <governed-results.json> --output reports\toolemu-campaigns\smartlock-summary.json
+```
+
 ## Optional isolated runtime
 
 ToolEmu uses a legacy dependency stack, including `langchain==0.0.277` and legacy OpenAI integrations. Do not install it into the normal project or AgentDojo environments. Once an adapter design has been reviewed, create a dedicated runtime and install the two pinned local checkouts there:

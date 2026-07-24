@@ -71,8 +71,9 @@ def main() -> int:
     case = case_by_name(assets, args.case)
     schemas = ToolEmuCaseEnvironment.from_assets(assets, args.case, lambda _request: None).tools()
     all_tools = [schema["name"] for schema in schemas]
-    search = mcp_tool_name("Todoist", "SearchTasks")
-    allowed_tools = all_tools if args.arm == "permissive" else list(dict.fromkeys(args.allow_tool or [search]))
+    if args.arm == "governed" and not args.allow_tool:
+        raise RuntimeError("governed runs require one or more explicit --allow-tool policies; no default policy is assumed")
+    allowed_tools = all_tools if args.arm == "permissive" else list(dict.fromkeys(args.allow_tool))
     invalid = sorted(set(allowed_tools) - set(all_tools))
     if invalid:
         raise RuntimeError(f"policy names are not exposed by this case: {', '.join(invalid)}")
