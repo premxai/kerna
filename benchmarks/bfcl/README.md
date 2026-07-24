@@ -39,7 +39,9 @@ are ignored by Git.
 
 This checks the package version, CLI, fixed pilot fixture, and optionally the
 presence of a credential. It makes no model or network inference calls and
-never prints a credential.
+never prints a credential. BFCL's large provider dependency graph can make a
+cold CLI import take longer than thirty seconds; the preflight allows sixty
+seconds by default and exposes `--cli-timeout-seconds` for slower hosts.
 
 ```powershell
 .\.venv-bfcl\Scripts\python.exe benchmarks\bfcl\preflight.py

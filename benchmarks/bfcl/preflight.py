@@ -27,7 +27,7 @@ def bfcl_command() -> str | None:
     return shutil.which("bfcl")
 
 
-def cli_check(command: str | None) -> dict[str, object]:
+def cli_check(command: str | None, timeout_seconds: int) -> dict[str, object]:
     if command is None:
         return {"available": False, "detail": "bfcl executable was not found"}
     try:
@@ -35,13 +35,13 @@ def cli_check(command: str | None) -> dict[str, object]:
             [command, "--help"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=timeout_seconds,
             check=False,
         )
     except OSError as error:
         return {"available": False, "detail": str(error)}
     except subprocess.TimeoutExpired:
-        return {"available": False, "detail": "bfcl --help timed out"}
+        return {"available": False, "detail": f"bfcl --help timed out after {timeout_seconds} seconds"}
     detail = (completed.stderr or completed.stdout).strip()
     return {
         "available": completed.returncode == 0,
@@ -62,7 +62,15 @@ def main() -> int:
         default="reports/bfcl/preflight.json",
         help="JSON report path relative to the repository root",
     )
+    parser.add_argument(
+        "--cli-timeout-seconds",
+        type=int,
+        default=60,
+        help="maximum cold-start time for `bfcl --help` (default: 60)",
+    )
     args = parser.parse_args()
+    if args.cli_timeout_seconds < 1:
+        raise SystemExit("--cli-timeout-seconds must be positive")
 
     try:
         installed_version = importlib.metadata.version(EXPECTED_PACKAGE)
@@ -77,7 +85,7 @@ def main() -> int:
         and all(isinstance(case_id, str) and case_id.startswith("simple_python_") for case_id in case_ids)
     )
     command = bfcl_command()
-    cli = cli_check(command)
+    cli = cli_check(command, args.cli_timeout_seconds)
     checks = {
         "packageInstalled": installed_version is not None,
         "packageVersionPinned": installed_version == EXPECTED_VERSION,
@@ -105,6 +113,7 @@ def main() -> int:
             "pilotCategory": "simple_python",
             "pilotCaseCount": len(case_ids),
             "requiresProviderCredential": args.require_provider,
+            "cliTimeoutSeconds": args.cli_timeout_seconds,
         },
         "checks": checks,
         "installedVersion": installed_version,
