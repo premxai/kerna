@@ -31,7 +31,7 @@ This is the execution order and publication contract for Kerna's complete benchm
 | Performance | Published, scoped transport baseline | 30 process runs and 900 MockMCP echo calls on the named Windows host |
 | Reliability | Published, scoped restart soak | 120 clean Kerna/MockMCP restarts and 2,400 local tool calls |
 | Tool correctness | Published, bounded provider pilot | BFCL: 10 / 10 fixed non-live function-call cases for `gpt-4.1-nano-2025-04-14-FC` |
-| Tool-agent utility | Prepared, no score published | Pinned tau3 native retail control and gateway-adapter invariants |
+| Tool-agent utility | Adapter contract passed; no score published | Pinned tau3 retail control, same-state MCP bridge, and receipt contract |
 | Tool-use safety | External control matrix published | AgentDojo: 48 native trials, 35 useful, 0 injected tasks satisfied |
 | Remaining scorecards | Planned | No public result before an adapter and protocol exist |
 
@@ -100,8 +100,8 @@ These are release gates, not marketing percentages. A failure blocks release.
 ### Phase 2: provider and tool compatibility
 
 1. Run BFCL for every provider/model Kerna documents as supported.
-2. Build a tau3 MCP gateway adapter.
-3. Run a pre-registered native, permissive, and governed utility pilot.
+2. Verify the tau3 MCP gateway adapter contract, including same-state tool execution and receipts.
+3. Run a pre-registered native and exact-policy gateway utility pilot only for native-complete tasks.
 4. Publish compatibility by provider/model, never as evidence that Kerna made a model more intelligent.
 
 ### Phase 3: tool-agent safety

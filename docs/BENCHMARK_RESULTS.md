@@ -154,7 +154,8 @@ categories and must not be reported for this partial run.
 
 ## tau3 utility evaluation
 
-**Status:** native-control pilot prepared; no utility score published.
+**Status:** native calibration completed; gateway adapter contract passed; no
+utility score published.
 
 The current upstream benchmark is tau3. Kerna has a pinned, no-cost preflight
 and a pre-registered three-task retail native control in
@@ -162,11 +163,24 @@ and a pre-registered three-task retail native control in
 `gpt-4o-mini` model for the agent and user simulator, one trial per task,
 single-concurrency, a 60-step limit, a 300-second task timeout, and seed 300.
 
-No Kerna comparison has been started. tau3 normally calls its stateful
-environment directly, so a valid Kerna arm first needs a gateway adapter that
-routes the exact same environment calls through Kerna while preserving the
-single environment state used for reward evaluation. A native result alone
-does not prove Kerna utility or safety.
+The corrected native calibration ran on 2026-07-23 with one trial for each of
+retail tasks `0`, `1`, and `2`. Task `0` completed (reward `1.0`); tasks `1`
+and `2` did not (reward `0.0`). This is a small calibration result, not a
+published utility percentage. Under the comparison contract, only task `0` is
+eligible for a Kerna counterpart.
+
+The free gateway contract now passes: an MCP tool schema is re-exposed by
+`kerna gateway`, a call returns to the same loopback tool handler, an unknown
+tool is fail-closed, and the SQLite receipt has requested, policy-checked,
+completed, and blocked events. The adapter routes each call back to the exact
+single tau3 environment instance used for reward evaluation and does not send
+the provider credential to Kerna or the bridge child. This validates the
+measurement path, but is not a provider-backed Kerna utility result.
+
+The next bounded run is one matched task-`0` gateway trial with the same model,
+user simulator, seed, task state, schemas, step limit, and timeout. It may
+measure task-level utility retention and receipt coverage only. It cannot
+support a safety, prevention, or general-performance claim.
 
 ## AgentDojo external evaluation
 

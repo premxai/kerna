@@ -73,3 +73,43 @@ python benchmarks\tau3\run_native.py --execute
 This creates a native-calibration result only. Do not publish it as a Kerna
 result, and do not launch a governed comparison until the gateway adapter
 contract above is automated and verified.
+
+## Gateway adapter contract
+
+The adapter is now a local-only transport boundary:
+
+```text
+tau3 orchestrator -> kerna gateway -> stdio MCP bridge -> same tau3 environment
+```
+
+The bridge listens only on `127.0.0.1`, authenticates with a random per-run
+bearer token, and has no provider credential. The runner removes
+`OPENAI_API_KEY` before starting Kerna and its MCP child. Tau3 keeps ownership
+of task state and evaluation; the adapter replaces only direct tool execution.
+
+Run the free contract before any provider-backed run:
+
+```powershell
+python benchmarks\tau3\gateway_contract_test.py
+```
+
+It checks schema passthrough, same-state tool execution, fail-closed unknown
+tools, and requested, policy-checked, completed, and blocked receipt events.
+
+## First matched gateway trial
+
+The corrected native calibration completed only retail task `0`. Under the
+pre-registered rule, tasks `1` and `2` are not eligible for a Kerna
+counterpart, so the first bounded Kerna trial is task `0` only. It is one
+matched utility observation, not a launch claim or stable percentage.
+
+With `OPENAI_API_KEY` already set in your terminal:
+
+```powershell
+python benchmarks\tau3\run_gateway.py --execute
+```
+
+The runner uses tau3's pinned `uv` environment automatically. It creates an
+ignored raw result and a redacted wrapper at
+`reports/tau3/gateway-task-0.json`. Do not publish it until the native and
+gateway outputs are reviewed together and more trials are pre-registered.
