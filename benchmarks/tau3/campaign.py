@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -43,8 +44,22 @@ def simulation_summary(raw_path: Path) -> dict[str, Any]:
 
 
 def execute(command: list[str]) -> tuple[int, str]:
-    completed = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True, check=False)
-    detail = (completed.stdout + completed.stderr).strip()
+    environment = os.environ.copy()
+    # tau3 prints Unicode status markers. Explicit UTF-8 prevents a Windows
+    # CP-1252 pipe from failing after the provider call has already completed.
+    environment["PYTHONUTF8"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8"
+    completed = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=environment,
+        capture_output=True,
+        check=False,
+    )
+    detail = ((completed.stdout or "") + (completed.stderr or "")).strip()
     return completed.returncode, detail[-2000:]
 
 
@@ -104,13 +119,17 @@ def main() -> int:
         for index in range(args.trials):
             seed = args.seed_start + index
             wrapper = root / "native" / f"trial-{index:02d}.json"
-            code, detail = execute(
-                [
-                    sys.executable, str(NATIVE_RUNNER), "--execute", "--task-ids", TASK_ID,
-                    "--model", args.model, "--max-steps", str(args.max_steps), "--seed", str(seed), "--out", str(wrapper),
-                ]
-            )
-            record: dict[str, Any] = {"trial": index, "seed": seed, "returnCode": code, "wrapper": str(wrapper.relative_to(REPO_ROOT))}
+            reused = wrapper.exists() and read_json(wrapper).get("status") == "completed"
+            if reused:
+                code, detail = 0, ""
+            else:
+                code, detail = execute(
+                    [
+                        sys.executable, str(NATIVE_RUNNER), "--execute", "--task-ids", TASK_ID,
+                        "--model", args.model, "--max-steps", str(args.max_steps), "--seed", str(seed), "--out", str(wrapper),
+                    ]
+                )
+            record: dict[str, Any] = {"trial": index, "seed": seed, "returnCode": code, "wrapper": str(wrapper.relative_to(REPO_ROOT)), "reusedCompletedRun": reused}
             if code == 0 and wrapper.exists():
                 wrapper_data = read_json(wrapper)
                 raw_path = REPO_ROOT / wrapper_data["resultsPath"]
