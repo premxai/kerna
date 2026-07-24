@@ -2,6 +2,19 @@
 
 All notable changes to Kerna will be documented in this file.
 
+## [v0.2.4] - 2026-07-24
+
+### Added
+- Public, reproducible benchmark evidence for deterministic runtime controls,
+  MCP compatibility, restart reliability, and two scoped ToolEmu policy pilots.
+- A benchmark results page that explains the test boundaries, examples, raw
+  counts, and the difference between a requested action and an action started.
+
+### Fixed
+- BFCL compatibility preflight now allows a realistic cold-start window for
+  the evaluator's provider dependency graph instead of reporting a false CLI
+  failure after thirty seconds.
+
 ## [v0.2.3] - 2026-07-15
 
 ### Fixed
