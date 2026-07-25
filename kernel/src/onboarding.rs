@@ -44,6 +44,7 @@ pub fn run_onboarding(
     }
 
     let mut config = Config::load();
+    let _repaired_legacy_defaults = config.repair_legacy_onboarding_defaults();
 
     // 1. LLM Provider — driven by the built-in preset catalog so onboarding
     //    always matches what the runtime actually supports.
@@ -263,6 +264,12 @@ pub fn run_onboarding(
         " {}",
         style("[✓] Creating default fail-closed permission policy...").green()
     );
+    if _repaired_legacy_defaults {
+        println!(
+            " {} Repaired legacy empty runtime settings and zero execution limits.",
+            style("[✓]").green()
+        );
+    }
     println!();
 
     // 4. Optional starter tools — install a curated pack so a new user has

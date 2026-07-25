@@ -9,7 +9,7 @@ files, task payloads, or trace exports here.
 
 | Field | Value |
 | --- | --- |
-| Release tag | `v0.2.3` |
+| Release tag | `v0.2.5` |
 | Release URL | `https://github.com/premxai/kerna/releases/tag/v0.2.3` |
 | Verification date (UTC) | |
 | Release owner | |

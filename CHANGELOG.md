@@ -2,6 +2,14 @@
 
 All notable changes to Kerna will be documented in this file.
 
+## [v0.2.5] - 2026-07-25
+
+### Fixed
+- `kerna init` now repairs legacy configuration files that contain zero tool
+  rounds or retries, or blank runtime and network modes. A refreshed workspace
+  can execute its first reviewed task while normal task execution continues to
+  preserve user-selected budgets and boundaries.
+
 ## [v0.2.4] - 2026-07-24
 
 ### Added

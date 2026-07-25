@@ -17,7 +17,7 @@ content.
 | Google connector contract | Manifest limits tools, secrets, network hosts, and requires approval for creation | Verified by manifest and plugin tests |
 | OAuth setup safety | PKCE loopback helper defaults to `calendar.events.readonly`; it will not begin consent without an explicit storage choice | Verified by plugin test |
 | Desktop control surface | Task receipts, local approval queue, routine scope, connector setup state, and latest tool-call result are represented | Desktop build and responsive visual smoke check verified |
-| Controlled-cohort artifact integrity | v0.2.3 published CLI and native desktop assets with SHA-256 checksum files; all 20 released assets, five CLI/plugin-bundle sidecars, and six desktop-installer manifest entries were verified against their SHA-256 values | Verified on 2026-07-15 |
+| Controlled-cohort artifact integrity | The release tag contains matching CLI binaries, native desktop installers, curated plugin bundle, and SHA-256 checksum sidecars. Verify the final tag below before inviting a cohort. | Required for each release |
 
 ## Required live acceptance checks
 

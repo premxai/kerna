@@ -330,6 +330,37 @@ fn default_max_memory_writes() -> u64 {
 }
 
 impl Config {
+    /// Repair values emitted by early pre-release configuration writers that
+    /// serialized Rust's zero/empty defaults. These values are not useful
+    /// runtime choices: zero tool rounds prevents every task from starting,
+    /// and empty runtime/network modes do not describe an execution boundary.
+    ///
+    /// This is deliberately invoked only by `kerna init`, where the user is
+    /// explicitly refreshing their runtime setup. Normal task execution does
+    /// not rewrite a user's chosen budget or execution boundary.
+    pub fn repair_legacy_onboarding_defaults(&mut self) -> bool {
+        let mut repaired = false;
+
+        if self.max_retries == 0 {
+            self.max_retries = default_max_retries();
+            repaired = true;
+        }
+        if self.max_tool_rounds == 0 {
+            self.max_tool_rounds = default_max_tool_rounds();
+            repaired = true;
+        }
+        if self.runtime_mode.trim().is_empty() {
+            self.runtime_mode = default_runtime_mode();
+            repaired = true;
+        }
+        if self.network_mode.trim().is_empty() {
+            self.network_mode = default_network_mode();
+            repaired = true;
+        }
+
+        repaired
+    }
+
     pub fn load() -> Self {
         let mut config = Self::default();
 
@@ -490,5 +521,21 @@ mod tests {
         assert!(config.max_runtime_seconds > 0);
         assert!(config.max_llm_calls > 0);
         assert!(config.max_tool_calls > 0);
+    }
+
+    #[test]
+    fn repairs_legacy_onboarding_defaults_without_changing_valid_values() {
+        let mut legacy = Config::default();
+        legacy.max_retries = 0;
+        legacy.max_tool_rounds = 0;
+        legacy.runtime_mode.clear();
+        legacy.network_mode = "  ".to_string();
+
+        assert!(legacy.repair_legacy_onboarding_defaults());
+        assert_eq!(legacy.max_retries, 3);
+        assert_eq!(legacy.max_tool_rounds, 15);
+        assert_eq!(legacy.runtime_mode, "native");
+        assert_eq!(legacy.network_mode, "none");
+        assert!(!legacy.repair_legacy_onboarding_defaults());
     }
 }

@@ -26,6 +26,19 @@ kerna trace last           # see every step it took
 kerna doctor               # confirm keys + plugins are healthy
 ```
 
+### Updating an earlier workspace
+
+If you used a pre-`v0.2.5` build, run setup once after upgrading:
+
+```bash
+kerna init --ci --provider mock
+kerna doctor
+```
+
+The setup command preserves your plugins and permissions while repairing legacy
+blank runtime settings and zero execution limits. It does not silently change
+the budgets or runtime boundary during a normal task.
+
 ## Connecting a model
 
 Kerna is BYOK (bring your own key). Ten providers work out of the box:
