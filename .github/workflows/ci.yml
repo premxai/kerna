@@ -116,6 +116,16 @@ jobs:
       if: matrix.os == 'ubuntu-latest'
       run: python3 -m py_compile benchmarks/agentdojo/kerna_agentdojo_mcp.py benchmarks/agentdojo/preflight.py benchmarks/agentdojo/run.py
 
+    # The prevention claim is the only field in the benchmark that reads as a
+    # security result, so it is the one that must not regress unnoticed. The
+    # classifier takes no agentdojo import, so this runs without installing the
+    # benchmark package.
+    - name: Test the AgentDojo prevention claim
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        python3 -m pip install --quiet pytest
+        python3 -m pytest benchmarks/agentdojo/test_prevention.py -q
+
     - name: Install desktop dependencies
       run: npm ci
       working-directory: ./ui
