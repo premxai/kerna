@@ -107,6 +107,13 @@ enum Commands {
         #[arg(long)]
         converse: bool,
 
+        /// Rung 1: record every policy decision and enforce none of them. Nothing is
+        /// denied and nothing prompts; each action the policy would have stopped is
+        /// printed and written to the audit trail. Use this to size a policy before
+        /// trusting it -- and never leave it on believing you are protected.
+        #[arg(long, conflicts_with = "converse")]
+        audit: bool,
+
         /// Refuse approval-required calls instead of prompting on stdin. Use
         /// this for desktop, daemon, or other detached invocations.
         #[arg(long)]
@@ -931,12 +938,25 @@ async fn main() -> Result<()> {
         Some(Commands::Run {
             goal,
             converse,
+            audit,
             non_interactive,
             approval_queue,
             privacy,
         }) => {
             if converse {
                 config.converse = true;
+            }
+
+            if audit {
+                config.audit_only = true;
+                // Said once, loudly, before anything runs. The single failure mode of
+                // rung 1 is that it goes unnoticed and someone believes a policy is
+                // being enforced when it is only being recorded.
+                println!("+--------------------------------------------------------------+");
+                println!("|  AUDIT MODE - policy is RECORDED but NOT ENFORCED             |");
+                println!("|  Nothing will be denied. Nothing will prompt.                 |");
+                println!("|  Actions your policy would have stopped are marked [observe]. |");
+                println!("+--------------------------------------------------------------+");
             }
 
             if let Some(priv_mode) = privacy {

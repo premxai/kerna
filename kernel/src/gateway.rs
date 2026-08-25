@@ -66,7 +66,14 @@ impl Gateway {
         registry: Arc<Mutex<McpRegistry>>,
         memory: Arc<MemoryEngine>,
     ) -> Self {
-        let permissions = PermissionManager::new(config.clone());
+        let permissions = PermissionManager::with_mode(
+            config.clone(),
+            if config.audit_only {
+                crate::permissions::EnforcementMode::Observe
+            } else {
+                crate::permissions::EnforcementMode::Enforce
+            },
+        );
         let task_id = Uuid::new_v4();
         let session_id = format!("gateway-{}", Uuid::new_v4());
         Gateway {

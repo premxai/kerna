@@ -224,6 +224,13 @@ pub struct Config {
     #[serde(default)]
     pub converse: bool,
 
+    /// Rung 1 of the rollout ladder (Decision 040): record every policy decision and
+    /// enforce none of them. Never a default -- observe mode is always something a
+    /// person asked for, because a governance layer that quietly stopped governing is
+    /// worse than one that was never installed.
+    #[serde(default)]
+    pub audit_only: bool,
+
     #[serde(default)]
     pub llm_fallback_provider: Option<String>,
 
@@ -267,6 +274,7 @@ impl Default for Config {
             egress_proxy: None,
             enable_supervisor: false,
             converse: false,
+            audit_only: false,
             llm_fallback_provider: None,
             llm_fallback_api_key: None,
             credential_pool: Vec::new(),

@@ -159,7 +159,14 @@ impl TaskScheduler {
             config.network_mode.clone(),
             config.egress_proxy.clone(),
         )?;
-        let permissions = PermissionManager::new(config.clone());
+        let permissions = PermissionManager::with_mode(
+            config.clone(),
+            if config.audit_only {
+                crate::permissions::EnforcementMode::Observe
+            } else {
+                crate::permissions::EnforcementMode::Enforce
+            },
+        );
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()?;
@@ -456,12 +463,23 @@ impl TaskScheduler {
                             payload_json: json!({ "args": tool_args_str }),
                         });
 
+                        // The routine allowlist is a *scope*, not a policy: a routine
+                        // was started with an explicit list of tools, and anything
+                        // outside it was never in play. Observe mode relaxes the
+                        // permission policy so a fresh install is not a wall; it does
+                        // not widen a scope the operator drew themselves.
                         let routine_allows_tool = self.tool_is_allowed(tool_name);
-                        let perm_level = if routine_allows_tool {
-                            self.permissions.check(tool_name, server_name.as_deref())
+                        let decision = if routine_allows_tool {
+                            self.permissions.decide(tool_name, server_name.as_deref())
                         } else {
-                            PermissionLevel::Deny
+                            crate::permissions::Decision {
+                                policy: PermissionLevel::Deny,
+                                effective: PermissionLevel::Deny,
+                                observed_only: false,
+                                mode: self.permissions.mode(),
+                            }
                         };
+                        let perm_level = decision.effective.clone();
 
                         // 2. Emit tool.policy.checked
                         event_seq += 1;
@@ -473,11 +491,15 @@ impl TaskScheduler {
                             timestamp: chrono::Utc::now().to_rfc3339(),
                             event_type: "tool.policy.checked".to_string(),
                             actor: "kerna".to_string(),
-                            severity: if perm_level == PermissionLevel::Deny { "warning".to_string() } else { "info".to_string() },
+                            // Severity follows the POLICY, not what was enforced.
+                            // In observe mode every row would otherwise read "info"
+                            // and the audit trail would report a clean run -- which is
+                            // exactly the finding the customer installed this to get.
+                            severity: if decision.policy_would_intervene() { "warning".to_string() } else { "info".to_string() },
                             model: None,
                             tool: Some(tool_name.clone()),
                             policy_decision: Some(if routine_allows_tool {
-                                format!("{:?}", perm_level)
+                                decision.recorded()
                             } else {
                                 "DeniedByRoutineAllowlist".to_string()
                             }),
@@ -486,8 +508,36 @@ impl TaskScheduler {
                             correlation_id: Some(tc.id.clone()),
                             redaction_status: None,
                             budget_snapshot_json: Some(budget.get_snapshot_json()),
-                            payload_json: json!({ "args": tool_args_str }),
+                            payload_json: json!({
+                                "args": tool_args_str,
+                                "enforcement": decision.mode.as_str(),
+                                "enforced": !decision.observed_only,
+                            }),
                         });
+
+                        // Rung 1: say it out loud, every time. A governance layer that
+                        // silently stopped governing is worse than one never installed,
+                        // because the customer believes they are covered. The one thing
+                        // that must never happen is observe mode going unnoticed.
+                        if decision.observed_only {
+                            // The TOOL name, not display_name: that is a friendly
+                            // category label whose fallback arm is "Planning", so an
+                            // audit line built from it reads "Planning would have been
+                            // Deny" and names nothing. Rung 1's entire output is which
+                            // action would have been stopped.
+                            println!(
+                                "[observe] {} would have been {:?} by policy - allowed, not enforced",
+                                tool_name, decision.policy
+                            );
+                            let _ = self.memory.log_message(
+                                task_id,
+                                "WARN",
+                                &format!(
+                                    "OBSERVE MODE: '{}' would have been {:?}; it ran anyway.",
+                                    tool_name, decision.policy
+                                ),
+                            );
+                        }
 
                         if perm_level == PermissionLevel::Deny {
                             println!("❌ {} (Denied by policy)", display_name);
