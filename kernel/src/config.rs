@@ -438,7 +438,13 @@ impl Config {
         for rule in &self.permissions {
             if rule.tool == tool_name {
                 return &rule.action;
-            } else if rule.tool == "*" {
+            } else if rule.tool == "*" && wildcard_action.is_none() {
+                // First wildcard wins, matching how an exact rule behaves two lines up:
+                // that arm returns immediately, so the first exact rule decides. This
+                // arm used to overwrite, which made the LAST wildcard decide -- one
+                // engine resolving ties in opposite directions depending on whether the
+                // rule happened to name a tool. Found by the shared conformance suite
+                // (POLICY.md, P2), which is what it exists for.
                 wildcard_action = Some(&rule.action);
             }
         }

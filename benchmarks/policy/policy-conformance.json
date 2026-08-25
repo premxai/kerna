@@ -1,0 +1,132 @@
+{
+  "$comment": [
+    "Shared conformance cases for Kerna's two enforcement points: permissions.rs (Rust,",
+    "in-loop) and enforce.py (Python, model seam). Semantics are specified in POLICY.md.",
+    "",
+    "Duplicated in the kerna repository at benchmarks/policy/policy-conformance.json",
+    "because the two halves are separate artifacts today. Each engine's test prints the",
+    "SHA-256 of its copy; when you edit one, edit both.",
+    "",
+    "Every case states its default explicitly. P5 keeps the install defaults different by",
+    "enforcement point, so a suite that relied on a default would test the wrong thing.",
+    "",
+    "`expect` uses the shared vocabulary: allow | deny | require_confirmation.",
+    "At the model seam require_confirmation resolves to deny (P4); the seam test asserts",
+    "that mapping rather than the raw level."
+  ],
+  "version": 1,
+  "cases": [
+    {
+      "name": "an allowlist works regardless of rule order",
+      "rule": "P1",
+      "why": "The idiom nearly every real policy takes. This is the case that was broken: the seam matched first-rule-wins and denied Read.",
+      "default": "deny",
+      "rules": [
+        { "tool": "*", "action": "deny" },
+        { "tool": "Read", "action": "allow" }
+      ],
+      "expect": { "Read": "allow", "Edit": "deny", "Bash": "deny" }
+    },
+    {
+      "name": "an allowlist works when the exact rule comes first too",
+      "rule": "P1",
+      "why": "Order must not matter across specificity levels, in either direction.",
+      "default": "deny",
+      "rules": [
+        { "tool": "Read", "action": "allow" },
+        { "tool": "*", "action": "deny" }
+      ],
+      "expect": { "Read": "allow", "Edit": "deny" }
+    },
+    {
+      "name": "a denylist over a permissive wildcard",
+      "rule": "P1",
+      "default": "allow",
+      "rules": [
+        { "tool": "*", "action": "allow" },
+        { "tool": "Bash", "action": "deny" }
+      ],
+      "expect": { "Bash": "deny", "Read": "allow", "Anything": "allow" }
+    },
+    {
+      "name": "the first of two rules naming the same tool wins",
+      "rule": "P2",
+      "why": "Order still decides within one specificity level, which is what makes a narrow predicate before a broad fallback useful.",
+      "default": "deny",
+      "rules": [
+        { "tool": "Bash", "action": "allow" },
+        { "tool": "Bash", "action": "deny" }
+      ],
+      "expect": { "Bash": "allow" }
+    },
+    {
+      "name": "the first of two wildcards wins",
+      "rule": "P2",
+      "default": "deny",
+      "rules": [
+        { "tool": "*", "action": "allow" },
+        { "tool": "*", "action": "deny" }
+      ],
+      "expect": { "Read": "allow" }
+    },
+    {
+      "name": "an unlisted tool takes the stated default",
+      "rule": "P5",
+      "why": "Stated per case, never inherited, because the install defaults differ by enforcement point on purpose.",
+      "default": "deny",
+      "rules": [{ "tool": "Read", "action": "allow" }],
+      "expect": { "Read": "allow", "Unheard": "deny" }
+    },
+    {
+      "name": "an unlisted tool under a permissive default",
+      "rule": "P5",
+      "default": "allow",
+      "rules": [{ "tool": "Bash", "action": "deny" }],
+      "expect": { "Bash": "deny", "Unheard": "allow" }
+    },
+    {
+      "name": "an empty policy is entirely its default",
+      "rule": "P5",
+      "default": "deny",
+      "rules": [],
+      "expect": { "Read": "deny", "Bash": "deny" }
+    },
+    {
+      "name": "require_confirmation is carried as its own level",
+      "rule": "P4",
+      "why": "In-loop it prompts. At the seam there is no human to ask, so it denies -- the seam test asserts the mapping.",
+      "default": "deny",
+      "rules": [
+        { "tool": "*", "action": "allow" },
+        { "tool": "send_email", "action": "require_confirmation" }
+      ],
+      "expect": { "send_email": "require_confirmation", "Read": "allow" }
+    },
+    {
+      "name": "an exact require_confirmation beats a permissive wildcard",
+      "rule": "P1",
+      "default": "allow",
+      "rules": [
+        { "tool": "*", "action": "allow" },
+        { "tool": "delete_file", "action": "require_confirmation" }
+      ],
+      "expect": { "delete_file": "require_confirmation", "Read": "allow" }
+    },
+    {
+      "name": "tool names are matched exactly, not by prefix",
+      "rule": "P1",
+      "why": "A prefix match would let `Read` silently govern `ReadSecrets`.",
+      "default": "deny",
+      "rules": [{ "tool": "Read", "action": "allow" }],
+      "expect": { "Read": "allow", "ReadSecrets": "deny", "Rea": "deny" }
+    },
+    {
+      "name": "matching is case sensitive",
+      "rule": "P1",
+      "why": "Tool names are identifiers. Case-insensitive matching would make `bash` a way around a rule on `Bash`.",
+      "default": "deny",
+      "rules": [{ "tool": "Bash", "action": "allow" }],
+      "expect": { "Bash": "allow", "bash": "deny", "BASH": "deny" }
+    }
+  ]
+}

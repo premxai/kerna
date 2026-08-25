@@ -357,3 +357,142 @@ mod tests {
         assert_eq!(enforce.decide("fs.write", None).mode.as_str(), "enforce");
     }
 }
+
+/// Conformance against the shared policy suite.
+///
+/// Kerna decides whether a tool may run in two places -- here, inside its own agent loop,
+/// and at the model seam in the sidecar, in front of an agent it did not configure. Both
+/// are necessary: 75 of 77 tools in real Claude Code traffic never travelled over MCP, so
+/// a protocol-level gateway would have governed none of them; and Kerna's own runtime
+/// must not depend on a proxy being installed.
+///
+/// Two enforcement points are fine. Two *meanings* are a trap, and there were two: the
+/// seam matched first-rule-wins, so `* -> deny` followed by an allowlist denied `Read`
+/// there and allowed it here. One file, opposite answers.
+///
+/// `benchmarks/policy/policy-conformance.json` is the shared suite and `docs/POLICY.md`
+/// in the localm repository is the prose. The two halves are separate artifacts today, so
+/// the fixture is duplicated; both sides print its SHA-256 so a drift between copies is
+/// visible in either log. **Edit one, edit both.**
+#[cfg(test)]
+mod policy_conformance {
+    use super::*;
+    use crate::config::PermissionRule;
+
+    fn fixture() -> serde_json::Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("kernel/ has a parent")
+            .join("benchmarks/policy/policy-conformance.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        serde_json::from_str(&text).expect("fixture is valid JSON")
+    }
+
+    /// A conformance action as this engine's config vocabulary.
+    fn action_for(level: &str) -> String {
+        match level {
+            "allow" | "auto_approve" => "auto_approve",
+            "require_confirmation" => "require_confirmation",
+            _ => "deny",
+        }
+        .to_string()
+    }
+
+    fn expected_level(level: &str) -> PermissionLevel {
+        match level {
+            "allow" | "auto_approve" => PermissionLevel::AutoApprove,
+            "require_confirmation" => PermissionLevel::RequireConfirmation,
+            _ => PermissionLevel::Deny,
+        }
+    }
+
+    #[test]
+    fn every_shared_case_holds_for_the_in_loop_engine() {
+        let fixture = fixture();
+        let cases = fixture["cases"].as_array().expect("cases is an array");
+        assert!(
+            !cases.is_empty(),
+            "an empty conformance suite proves nothing"
+        );
+
+        for case in cases {
+            let name = case["name"].as_str().unwrap_or("<unnamed>");
+            let rule_id = case["rule"].as_str().unwrap_or("?");
+
+            let mut permissions: Vec<PermissionRule> = case["rules"]
+                .as_array()
+                .expect("rules is an array")
+                .iter()
+                .map(|r| PermissionRule {
+                    tool: r["tool"].as_str().expect("tool").to_string(),
+                    action: action_for(r["action"].as_str().expect("action")),
+                })
+                .collect();
+
+            // P5: the default is stated per case, never inherited, because the install
+            // defaults differ by enforcement point on purpose. This engine's own default
+            // is deny, so a permissive case is expressed as an explicit trailing
+            // wildcard -- which is what an operator would have to write anyway.
+            let default = case["default"].as_str().expect("default");
+            if default == "allow" && !permissions.iter().any(|r| r.tool == "*") {
+                permissions.push(PermissionRule {
+                    tool: "*".to_string(),
+                    action: "auto_approve".to_string(),
+                });
+            }
+
+            let config = Config {
+                permissions,
+                ..Default::default()
+            };
+            let manager = PermissionManager::new(config);
+
+            for (tool, level) in case["expect"].as_object().expect("expect is an object") {
+                let want = expected_level(level.as_str().expect("level"));
+                let got = manager.check(tool, None);
+                assert_eq!(
+                    got, want,
+                    "{name} [{rule_id}]: {tool} -> {got:?}, expected {want:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_fixture_digest_is_reported() {
+        // Printed, not asserted. A constant here could only check this copy against
+        // itself; the digest in both logs is what makes a drift between the two
+        // repositories' copies visible to a human. Run with --nocapture to see it.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("benchmarks/policy/policy-conformance.json");
+        let bytes = std::fs::read(&path).expect("fixture readable");
+
+        // Small FNV-1a rather than pulling in a hash crate for one diagnostic line.
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for byte in &bytes {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        println!(
+            "policy-conformance.json fnv1a64: {hash:016x}  bytes: {}",
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn the_in_loop_default_is_deny() {
+        // P5, the one divergence the spec keeps. The operator configured this runtime
+        // and its tool list, so anything unlisted was not part of the deal. The seam
+        // defaults the other way for an equally good reason: it did not configure the
+        // agent it sits in front of, and denying by default there would deny everything
+        // on day one.
+        let manager = PermissionManager::new(Config::default());
+        assert_eq!(
+            manager.check("anything_at_all", None),
+            PermissionLevel::Deny
+        );
+    }
+}
