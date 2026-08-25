@@ -13,6 +13,37 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+/// Correlation header sent with every outbound model request.
+///
+/// Three logs describe a single agent turn — what it cost, what policy allowed, and
+/// whether a local model would have agreed — and without a shared key none of them can be
+/// joined to the others. "This expensive turn was also the one we blocked, and the local
+/// model would have got it right" is a sentence that needs this header to exist.
+///
+/// Whoever sees the turn first owns its identity. Kerna already has a task id in its own
+/// SQLite audit trail, so it sends that; a sidecar downstream inherits it and both halves
+/// of the product share one timeline. A sidecar that receives nothing mints its own and
+/// stays internally consistent, so nothing breaks when Kerna runs alone.
+///
+/// Sent unconditionally, including straight to a provider with no sidecar present. Kerna
+/// cannot detect whether one is in the path — that is what makes a transparent proxy
+/// transparent — and the value is an opaque random UUID carrying nothing about the user,
+/// the prompt, or the machine.
+const TURN_HEADER: &str = "x-kerna-task";
+
+/// The task id as a header value.
+///
+/// Hyphenated UUID: 36 characters, no whitespace and no control characters, which is
+/// exactly what a downstream consumer can accept without sanitising. Sanitising a
+/// correlation id is worse than rejecting one — a mangled id still joins, to the wrong
+/// row — so the contract is to emit something that never needs cleaning.
+///
+/// Deliberately unprefixed. The value must equal the `task_id` in Kerna's own tasks
+/// table, or the join succeeds against the sidecar and fails against our own audit trail.
+fn turn_header_value(task_id: Uuid) -> String {
+    task_id.to_string()
+}
+
 /// Represents an individual message in the LLM conversation.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatMessage {
@@ -303,7 +334,7 @@ impl TaskScheduler {
                 let mut attempt = 0;
                 let response = loop {
                     attempt += 1;
-                    match self.call_llm(&messages, &all_tools).await {
+                    match self.call_llm(task_id, &messages, &all_tools).await {
                         Ok(r) => break Ok(r),
                         Err(e) => {
                             let err_msg = format!("LLM call failed (Attempt {}/{}): {}", attempt, max_retries, e);
@@ -382,7 +413,7 @@ impl TaskScheduler {
                                 tool_call_id: None,
                             };
                             println!("[Supervisor] Checking {}...", tool_name);
-                            match self.call_llm(&[sup_msg], &[]).await {
+                            match self.call_llm(task_id, &[sup_msg], &[]).await {
                                 Ok((res, _)) => {
                                     let decision = res.content.unwrap_or_default().trim().to_uppercase();
                                     if decision.contains("REJECT") {
@@ -1052,6 +1083,7 @@ impl TaskScheduler {
     /// Call the LLM with the conversation history and tools, handling fallbacks and credential pooling.
     async fn call_llm(
         &self,
+        task_id: Uuid,
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
     ) -> Result<(ChatMessage, u64)> {
@@ -1076,7 +1108,10 @@ impl TaskScheduler {
                     }
                 };
 
-            match self.execute_resolved(&resolved, messages, tools).await {
+            match self
+                .execute_resolved(task_id, &resolved, messages, tools)
+                .await
+            {
                 Ok(res) => return Ok(res),
                 Err(e) => {
                     let err_str = e.to_string();
@@ -1102,7 +1137,9 @@ impl TaskScheduler {
                 fb_prov
             );
             let resolved = crate::providers::resolve(&self.config, fb_prov, None, fb_key)?;
-            return self.execute_resolved(&resolved, messages, tools).await;
+            return self
+                .execute_resolved(task_id, &resolved, messages, tools)
+                .await;
         }
 
         Err(anyhow!(
@@ -1114,6 +1151,7 @@ impl TaskScheduler {
     /// Dispatch a resolved provider to the correct wire implementation.
     async fn execute_resolved(
         &self,
+        task_id: Uuid,
         resolved: &crate::providers::ResolvedProvider,
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
@@ -1121,8 +1159,14 @@ impl TaskScheduler {
         use crate::providers::WireProtocol;
         match resolved.protocol {
             WireProtocol::Mock => call_mock(messages),
-            WireProtocol::OpenAiCompat => self.call_openai_compat(resolved, messages, tools).await,
-            WireProtocol::Anthropic => self.call_anthropic(resolved, messages, tools).await,
+            WireProtocol::OpenAiCompat => {
+                self.call_openai_compat(task_id, resolved, messages, tools)
+                    .await
+            }
+            WireProtocol::Anthropic => {
+                self.call_anthropic(task_id, resolved, messages, tools)
+                    .await
+            }
         }
     }
 
@@ -1130,6 +1174,7 @@ impl TaskScheduler {
     /// Ollama, Groq, Together, DeepSeek, Mistral, xAI, Venice, ...).
     async fn call_openai_compat(
         &self,
+        task_id: Uuid,
         resolved: &crate::providers::ResolvedProvider,
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
@@ -1150,7 +1195,10 @@ impl TaskScheduler {
             body["tool_choice"] = json!("auto");
         }
 
-        let mut req = client.post(&url).json(&body);
+        let mut req = client
+            .post(&url)
+            .header(TURN_HEADER, turn_header_value(task_id))
+            .json(&body);
         if !resolved.api_key.is_empty() {
             req = req.bearer_auth(&resolved.api_key);
         }
@@ -1204,6 +1252,7 @@ impl TaskScheduler {
     /// become `tool_result` blocks in the following user turn.
     async fn call_anthropic(
         &self,
+        task_id: Uuid,
         resolved: &crate::providers::ResolvedProvider,
         messages: &[ChatMessage],
         tools: &[serde_json::Value],
@@ -1239,6 +1288,7 @@ impl TaskScheduler {
             .post(&url)
             .header("x-api-key", &resolved.api_key)
             .header("anthropic-version", "2023-06-01")
+            .header(TURN_HEADER, turn_header_value(task_id))
             .json(&body)
             .send()
             .await?;
@@ -1807,5 +1857,40 @@ mod tests {
         let last = &out[2];
         assert_eq!(last["role"], "user");
         assert_eq!(last["content"].as_array().unwrap().len(), 2);
+    }
+
+    // ---------------------------------------------------- turn correlation
+    //
+    // The header exists so three logs about one turn can be joined. Its whole value
+    // depends on the downstream consumer accepting it verbatim: that consumer rejects
+    // rather than sanitises, because a cleaned-up id still joins, to the wrong row.
+    // These tests pin the contract from this side.
+
+    #[test]
+    fn turn_header_value_is_the_task_id_verbatim() {
+        // Unprefixed on purpose. Anything else joins against a sidecar and fails
+        // against our own tasks table.
+        let id = Uuid::new_v4();
+        assert_eq!(turn_header_value(id), id.to_string());
+    }
+
+    #[test]
+    fn turn_header_value_needs_no_sanitising_downstream() {
+        // Non-empty, at most 128 characters, no whitespace and no control characters --
+        // the exact conditions the consumer checks before it will inherit an id. A
+        // rejected id is silently replaced by a minted one, and then the join simply
+        // stops happening while every log still looks healthy.
+        for _ in 0..64 {
+            let v = turn_header_value(Uuid::new_v4());
+            assert!(!v.is_empty());
+            assert!(v.len() <= 128);
+            assert!(!v.chars().any(|c| c.is_whitespace()));
+            assert!(!v.chars().any(|c| (c as u32) < 32));
+        }
+    }
+
+    #[test]
+    fn the_header_name_is_the_one_the_sidecar_inherits() {
+        assert_eq!(TURN_HEADER, "x-kerna-task");
     }
 }
