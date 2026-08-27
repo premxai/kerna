@@ -231,6 +231,10 @@ pub struct Config {
     #[serde(default)]
     pub audit_only: bool,
 
+    /// Image used to contain model-authored commands. Pinned by default.
+    #[serde(default = "default_sandbox_image")]
+    pub sandbox_image: String,
+
     #[serde(default)]
     pub llm_fallback_provider: Option<String>,
 
@@ -275,6 +279,7 @@ impl Default for Config {
             enable_supervisor: false,
             converse: false,
             audit_only: false,
+            sandbox_image: default_sandbox_image(),
             llm_fallback_provider: None,
             llm_fallback_api_key: None,
             credential_pool: Vec::new(),
@@ -294,8 +299,31 @@ fn default_max_tool_rounds() -> u32 {
     15
 }
 
+/// Docker, not native.
+///
+/// `run_command` executes commands a model wrote and nobody reviewed. In native mode
+/// they run on the host as the operator: workspace-path confinement, a cleared
+/// environment and a timeout are real protections, and none of them stop a command that
+/// stays inside the workspace from doing whatever a process there can do.
+///
+/// Docker mode adds the boundary that actually contains it -- `--cap-drop=ALL`, no
+/// network, a mounted workspace. That is the difference between "confined" and
+/// "sandboxed", and the default should be the one the word implies.
+///
+/// A machine without Docker gets a clear refusal rather than a spawn error, and an
+/// operator who wants the old behaviour sets `runtime_mode = "native"` deliberately --
+/// which is the right way round for a security default.
 fn default_runtime_mode() -> String {
-    "native".to_string()
+    "docker".to_string()
+}
+
+/// Pinned, because "latest" is not a version.
+///
+/// An unpinned tag means the sandbox is whatever Docker Hub published this morning: the
+/// thing containing unreviewed code changes without anyone deciding it should, and two
+/// runs a month apart are not the same experiment.
+pub fn default_sandbox_image() -> String {
+    "ubuntu:24.04".to_string()
 }
 
 fn default_docker_image() -> String {
@@ -359,6 +387,10 @@ impl Config {
         }
         if self.runtime_mode.trim().is_empty() {
             self.runtime_mode = default_runtime_mode();
+            repaired = true;
+        }
+        if self.sandbox_image.trim().is_empty() {
+            self.sandbox_image = default_sandbox_image();
             repaired = true;
         }
         if self.network_mode.trim().is_empty() {
@@ -548,8 +580,13 @@ mod tests {
         assert!(legacy.repair_legacy_onboarding_defaults());
         assert_eq!(legacy.max_retries, 3);
         assert_eq!(legacy.max_tool_rounds, 15);
-        assert_eq!(legacy.runtime_mode, "native");
+        // Docker, not native: this asserted the old default and the default changed
+        // deliberately. Note what this repairs -- a BLANK runtime_mode. An existing
+        // config with `runtime_mode = "native"` written out keeps it, which is the right
+        // migration: nobody's setup breaks, and they are warned instead.
+        assert_eq!(legacy.runtime_mode, "docker");
         assert_eq!(legacy.network_mode, "none");
+        assert_eq!(legacy.sandbox_image, default_sandbox_image());
         assert!(!legacy.repair_legacy_onboarding_defaults());
     }
 }

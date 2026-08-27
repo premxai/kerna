@@ -832,6 +832,7 @@ fn test_policy_simulation() {
         config.allow_dynamic_installs,
         config.network_mode.clone(),
         config.egress_proxy.clone(),
+        config.sandbox_image.clone(),
     )
     .unwrap();
 

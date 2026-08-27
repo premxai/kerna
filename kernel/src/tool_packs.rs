@@ -273,6 +273,7 @@ mod tests {
             false,
             "none".to_string(),
             None,
+            crate::config::default_sandbox_image(),
         )
         .unwrap()
     }

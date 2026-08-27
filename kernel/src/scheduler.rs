@@ -158,6 +158,7 @@ impl TaskScheduler {
             config.allow_dynamic_installs,
             config.network_mode.clone(),
             config.egress_proxy.clone(),
+            config.sandbox_image.clone(),
         )?;
         let permissions = PermissionManager::with_mode(
             config.clone(),

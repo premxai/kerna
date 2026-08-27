@@ -1775,6 +1775,7 @@ async fn main() -> Result<()> {
                         config.allow_dynamic_installs,
                         config.network_mode.clone(),
                         config.egress_proxy.clone(),
+                        config.sandbox_image.clone(),
                     )?;
                     // Initialize registry to check MCP filters
                     let mut registry = crate::mcp_registry::McpRegistry::new();

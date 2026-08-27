@@ -15,6 +15,17 @@ pub enum CommandClass {
 /// Returns true if `path` escapes the workspace: an absolute Unix path,
 /// a parent-directory traversal, a Windows drive-letter path (e.g. `C:\`),
 /// or a UNC path (`\\server\share`).
+/// Whether the docker CLI can be reached at all.
+pub fn docker_available() -> bool {
+    std::process::Command::new("docker")
+        .args(["version", "--format", "{{.Server.Version}}"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 pub fn is_out_of_workspace_path(path: &str) -> bool {
     if path.starts_with('/') || path.contains("..") {
         return true;
@@ -107,6 +118,10 @@ pub struct ProcessSandbox {
     allow_dynamic_installs: bool,
     network_mode: String,
     egress_proxy: Option<String>,
+    /// Pinned image for containing model-authored commands. "latest" is not a version:
+    /// it means the sandbox is whatever was published this morning, changing what
+    /// contains unreviewed code without anyone deciding it should.
+    sandbox_image: String,
 }
 
 impl ProcessSandbox {
@@ -116,17 +131,36 @@ impl ProcessSandbox {
         allow_dynamic_installs: bool,
         network_mode: String,
         egress_proxy: Option<String>,
+        sandbox_image: String,
     ) -> Result<Self> {
         let sandbox_dir = dir.as_ref().to_path_buf();
         if !sandbox_dir.exists() {
             fs::create_dir_all(&sandbox_dir)?;
         }
+        // Said once, out loud. An existing config carries `runtime_mode = "native"`
+        // written out, so changing the default protects new installs and leaves every
+        // current one exactly as it was. That is the right migration -- nobody's setup
+        // breaks -- but it also means the people most likely to be unsandboxed are the
+        // ones who never chose it. A silent inheritance is not a decision.
+        if runtime_mode != "docker" {
+            eprintln!(
+                "[!] runtime_mode = \"{runtime_mode}\": model-authored commands run on \
+this host, confined to the workspace but not contained. Set runtime_mode = \"docker\" \
+for a real sandbox."
+            );
+        }
+
         Ok(ProcessSandbox {
             sandbox_dir,
             runtime_mode,
             allow_dynamic_installs,
             network_mode,
             egress_proxy,
+            sandbox_image: if sandbox_image.trim().is_empty() {
+                crate::config::default_sandbox_image()
+            } else {
+                sandbox_image
+            },
         })
     }
 
@@ -217,6 +251,16 @@ impl ProcessSandbox {
         let mut actual_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
 
         if self.runtime_mode == "docker" {
+            // Refused with an explanation rather than a spawn error. Docker is now the
+            // default, so the machine that does not have it is the common case rather
+            // than the exotic one, and "No such file or directory: docker" is not a
+            // message anyone can act on.
+            if !docker_available() {
+                return Err(anyhow!(
+                    "runtime_mode is \"docker\" but the docker CLI is not available.                      Install Docker, or set runtime_mode = \"native\" to run commands                      confined to the workspace but not contained -- which is a decision                      to make deliberately, not by accident."
+                ));
+            }
+
             let absolute_sandbox = std::env::current_dir()?.join(&sandbox_dir);
             let mut docker_args = vec![
                 "run".to_string(),
@@ -237,7 +281,7 @@ impl ProcessSandbox {
                 docker_args.push(format!("https_proxy={}", proxy));
             }
 
-            docker_args.push("ubuntu:latest".to_string()); // Default image for sandbox commands
+            docker_args.push(self.sandbox_image.clone());
             docker_args.push(actual_cmd);
             docker_args.append(&mut actual_args);
             actual_cmd = "docker".to_string();
@@ -434,9 +478,15 @@ mod tests {
     #[test]
     fn test_simulate_denies_wrappers_and_home() {
         let dir = env::temp_dir().join("kerna_sim_sandbox");
-        let sandbox =
-            ProcessSandbox::new(&dir, "native".to_string(), false, "none".to_string(), None)
-                .unwrap();
+        let sandbox = ProcessSandbox::new(
+            &dir,
+            "native".to_string(),
+            false,
+            "none".to_string(),
+            None,
+            crate::config::default_sandbox_image(),
+        )
+        .unwrap();
         // Permissive policy so the *only* thing that can deny is the sandbox
         // boundary/classification logic under test.
         let config = crate::config::Config {
@@ -467,9 +517,15 @@ mod tests {
     #[tokio::test]
     async fn test_package_manager_blocking() {
         let dir = env::temp_dir().join("kerna_test_sandbox");
-        let sandbox =
-            ProcessSandbox::new(&dir, "native".to_string(), false, "none".to_string(), None)
-                .unwrap();
+        let sandbox = ProcessSandbox::new(
+            &dir,
+            "native".to_string(),
+            false,
+            "none".to_string(),
+            None,
+            crate::config::default_sandbox_image(),
+        )
+        .unwrap();
 
         let res = sandbox
             .run_command("npm", &["install", "evil-package"], 5)
@@ -481,6 +537,98 @@ mod tests {
         let res2 = sandbox.run_command("whoami", &[], 5).await;
         // whoami should be allowed
         assert!(res2.is_ok(), "whoami failed: {:?}", res2.err());
+    }
+
+    // ------------------------------------------------ the sandbox default
+    //
+    // `run_command` executes commands a model wrote and nobody reviewed. Native mode
+    // confines them to a workspace with a cleared environment and a timeout -- real
+    // protections, and none of them stop a command that stays inside the workspace from
+    // doing whatever a process there can do. Docker adds the boundary the word
+    // "sandbox" implies, and the default should be the one that matches the word.
+
+    #[test]
+    fn the_default_runtime_is_docker() {
+        let config = crate::config::Config::default();
+        assert_eq!(config.runtime_mode, "docker");
+    }
+
+    #[test]
+    fn the_sandbox_image_is_pinned() {
+        // "latest" is not a version: it means the thing containing unreviewed code is
+        // whatever Docker Hub published this morning, and two runs a month apart are not
+        // the same experiment.
+        let image = crate::config::default_sandbox_image();
+        assert!(
+            !image.contains("latest"),
+            "sandbox image is unpinned: {image}"
+        );
+        assert!(image.contains(':'), "sandbox image has no tag: {image}");
+    }
+
+    #[test]
+    fn the_configured_image_is_the_one_used() {
+        let dir = std::env::temp_dir().join("kerna-image-test");
+        let sandbox = ProcessSandbox::new(
+            &dir,
+            "docker".to_string(),
+            false,
+            "none".to_string(),
+            None,
+            "ubuntu:22.04".to_string(),
+        )
+        .expect("sandbox builds");
+        assert_eq!(sandbox.sandbox_image, "ubuntu:22.04");
+    }
+
+    #[test]
+    fn an_empty_image_setting_falls_back_to_the_pinned_default() {
+        // A blank value in a hand-edited config must not become a blank docker argument.
+        let dir = std::env::temp_dir().join("kerna-image-blank");
+        let sandbox = ProcessSandbox::new(
+            &dir,
+            "docker".to_string(),
+            false,
+            "none".to_string(),
+            None,
+            "   ".to_string(),
+        )
+        .expect("sandbox builds");
+        assert_eq!(
+            sandbox.sandbox_image,
+            crate::config::default_sandbox_image()
+        );
+    }
+
+    #[tokio::test]
+    async fn docker_mode_without_docker_explains_itself() {
+        // Docker is now the default, so a machine without it is the common case rather
+        // than the exotic one. "No such file or directory: docker" is not a message
+        // anyone can act on. Asserted only where docker is genuinely absent.
+        if docker_available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join("kerna-nodocker-test");
+        let sandbox = ProcessSandbox::new(
+            &dir,
+            "docker".to_string(),
+            false,
+            "none".to_string(),
+            None,
+            crate::config::default_sandbox_image(),
+        )
+        .expect("sandbox builds");
+
+        let error = sandbox
+            .run_command("echo", &["hi"], 10)
+            .await
+            .expect_err("docker mode without docker must fail");
+        let text = error.to_string();
+        assert!(text.contains("docker"), "{text}");
+        assert!(
+            text.contains("native"),
+            "message must name the way out: {text}"
+        );
     }
 }
 
