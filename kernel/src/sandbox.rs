@@ -12,9 +12,6 @@ pub enum CommandClass {
     DangerousGlobal,
 }
 
-/// Returns true if `path` escapes the workspace: an absolute Unix path,
-/// a parent-directory traversal, a Windows drive-letter path (e.g. `C:\`),
-/// or a UNC path (`\\server\share`).
 /// Whether the docker CLI can be reached at all.
 pub fn docker_available() -> bool {
     std::process::Command::new("docker")
@@ -26,6 +23,9 @@ pub fn docker_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Returns true if `path` escapes the workspace: an absolute Unix path,
+/// a parent-directory traversal, a Windows drive-letter path (e.g. `C:\`),
+/// or a UNC path (`\\server\share`).
 pub fn is_out_of_workspace_path(path: &str) -> bool {
     if path.starts_with('/') || path.contains("..") {
         return true;
