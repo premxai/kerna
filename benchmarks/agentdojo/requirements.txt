@@ -1,3 +1,4 @@
 # Pin the external benchmark separately from Kerna's runtime dependencies.
 # Update this deliberately and record the exact version in every published run.
 agentdojo==0.1.35
+anthropic==0.50.0
