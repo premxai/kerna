@@ -2,6 +2,23 @@
 
 All notable changes to Kerna will be documented in this file.
 
+## [v0.2.7] - 2026-08-28
+
+### Security
+
+- **`h2` upgraded to 0.4.19** (was 0.4.15), closing
+  [RUSTSEC-2026-0258](https://rustsec.org/advisories/RUSTSEC-2026-0258) — "h2 unbounded
+  empty DATA frames", a resource-exhaustion denial of service against an HTTP/2 server.
+  It reaches Kerna transitively and matters because `kerna serve` and `kerna gateway`
+  both serve HTTP.
+
+  **v0.2.6 shipped with this advisory outstanding.** It was published 17 August and CI
+  had been failing on it since, but `cargo audit` runs *before* `cargo build` and
+  `cargo test` in the CI job, so the red result read as an ordinary broken build and the
+  build and test steps had not run on any commit for a week. The release workflow does
+  not run the audit at all, so nothing stopped v0.2.6. Anyone on v0.2.6 or earlier
+  should upgrade.
+
 ## [v0.2.6] - 2026-08-28
 
 ### Changed — read this before upgrading
