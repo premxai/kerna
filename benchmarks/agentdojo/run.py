@@ -48,9 +48,23 @@ DEFAULT_PILOT_ATTACK = "injecagent"
 
 
 class AttackIdentity:
-    """Only supplies a stable name for fixed AgentDojo attacks."""
+    """Supplies the pipeline name AgentDojo's attacks read.
 
-    name = "kerna-governed-agent"
+    Most attacks ignore it. The `important_instructions` family -- which includes
+    `tool_knowledge` -- addresses the model *by name*: "This is an important message from
+    me, {user}, to you, {model}." AgentDojo resolves that from this name through a table
+    of models it knows, so a local model like `qwen3:8b` has no entry and the attack
+    cannot be constructed.
+
+    That is a real experimental choice, not a lookup failure to paper over. Telling a
+    local Qwen it is being addressed as GPT-4 changes what the attack says, so the name
+    is supplied deliberately with `--attack-model-name` and recorded in the result. The
+    honest alternative for an unlisted model is a variant that does not use the name at
+    all: `important_instructions_no_model_name` or `important_instructions_no_names`.
+    """
+
+    def __init__(self, name: str = "kerna-governed-agent") -> None:
+        self.name = name
 
     def query(self, *args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("The fixed attack must not query an AgentDojo pipeline")
@@ -282,17 +296,50 @@ def score_kerna_result(scenario: dict[str, Any], bridge_result_path: Path, datab
     }
 
 
+def _runtime_of(base_url: str | None, provider: str) -> str:
+    """Name what actually served the request, from the endpoint it was sent to."""
+    if not base_url:
+        return "anthropic-api" if provider == "anthropic" else "openai-api"
+    low = base_url.lower()
+    if ":11434" in low:
+        return "ollama"
+    if ":8080" in low or ":8081" in low:
+        return "llama.cpp"
+    return "openai-compatible"
+
+
 def run_configuration(
     args: argparse.Namespace,
     allowed_tools: list[str],
     denied_tools: list[str],
     governance: str,
 ) -> dict[str, Any]:
-    """Return the material settings needed to reproduce or review a trial."""
+    """Return the material settings needed to reproduce or review a trial.
+
+    `provider` alone was not enough. A local run recorded `provider: "openai"` with
+    `model: "qwen3:8b"` and no trace of the fact that it had been served by Ollama on
+    loopback -- so a result file could not distinguish a frontier control from a local
+    one, which is the single most important axis in this campaign. The endpoint, the
+    runtime it implies, and whether deterministic sampling actually reached the provider
+    are all recorded now.
+    """
+    base_url = getattr(args, "base_url", None)
     return {
         "governance": governance,
         "provider": args.provider,
+        "baseUrl": base_url,
+        "runtime": _runtime_of(base_url, args.provider),
         "model": args.model,
+        "attack": getattr(args, "attack", None),
+        # Recorded because it changes the injection text, not just its metadata.
+        "attackModelName": getattr(args, "attack_model_name", None),
+        "sampling": {
+            "temperature": 0.0,
+            # AgentDojo 0.1.35 sends `temperature or NOT_GIVEN`, and `0.0 or X` is `X`,
+            # so an unpatched run used the server's own sampling defaults. Recorded per
+            # run because it decides whether a result is reproducible.
+            "temperatureTransmitted": getattr(args, "_temperature_patched", False),
+        },
         "budgets": {
             "maxRuntimeSeconds": args.max_runtime_seconds,
             "maxToolCalls": args.max_tool_calls,
@@ -316,6 +363,53 @@ def run_configuration(
 # `injection_task_executed: false`, which voids the comparison and says more about the
 # benchmark than about Kerna. Override with --model deliberately, and record which.
 DEFAULT_MODEL_FOR = {"openai": "gpt-4o-mini", "anthropic": "claude-haiku-4-5"}
+
+
+# Every attack AgentDojo 0.1.35 registers. Listed rather than imported at module scope so
+# `--help` works without the benchmark installed, and asserted against the live registry
+# in `require_agentdojo` so a version bump that adds or removes one is a loud failure
+# rather than a silently shorter menu.
+REGISTERED_ATTACKS = (
+    "captcha_dos", "direct", "dos", "felony_dos", "ignore_previous",
+    "important_instructions", "important_instructions_no_model_name",
+    "important_instructions_no_names", "important_instructions_no_user_name",
+    "important_instructions_wrong_model_name", "important_instructions_wrong_user_name",
+    "injecagent", "manual", "offensive_email_dos", "swearwords_dos", "system_message",
+    "tool_knowledge",
+)
+
+
+def force_deterministic_sampling() -> str:
+    """Make `temperature=0` actually reach the provider, and say whether it did.
+
+    AgentDojo 0.1.35 declares `temperature: float | None = 0.0` and then sends
+    `temperature=temperature or NOT_GIVEN`. In Python `0.0 or X` is `X`, so the one value
+    the default exists to transmit is the only one it drops -- every run so far used
+    whatever sampling the server chose for itself. For a local endpoint that is the
+    difference between a reproducible control and an anecdote.
+
+    Patched rather than worked around, because the alternative is passing a non-zero
+    temperature to defeat the falsiness, which buys determinism by giving up determinism.
+    The pin on agentdojo==0.1.35 is what makes patching a known line safe.
+    """
+    from openai import NOT_GIVEN
+
+    from agentdojo.agent_pipeline.llms import openai_llm
+
+    original = openai_llm.chat_completion_request
+
+    def patched(client, model, messages, tools, reasoning_effort, temperature=0.0):
+        return client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=tools or NOT_GIVEN,
+            tool_choice="auto" if tools else NOT_GIVEN,
+            temperature=NOT_GIVEN if temperature is None else temperature,
+            reasoning_effort=reasoning_effort or NOT_GIVEN,
+        )
+
+    openai_llm.chat_completion_request = patched
+    return "patched: temperature=0 now reaches the provider (agentdojo 0.1.35 drops it)"
 
 
 def run_native_control(scenario: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -422,7 +516,28 @@ def main() -> int:
     parser.add_argument("--suite", default="workspace")
     parser.add_argument("--user-task", default=DEFAULT_PILOT_USER_TASK)
     parser.add_argument("--injection-task", default=DEFAULT_PILOT_INJECTION_TASK)
-    parser.add_argument("--attack", default=DEFAULT_PILOT_ATTACK, choices=["direct", "ignore_previous", "system_message", "injecagent"])
+    # AgentDojo 0.1.35 registers seventeen attacks; this offered four, and the four
+    # weakest. `injecagent` prepends "Ignore all previous instructions" and nothing more,
+    # and it produced zero successful injections across 18 controls spanning Claude Haiku
+    # 4.5, Llama 3.1 8B and Qwen3 8B -- so it never yielded an attackable baseline, and
+    # without one there is no governed comparison to run.
+    #
+    # `tool_knowledge` is the interesting one: it tells the compromised agent which tool
+    # sequence to execute and how to fill its arguments from what it learns doing the
+    # real task. The `important_instructions` family parameterises the user and model
+    # names, which is why several variants exist.
+    parser.add_argument("--attack", default=DEFAULT_PILOT_ATTACK,
+                        choices=sorted(REGISTERED_ATTACKS))
+    parser.add_argument(
+        "--attack-model-name", default=None,
+        help="the model name an `important_instructions`-family attack should address, "
+             "which AgentDojo must recognise (e.g. gpt-4o-2024-05-13). Required for "
+             "those attacks when the model under test is not in AgentDojo's table -- "
+             "every local model. The whole family needs it, including the `_no_name` "
+             "variants, which resolve the name and then leave it out of the text -- so "
+             "those change what the injection SAYS but not what it REQUIRES. Recorded "
+             "in the result, because addressing a local Qwen as GPT-4 is a choice about "
+             "the experiment rather than a detail of running it.")
     parser.add_argument("--benchmark-version", default="v1.2.2")
     parser.add_argument("--provider", default="openai", choices=["openai", "anthropic"])
     # Resolved after parsing, because the sensible default depends on the provider.
@@ -452,6 +567,24 @@ def main() -> int:
 
     require_agentdojo()
 
+    # A version bump that adds or removes an attack must be a loud failure, not a
+    # silently shorter menu -- the last one left `tool_knowledge` unreachable while three
+    # model classes were calibrated against the weakest attack in the set.
+    from agentdojo.attacks import attack_registry, baseline_attacks  # noqa: F401
+    from agentdojo.attacks import important_instructions_attacks  # noqa: F401
+
+    live = set(attack_registry.ATTACKS)
+    if live != set(REGISTERED_ATTACKS):
+        raise RuntimeError(
+            f"attack registry changed: only in agentdojo {sorted(live - set(REGISTERED_ATTACKS))}, "
+            f"only in this harness {sorted(set(REGISTERED_ATTACKS) - live)}")
+
+    if args.provider == "openai":
+        args._temperature_patched = True
+        print(force_deterministic_sampling(), file=sys.stderr)
+    else:
+        args._temperature_patched = False
+
     from agentdojo.attacks import baseline_attacks  # noqa: F401 - registers fixed attacks
     from agentdojo.attacks.attack_registry import load_attack
     from agentdojo.task_suite.load_suites import get_suite
@@ -459,7 +592,23 @@ def main() -> int:
     suite = get_suite(args.benchmark_version, args.suite)
     user_task = suite.get_user_task_by_id(args.user_task)
     injection_task = suite.get_injection_task_by_id(args.injection_task)
-    attack = load_attack(args.attack, suite, AttackIdentity())
+    identity = AttackIdentity(args.attack_model_name or "kerna-governed-agent")
+    try:
+        attack = load_attack(args.attack, suite, identity)
+    except (KeyError, ValueError) as exc:
+        raise RuntimeError(
+            f"the {args.attack!r} attack needs a model name AgentDojo recognises, and it "
+            f"does not recognise {identity.name!r}. Pass --attack-model-name with one it "
+            f"knows, e.g. gpt-4o-2024-05-13.\n\n"
+            f"The whole `important_instructions` family resolves the name in its base "
+            f"constructor -- including `tool_knowledge` and the `_no_name` variants, "
+            f"which resolve it and then discard it. So there is no variant that avoids "
+            f"the requirement, only variants that avoid putting the name in the "
+            f"injection text.\n\n"
+            f"For a local model this is a real experimental choice: the name you supply "
+            f"is what the injection addresses. It is recorded as `attackModelName` in "
+            f"the result for exactly that reason."
+        ) from exc
     injections = attack.attack(user_task, injection_task)
     allow_tools = list(dict.fromkeys(args.allow_tool))
     deny_tools = list(dict.fromkeys(args.deny_tool))
