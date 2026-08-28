@@ -36,11 +36,32 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub secrets: Vec<String>,
 
-    #[serde(default = "default_runtime_mode")]
+    /// How this *plugin process* is launched, which is a different question from how a
+    /// model's command is run and must not share a default with it.
+    ///
+    /// This briefly did share one. `default_runtime_mode` moved to "docker" so that
+    /// `run_command` would sandbox commands a model wrote, and because both structs used
+    /// it, every MCP server whose config omitted the field started trying to launch
+    /// inside a container. The plugin binary is not in that image, so it failed with
+    /// "MCP server disconnected or returned empty response" -- an obscure message for a
+    /// configuration change nobody made. It shipped in v0.2.6 and v0.2.7.
+    ///
+    /// Native is also what the code already believed: `packs.rs`, `plugin_manifest.rs`
+    /// and both construction sites in `main.rs` all write "native" explicitly. Only the
+    /// serde default disagreed, so it bit exactly the configs written by hand or by an
+    /// older version -- never the ones the product generated for itself.
+    #[serde(default = "default_mcp_runtime_mode")]
     pub runtime_mode: String,
 
     #[serde(default = "default_docker_image")]
     pub docker_image: String,
+}
+
+/// An MCP server is an operator-configured plugin binary, not a model-written command.
+/// Containerising it is a real feature and a deliberate one; it is not a safe default,
+/// because the default cannot know the binary exists inside the image.
+fn default_mcp_runtime_mode() -> String {
+    "native".to_string()
 }
 
 /// Configuration for a scheduled recurring goal.
@@ -588,5 +609,47 @@ mod tests {
         assert_eq!(legacy.network_mode, "none");
         assert_eq!(legacy.sandbox_image, default_sandbox_image());
         assert!(!legacy.repair_legacy_onboarding_defaults());
+    }
+}
+
+#[cfg(test)]
+mod mcp_runtime_mode_tests {
+    use super::*;
+
+    /// The regression that broke every MCP plugin in v0.2.6 and v0.2.7.
+    ///
+    /// `default_runtime_mode` moved to "docker" so `run_command` would sandbox a model's
+    /// commands. Both structs shared it, so a plugin whose config omitted the field
+    /// started launching inside a container that does not contain it, and failed with
+    /// "MCP server disconnected or returned empty response".
+    #[test]
+    fn an_mcp_server_without_a_runtime_mode_runs_natively() {
+        let toml = r#"
+            name = "mockmcp"
+            command = "kerna"
+            args = ["mockmcp"]
+            enabled = true
+        "#;
+        let server: McpServerConfig = toml::from_str(toml).expect("parses");
+        assert_eq!(server.runtime_mode, "native");
+    }
+
+    /// And the change it was confused with must survive: a model's command still
+    /// defaults to a container.
+    #[test]
+    fn run_command_still_defaults_to_docker() {
+        assert_eq!(default_runtime_mode(), "docker");
+    }
+
+    /// An explicit choice is still honoured in both directions.
+    #[test]
+    fn an_explicit_mcp_runtime_mode_is_kept() {
+        let toml = r#"
+            name = "boxed"
+            command = "thing"
+            runtime_mode = "docker"
+        "#;
+        let server: McpServerConfig = toml::from_str(toml).expect("parses");
+        assert_eq!(server.runtime_mode, "docker");
     }
 }

@@ -162,6 +162,13 @@ jobs:
   # every platform in the matrix, so auditing it per-OS bought nothing.
   audit:
     needs: build
+    # `needs` alone made this skip whenever build failed, which is the original coupling
+    # wearing the other face: an advisory became invisible while the build was broken,
+    # and the build being broken is exactly when nobody is looking. Proven immediately --
+    # the first run under the new layout skipped the audit because a smoke test failed.
+    # The audit reads Cargo.lock and needs nothing build produces, so it runs either way
+    # and only its *ordering* is borrowed from `needs`.
+    if: always()
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4

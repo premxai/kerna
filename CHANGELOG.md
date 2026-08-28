@@ -2,6 +2,32 @@
 
 All notable changes to Kerna will be documented in this file.
 
+## [v0.2.8] - 2026-08-28
+
+### Fixed — upgrade immediately from v0.2.6 or v0.2.7
+
+- **MCP plugins failed to load.** v0.2.6 made `run_command` sandbox a model's commands
+  in Docker, which is right. But the default was shared with `McpServerConfig`, so an
+  MCP server whose config omitted `runtime_mode` also began launching inside a
+  container — one that does not contain the plugin binary. It failed with *"MCP server
+  disconnected or returned empty response"*, an obscure message for a configuration
+  change nobody made, and the task then died on tool failures.
+
+  This hit any `kerna.toml` written by hand or by a version before the field existed,
+  which is most of them. Native is what the rest of the code already assumed:
+  `packs.rs`, `plugin_manifest.rs` and both construction sites in `main.rs` all write
+  `"native"` explicitly, and only the serde default disagreed.
+
+  **`run_command` still defaults to Docker** — that change was correct and is
+  unaffected. Containerising an MCP *plugin* remains available by setting
+  `runtime_mode = "docker"` on that server deliberately.
+
+- **CI could not have caught it, and now can.** `cargo audit` ran before `cargo build`
+  and `cargo test` in the same job, so while an advisory stood the build and test steps
+  never ran at all — for a week, across four commits. The smoke test that catches
+  exactly this regression was never reached. The audit is now its own job, ordered
+  after build and tests and running whether or not they pass.
+
 ## [v0.2.7] - 2026-08-28
 
 ### Security
