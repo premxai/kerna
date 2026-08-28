@@ -52,14 +52,10 @@ jobs:
       run: cargo clippy -- -D warnings
       working-directory: ./kernel
       
-    - name: Install cargo-audit
-      uses: taiki-e/install-action@cargo-audit
-
-    - name: Security audit
-      run: cargo audit      
     - name: Build binary
       run: cargo build
       working-directory: ./kernel
+
     - name: Run tests
       run: cargo test --verbose
       working-directory: ./kernel
@@ -151,3 +147,30 @@ jobs:
       if: runner.os == 'Windows'
       run: pwsh -File scripts/smoke_test.ps1
       shell: pwsh
+
+  # Its own job, gated behind `build`, and this placement is the fix rather than a
+  # tidy-up. `cargo audit` used to run *before* `cargo build` and `cargo test` in the
+  # same job. When RUSTSEC-2026-0258 was published against `h2`, CI went red and stayed
+  # red for a week -- and because the audit failed first, the build and test steps never
+  # ran at all. A security advisory was indistinguishable from an ordinary broken build,
+  # so nobody read it as one, and v0.2.6 shipped with the advisory outstanding because
+  # the release workflow does not run the audit either.
+  #
+  # Separating it fixes both halves. Build and test now report their own result while an
+  # advisory stands, and an advisory reports under its own check name where it reads as
+  # what it is. It also runs once instead of three times: `Cargo.lock` is identical on
+  # every platform in the matrix, so auditing it per-OS bought nothing.
+  audit:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install cargo-audit
+      uses: taiki-e/install-action@cargo-audit
+
+    - name: Security audit
+      run: cargo audit
