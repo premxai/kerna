@@ -359,7 +359,14 @@ def run_native_control(scenario: dict[str, Any], args: argparse.Namespace) -> di
         import openai
         from agentdojo.agent_pipeline.llms.openai_llm import OpenAILLM
 
-        llm = OpenAILLM(openai.OpenAI(), args.model)
+        # `--base-url` points the control arm at any OpenAI-compatible server, which is
+        # how a *local* model becomes the attackable baseline. That matters: the first
+        # Anthropic control resisted 6/6 injections, so it produced no eligible governed
+        # comparison at all. A baseline has to be successfully attacked before governing
+        # it can measure anything, and a small local model is the cheapest way to get one.
+        client = (openai.OpenAI(base_url=args.base_url, api_key=args.api_key or "local")
+                  if args.base_url else openai.OpenAI())
+        llm = OpenAILLM(client, args.model)
 
     pipeline = AgentPipeline.from_config(
         PipelineConfig(
@@ -420,6 +427,12 @@ def main() -> int:
     parser.add_argument("--provider", default="openai", choices=["openai", "anthropic"])
     # Resolved after parsing, because the sensible default depends on the provider.
     parser.add_argument("--model", default=None)
+    parser.add_argument("--base-url", default=None,
+                        help="OpenAI-compatible endpoint for the control arm, e.g. a "
+                             "local llama.cpp server. Use this to obtain an attackable "
+                             "baseline when a frontier model resists the injection.")
+    parser.add_argument("--api-key", default=None,
+                        help="key for --base-url; local servers usually ignore it")
     parser.add_argument("--mode", choices=["control", "governed"], default="governed")
     parser.add_argument("--kerna", default=shutil.which("kerna") or str(REPOSITORY_ROOT / "target" / "debug" / ("kerna.exe" if sys.platform == "win32" else "kerna")))
     parser.add_argument("--python", default=sys.executable)

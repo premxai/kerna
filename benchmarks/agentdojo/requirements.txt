@@ -1,4 +1,10 @@
 # Pin the external benchmark separately from Kerna's runtime dependencies.
 # Update this deliberately and record the exact version in every published run.
 agentdojo==0.1.35
+
+# AgentDojo 0.1.35 does not work with the current Anthropic SDK. Measured 28 Aug 2026:
+# anthropic 1.2.0 fails before inference, and 0.50.0 runs the benchmark to completion.
+# The pin is here rather than in a README because an unpinned install fails in a way that
+# looks like a benchmark result -- the first Anthropic control run died before a single
+# model call and had to be discarded as infrastructure noise.
 anthropic==0.50.0
