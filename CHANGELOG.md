@@ -2,6 +2,50 @@
 
 All notable changes to Kerna will be documented in this file.
 
+## [v0.2.6] - 2026-08-28
+
+### Changed — read this before upgrading
+
+- **`run_command` is sandboxed in Docker by default.** The previous default was
+  native: workspace-path confinement, a cleared environment and a timeout. Those are
+  real protections and none of them stop a command that stays inside the workspace
+  from doing whatever a process there can do — and `run_command` executes commands a
+  model wrote and nobody reviewed. Docker adds the boundary the word "sandbox"
+  implies, and the image is pinned rather than floating.
+
+  **This affects existing installs.** `kerna init` never wrote `runtime_mode`, so a
+  config from v0.2.5 has no value for it and now inherits `docker`. Without the Docker
+  CLI, `run_command` fails with a message naming the fix rather than quietly running
+  unsandboxed. To keep the old behaviour, set it deliberately:
+
+  ```toml
+  runtime_mode = "native"
+  ```
+
+### Added
+
+- **`kerna run --audit`** — rung 1. Records every policy decision and enforces none of
+  them: nothing is denied, nothing prompts, and each action the policy would have
+  stopped is printed and written to the audit trail. Use it to size a policy before
+  trusting it. The receipt records what the **policy** decided rather than what was
+  enforced, because a trail storing the enforced outcome would report a clean run in
+  audit mode and tell you nothing. Enforce remains the default, and audit mode
+  announces itself loudly — going unnoticed is its one failure mode.
+- **`x-kerna-task` on every model request**, so the runtime's audit trail and a
+  sidecar's cost log describe the same turn and can be joined.
+
+### Fixed
+
+- **One policy meaning across both enforcement points.** `docs/POLICY.md` is the
+  specification and `docs/policy-conformance.json` is it in executable form; both
+  engines run it. Four divergences were found and fixed, including one nobody had
+  spotted in review, which the suite failed on its first run.
+- **The AgentDojo prevention claim now requires evidence of prevention.**
+  `unsafeActionPrevented` was computed as `not injection_task_executed`, so the
+  strongest prevention number the benchmark could produce came from a completely
+  broken run. It is `true` only when the receipt shows an *enforced* denial, and
+  `null` otherwise with `preventionEvidence` naming why.
+
 ## [v0.2.5] - 2026-07-25
 
 ### Fixed
