@@ -322,6 +322,14 @@ for a real sandbox."
 pub struct SimulationDecision {
     pub is_allowed: bool,
     pub reasons: Vec<String>,
+    /// True when the policy would stop and ask a human rather than proceed.
+    ///
+    /// The policy has three outcomes and this struct used to carry two, so
+    /// `require_confirmation` collapsed into `is_allowed: true` and `kerna policy
+    /// simulate` printed a green ALLOW for an action that would actually halt and
+    /// prompt. For the one command whose entire purpose is letting an operator test a
+    /// policy before trusting it, that is the wrong direction to round in.
+    pub needs_confirmation: bool,
 }
 
 impl ProcessSandbox {
@@ -334,6 +342,7 @@ impl ProcessSandbox {
         let mut decision = SimulationDecision {
             is_allowed: true,
             reasons: Vec::new(),
+            needs_confirmation: false,
         };
 
         // 1. Basic tool validation
@@ -403,6 +412,9 @@ impl ProcessSandbox {
         };
 
         let perm_level = permissions.check(tool, None);
+        if perm_level == crate::permissions::PermissionLevel::RequireConfirmation {
+            decision.needs_confirmation = true;
+        }
         if perm_level == crate::permissions::PermissionLevel::Deny {
             decision.is_allowed = false;
             decision.reasons.push(format!(
@@ -644,4 +656,63 @@ fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod simulate_three_outcomes {
+    use super::*;
+    use crate::config::{Config, PermissionRule};
+    use crate::permissions::PermissionManager;
+
+    fn sandbox_in(dir: &std::path::Path) -> ProcessSandbox {
+        ProcessSandbox::new(
+            dir,
+            "native".to_string(),
+            false,
+            "none".to_string(),
+            None,
+            crate::config::default_sandbox_image(),
+        )
+        .expect("sandbox")
+    }
+
+    fn manager(action: &str) -> PermissionManager {
+        PermissionManager::new(Config {
+            permissions: vec![PermissionRule {
+                tool: "run_command".to_string(),
+                action: action.to_string(),
+            }],
+            ..Default::default()
+        })
+    }
+
+    /// `kerna policy simulate` printed a green ALLOW for a tool set to
+    /// `require_confirmation`, which stops and asks a human before it runs. The policy
+    /// has three outcomes and the decision carried two, so the middle one rounded
+    /// towards "safe to run" -- in the one command whose purpose is letting an operator
+    /// check a policy before trusting it.
+    #[test]
+    fn require_confirmation_is_not_reported_as_allowed() {
+        let dir = std::env::temp_dir().join("kerna-sim-ask");
+        let _ = std::fs::create_dir_all(&dir);
+        let decision = sandbox_in(&dir)
+            .simulate_command("run_command", r#"{"command":"ls"}"#, &manager("require_confirmation"))
+            .expect("simulates");
+
+        assert!(
+            decision.needs_confirmation,
+            "a tool that prompts a human must not report as plain ALLOW"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_allow_does_not_claim_a_prompt() {
+        let dir = std::env::temp_dir().join("kerna-sim-allow");
+        let _ = std::fs::create_dir_all(&dir);
+        let decision = sandbox_in(&dir)
+            .simulate_command("run_command", r#"{"command":"ls"}"#, &manager("auto_approve"))
+            .expect("simulates");
+
+        assert!(decision.is_allowed && !decision.needs_confirmation);
+    }
 }

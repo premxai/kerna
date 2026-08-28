@@ -1810,10 +1810,14 @@ async fn main() -> Result<()> {
                     }
 
                     // 2. Check Sandbox / Global Policy
+                    let mut needs_confirmation = false;
                     match sandbox.simulate_command(&tool, &args, &permissions) {
                         Ok(decision) => {
                             if !decision.is_allowed {
                                 is_allowed = false;
+                            }
+                            if decision.needs_confirmation {
+                                needs_confirmation = true;
                             }
                             for r in decision.reasons {
                                 if r.contains("Deny")
@@ -1834,10 +1838,19 @@ async fn main() -> Result<()> {
 
                     println!("============================================================");
                     println!("  Policy Simulation: {}", tool);
-                    if is_allowed {
-                        println!("  Final Decision: \x1b[1;32mALLOW\x1b[0m");
-                    } else {
+                    // Three outcomes, because the policy has three. This printed a green
+                    // ALLOW for anything that was not denied, so a tool set to
+                    // `require_confirmation` -- which stops and asks a human -- reported
+                    // as allowed. For the one command that exists to let an operator test
+                    // a policy before trusting it, that is the wrong way to round.
+                    if !is_allowed {
                         println!("  Final Decision: \x1b[1;31mDENY\x1b[0m");
+                    } else if needs_confirmation {
+                        println!(
+                            "  Final Decision: \x1b[1;33mASK\x1b[0m  (a human is prompted before this runs)"
+                        );
+                    } else {
+                        println!("  Final Decision: \x1b[1;32mALLOW\x1b[0m");
                     }
                     println!("============================================================\n");
 
