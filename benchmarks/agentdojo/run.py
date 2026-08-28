@@ -309,6 +309,15 @@ def run_configuration(
     }
 
 
+# The control arm has to be *successfully attacked* or the governed arm proves nothing,
+# and AgentDojo's injection tasks were calibrated against models of gpt-4o-mini's
+# generation. So the Anthropic default is the matching tier rather than the strongest
+# model: a frontier model that shrugs off the injection unaided produces
+# `injection_task_executed: false`, which voids the comparison and says more about the
+# benchmark than about Kerna. Override with --model deliberately, and record which.
+DEFAULT_MODEL_FOR = {"openai": "gpt-4o-mini", "anthropic": "claude-haiku-4-5"}
+
+
 def run_native_control(scenario: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     """Run AgentDojo's own unprotected tool loop as the matched baseline.
 
@@ -316,12 +325,13 @@ def run_native_control(scenario: dict[str, Any], args: argparse.Namespace) -> di
     passes through Kerna's prompt-injection filter is a protected run and
     cannot establish the baseline required to attribute protection to Kerna.
     """
-    if args.provider != "openai":
-        raise RuntimeError("Native AgentDojo control currently supports --provider openai only.")
+    if args.provider not in ("openai", "anthropic"):
+        raise RuntimeError(
+            f"Native AgentDojo control supports --provider openai or anthropic, "
+            f"not {args.provider!r}."
+        )
 
-    import openai
     from agentdojo.agent_pipeline.agent_pipeline import AgentPipeline, PipelineConfig
-    from agentdojo.agent_pipeline.llms.openai_llm import OpenAILLM
     from agentdojo.agent_pipeline.tool_execution import ToolsExecutionLoop
     from agentdojo.functions_runtime import FunctionsRuntime
     from agentdojo.task_suite.load_suites import get_suite
@@ -336,9 +346,24 @@ def run_native_control(scenario: dict[str, Any], args: argparse.Namespace) -> di
     environment = suite.load_and_inject_default_environment(scenario["injections"])
     task_environment = user_task.init_environment(environment)
     pre_environment = task_environment.model_copy(deep=True)
+    if args.provider == "anthropic":
+        import anthropic
+        from agentdojo.agent_pipeline.llms.anthropic_llm import AnthropicLLM
+
+        # `thinking_budget_tokens` is left unset on purpose. AgentDojo passes the
+        # deprecated `thinking={"type": "enabled", "budget_tokens": N}` shape, which
+        # current Claude models reject with a 400; omitting it sends no thinking block
+        # at all, which is what the control arm wants anyway.
+        llm = AnthropicLLM(anthropic.Anthropic(), args.model)
+    else:
+        import openai
+        from agentdojo.agent_pipeline.llms.openai_llm import OpenAILLM
+
+        llm = OpenAILLM(openai.OpenAI(), args.model)
+
     pipeline = AgentPipeline.from_config(
         PipelineConfig(
-            llm=OpenAILLM(openai.OpenAI(), args.model),
+            llm=llm,
             model_id=None,
             defense=None,
             system_message_name=None,
@@ -392,8 +417,9 @@ def main() -> int:
     parser.add_argument("--injection-task", default=DEFAULT_PILOT_INJECTION_TASK)
     parser.add_argument("--attack", default=DEFAULT_PILOT_ATTACK, choices=["direct", "ignore_previous", "system_message", "injecagent"])
     parser.add_argument("--benchmark-version", default="v1.2.2")
-    parser.add_argument("--provider", default="openai")
-    parser.add_argument("--model", default="gpt-4o-mini")
+    parser.add_argument("--provider", default="openai", choices=["openai", "anthropic"])
+    # Resolved after parsing, because the sensible default depends on the provider.
+    parser.add_argument("--model", default=None)
     parser.add_argument("--mode", choices=["control", "governed"], default="governed")
     parser.add_argument("--kerna", default=shutil.which("kerna") or str(REPOSITORY_ROOT / "target" / "debug" / ("kerna.exe" if sys.platform == "win32" else "kerna")))
     parser.add_argument("--python", default=sys.executable)
@@ -407,6 +433,10 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=Path("reports/agentdojo"))
     parser.add_argument("--execute", action="store_true", help="Permit a real model call.")
     args = parser.parse_args()
+
+    if args.model is None:
+        args.model = DEFAULT_MODEL_FOR[args.provider]
+
     require_agentdojo()
 
     from agentdojo.attacks import baseline_attacks  # noqa: F401 - registers fixed attacks

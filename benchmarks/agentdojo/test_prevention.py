@@ -191,3 +191,58 @@ def test_an_unparsable_payload_does_not_silently_discard_a_denial():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ------------------------------------------------- provider selection
+
+# The control arm was OpenAI-only. AgentDojo 0.1.35 ships AnthropicLLM and Kerna's
+# config already accepts `anthropic`, so the restriction was in this harness alone.
+
+
+def _args(**kw):
+    import argparse
+
+    base = dict(provider="openai", model=None, mode="control")
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_the_default_model_follows_the_provider():
+    """A provider swap that silently kept `gpt-4o-mini` would fail confusingly at the
+    first API call, or worse, run the wrong model and be reported as the right one."""
+    import runpy
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    import run as runner
+
+    assert runner.DEFAULT_MODEL_FOR["openai"] == "gpt-4o-mini"
+    assert runner.DEFAULT_MODEL_FOR["anthropic"].startswith("claude-")
+
+
+def test_an_unsupported_provider_is_refused_by_the_control_arm():
+    """Silently falling back to OpenAI would produce a control run attributed to a model
+    that never ran."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    import run as runner
+
+    with pytest.raises(RuntimeError, match="openai or anthropic"):
+        runner.run_native_control({}, _args(provider="gemini", model="x"))
+
+
+def test_the_anthropic_default_is_not_the_strongest_model():
+    """Deliberate. The control arm has to be *successfully attacked* or the governed arm
+    proves nothing, and AgentDojo's injection tasks were calibrated against models of
+    gpt-4o-mini's generation. Defaulting to a frontier model would produce
+    `injection_task_executed: false` and void the comparison."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    import run as runner
+
+    assert "opus" not in runner.DEFAULT_MODEL_FOR["anthropic"]
