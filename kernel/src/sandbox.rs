@@ -401,6 +401,32 @@ impl ProcessSandbox {
             }
         }
 
+        // Workspace bounds for file tools. This block only ever ran for `run_command`,
+        // so `policy simulate write_file '{"path":"C:/Windows/system32/evil.dll"}'`
+        // reported ALLOW and never mentioned the boundary this command's own --help
+        // advertises. The helper existed and was simply not reached for these tools.
+        if tool == "read_file" || tool == "write_file" {
+            match serde_json::from_str::<serde_json::Value>(args) {
+                Ok(parsed_args) => {
+                    if let Some(path) = parsed_args.get("path").and_then(|v| v.as_str()) {
+                        if is_out_of_workspace_path(path) {
+                            decision.is_allowed = false;
+                            decision.reasons.push(format!(
+                                "Path '{}' is outside the workspace boundary.",
+                                path
+                            ));
+                        }
+                    }
+                }
+                Err(_) => {
+                    decision.is_allowed = false;
+                    decision
+                        .reasons
+                        .push("Failed to parse tool arguments as JSON.".to_string());
+                }
+            }
+        }
+
         let parsed = serde_json::from_str::<serde_json::Value>(args).ok();
         let target_str = match &parsed {
             Some(p) => match tool {
@@ -677,9 +703,16 @@ mod simulate_three_outcomes {
     }
 
     fn manager(action: &str) -> PermissionManager {
+        manager_for("run_command", action)
+    }
+
+    /// Grants one named tool. The permission default is deny, so simulating tool A while
+    /// granting tool B tests the default rather than the thing under test -- which is
+    /// how the first version of the workspace-bounds test failed for the wrong reason.
+    fn manager_for(tool: &str, action: &str) -> PermissionManager {
         PermissionManager::new(Config {
             permissions: vec![PermissionRule {
-                tool: "run_command".to_string(),
+                tool: tool.to_string(),
                 action: action.to_string(),
             }],
             ..Default::default()
@@ -703,6 +736,41 @@ mod simulate_three_outcomes {
             decision.needs_confirmation,
             "a tool that prompts a human must not report as plain ALLOW"
         );
+    }
+
+    /// The other half of the same audit. `simulate` checked workspace bounds only when
+    /// the tool was `run_command`, so a file path pointing at C:\Windows reported ALLOW
+    /// -- from the command whose --help promises it checks "policy and workspace
+    /// boundaries".
+    #[test]
+    fn a_file_path_outside_the_workspace_is_refused() {
+        let dir = std::env::temp_dir().join("kerna-sim-escape");
+        let _ = std::fs::create_dir_all(&dir);
+        let decision = sandbox_in(&dir)
+            .simulate_command(
+                "write_file",
+                r#"{"path":"C:/Windows/system32/evil.dll"}"#,
+                &manager_for("write_file", "auto_approve"),
+            )
+            .expect("simulates");
+
+        assert!(!decision.is_allowed, "a path outside the workspace must not simulate as allowed");
+        assert!(decision.reasons.iter().any(|r| r.contains("outside the workspace")));
+    }
+
+    #[test]
+    fn a_file_path_inside_the_workspace_is_fine() {
+        let dir = std::env::temp_dir().join("kerna-sim-ok");
+        let _ = std::fs::create_dir_all(&dir);
+        let decision = sandbox_in(&dir)
+            .simulate_command(
+                "read_file",
+                r#"{"path":"notes/todo.md"}"#,
+                &manager_for("read_file", "auto_approve"),
+            )
+            .expect("simulates");
+
+        assert!(decision.is_allowed);
     }
 
     #[test]
