@@ -10,7 +10,7 @@ HTML renderer. The replay CLI did exactly that, for one function, and inherited 
 SyntaxError in some markup — which surfaced only after a completed run, on the line that
 was about to print its results.
 
-The eval harness's `metrics` has the same function and imports pydantic for the eval schema, which is the
+`m0.metrics` has the same function and imports pydantic for the eval schema, which is the
 other direction of the same mistake: the product does not import the research harness.
 
 Interval arithmetic depends on neither. It is four lines of `math` and belongs where

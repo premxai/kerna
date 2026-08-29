@@ -17,7 +17,7 @@ are the same measurement at different speeds.
 
 Recorded traffic is metadata: counts, block types, tool names, sizes. It is not a
 reconstructable request, deliberately (005), so there is nothing to replay. Turns are
-therefore built from the customer's own repository the way the replay harness builds tasks —
+therefore built from the customer's own repository the way `m0.replay` builds tasks —
 derived from the tree, never authored, because a hand-written corpus overstated quality
 by 3-11x and inverted the model ranking the last time this project trusted one (023).
 

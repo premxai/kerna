@@ -80,6 +80,7 @@ from pathlib import Path
 from typing import Any
 
 from .circuit import CircuitBreaker
+from .classify import CLASS_VERSION
 from .dispatcher import Dispatcher
 from .interceptor import build_handler, make_cloud_forwarder
 from .recorder import TrafficRecorder
@@ -282,6 +283,92 @@ class _Sidecar:
 
 
 LOCAL_ANSWER_TEXT = "answered on this laptop (demo)"
+
+
+# A week of real traffic, in the shape the report reads, so the arc is visible in one
+# command. Labelled synthetic in the data itself -- the model name says so on every row,
+# the way the demo ledger's cohort keys do -- because a page that looks like a
+# measurement is the error this project keeps catching in its own numbers.
+SYNTHETIC_MODEL = "demo-local-model (synthetic)"
+
+
+def synthetic_history(turns: int = 48, seed: int = 7) -> tuple[list[dict], list[dict]]:
+    """Paired traffic and shadow rows for one imagined week.
+
+    Returns (traffic, explore). They share turn ids, because `recoverable` is spend on
+    turns that were actually compared -- a shadow row with no matching cost contributes
+    agreement and no money, which is exactly how it should behave and impossible to see
+    if the two halves are generated independently.
+
+    The distribution is deliberately unflattering. Roughly a fifth of attempts never
+    produce a comparison at all, because that is what every real session has looked like,
+    and a demo whose shadow succeeds every time teaches the wrong expectation to the
+    person watching it.
+    """
+    import random
+
+    rng = random.Random(seed)
+    traffic: list[dict] = []
+    explore: list[dict] = []
+
+    # Weighted to the classes real traffic is made of: mostly looking, then reading,
+    # then acting. Agreement is highest where the work is simplest, which is the finding
+    # the ledger exists to act on.
+    classes = (["search"] * 20) + (["read"] * 16) + (["edit"] * 8) + (["command"] * 4)
+    agree_rate = {"search": 0.82, "read": 0.74, "edit": 0.28, "command": 0.45}
+
+    for i in range(turns):
+        turn = f"demo-{i:03d}"
+        task_class = classes[i % len(classes)]
+
+        cached = rng.randint(18_000, 46_000)
+        traffic.append({
+            "record": "request", "turn": turn, "endpoint": "messages",
+            "model": "claude-opus-5", "stream": True,
+            # Nested under `response`, which is where the recorder puts it and therefore
+            # where the report looks. Top-level `usage` parses fine, joins nothing, and
+            # renders as $0.00 spend beside 52 requests -- a row that is present and
+            # silent, which is worse than one that is absent.
+            "response": {
+                "usage": {
+                    "input_tokens": rng.randint(400, 1_800),
+                    "cache_creation_input_tokens": rng.randint(0, 2_400),
+                    "cache_read_input_tokens": cached,
+                    "output_tokens": rng.randint(120, 900),
+                },
+            },
+        })
+
+        row: dict[str, Any] = {
+            "record": "explore", "turn": turn, "task_class": task_class,
+            "local_model": SYNTHETIC_MODEL, "local_decoding": "grammar-v1",
+            "local_tool_transport": "textual-v1", "tool_policy": "core-v1",
+            "class_version": CLASS_VERSION, "n_messages": rng.randint(3, 14),
+            "elapsed_ms": rng.uniform(2_400, 19_000),
+        }
+
+        roll = rng.random()
+        if roll < 0.10:
+            row.update(outcome="infrastructure_failure", error="ReadTimeout",
+                       elapsed_ms=120_000.0)
+        elif roll < 0.16:
+            row.update(outcome="context_ineligible")
+        elif roll < 0.20:
+            row.update(outcome="did_not_converge")
+        else:
+            agreed = rng.random() < agree_rate[task_class]
+            row.update(
+                outcome="converged",
+                cloud_tool={"search": "Grep", "read": "Read",
+                            "edit": "Edit", "command": "Bash"}[task_class],
+                local_structured_tool_call=True,
+                local_action_format="structured",
+                agreement="same_action" if agreed else "different_action",
+                semantic_equivalent=agreed,
+            )
+        explore.append(row)
+
+    return traffic, explore
 
 
 class _RoutingSidecar:
@@ -611,9 +698,15 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("  !! the routed turn was not served locally - do not present this run")
 
+    # One imagined week beneath the three live scenarios, so the page shows the whole
+    # arc -- watch, earn, route -- rather than only its last step. Without it the
+    # comparison panels read "nothing compared yet", which is honest and demonstrates
+    # nothing about the half of the product that decides what may run locally.
+    synth_traffic, synth_explore = synthetic_history()
+
     data = gather(
-        read_jsonl(traffic_log),
-        read_jsonl(gate_log),
+        read_jsonl(traffic_log) + synth_traffic,
+        read_jsonl(gate_log) + synth_explore,
         {},
         governance=kerna_events(kerna_db),
         budgets=kerna_budgets(kerna_db),
