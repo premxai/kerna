@@ -1,12 +1,51 @@
 use crate::events::{Event, EventSink};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 use std::path::Path;
 use std::sync::Mutex;
 use uuid::Uuid;
 
 pub struct MemoryEngine {
     conn: Mutex<Connection>,
+}
+
+/// Durable lifecycle row for one stdio MCP connection. This is separate from
+/// generic events so the dashboard can answer "which client is connected?"
+/// without inferring it from tool payloads.
+#[derive(Debug, Clone, Serialize)]
+pub struct GatewaySessionRecord {
+    pub session_id: String,
+    pub task_id: String,
+    pub client_name: Option<String>,
+    pub client_version: Option<String>,
+    pub protocol_version: Option<String>,
+    pub workspace: String,
+    pub state: String,
+    pub started_at: String,
+    pub last_activity_at: String,
+    pub ended_at: Option<String>,
+}
+
+/// One governed call, normalized for live metrics. The trace remains the
+/// detailed receipt; this table makes aggregation deterministic and cheap.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolCallReceipt {
+    pub call_id: String,
+    pub session_id: String,
+    pub task_id: String,
+    pub client_name: Option<String>,
+    pub plugin_name: Option<String>,
+    pub image_digest: Option<String>,
+    pub tool: String,
+    pub policy_decision: String,
+    pub approval_id: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub result_class: Option<String>,
+    pub trace_id: Option<String>,
+    pub output_preview: Option<String>,
 }
 
 impl MemoryEngine {
@@ -216,15 +255,81 @@ impl MemoryEngine {
                 task_id TEXT NOT NULL,
                 tool TEXT NOT NULL,
                 args_json TEXT NOT NULL,
+                binding_hash TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 decided_at DATETIME,
+                expires_at DATETIME,
+                used_at DATETIME,
                 FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
             );",
             [],
         )?;
+        // Existing local ledgers predate gateway approvals. SQLite has no
+        // conditional ADD COLUMN, so tolerate the duplicate-column result.
+        for migration in [
+            "ALTER TABLE pending_approvals ADD COLUMN binding_hash TEXT",
+            "ALTER TABLE pending_approvals ADD COLUMN expires_at DATETIME",
+            "ALTER TABLE pending_approvals ADD COLUMN used_at DATETIME",
+        ] {
+            let _ = conn.execute(migration, []);
+        }
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pending_approvals_status ON pending_approvals(status, created_at);",
+            [],
+        )?;
+
+        // Gateway-specific summaries are intentionally normalized alongside
+        // the generic append-only event log. They power a local dashboard
+        // without weakening the richer trace/audit record.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS gateway_sessions (
+                session_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                client_name TEXT,
+                client_version TEXT,
+                protocol_version TEXT,
+                workspace TEXT NOT NULL,
+                state TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                last_activity_at TEXT NOT NULL,
+                ended_at TEXT
+            );",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gateway_sessions_state_activity
+             ON gateway_sessions(state, last_activity_at DESC);",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS tool_call_receipts (
+                call_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                client_name TEXT,
+                plugin_name TEXT,
+                image_digest TEXT,
+                tool TEXT NOT NULL,
+                policy_decision TEXT NOT NULL,
+                approval_id TEXT,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                duration_ms INTEGER,
+                result_class TEXT,
+                trace_id TEXT,
+                output_preview TEXT
+            );",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tool_call_receipts_started
+             ON tool_call_receipts(started_at DESC);",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tool_call_receipts_session
+             ON tool_call_receipts(session_id, started_at DESC);",
             [],
         )?;
 
@@ -406,7 +511,9 @@ impl MemoryEngine {
     pub fn list_pending_approvals(&self) -> Result<Vec<(String, String, String, String)>> {
         let conn = self.get_conn();
         let mut stmt = conn.prepare(
-            "SELECT id, task_id, tool, args_json FROM pending_approvals WHERE status = 'pending' ORDER BY created_at ASC",
+            "SELECT id, task_id, tool, args_json FROM pending_approvals
+             WHERE status = 'pending' AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+             ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
@@ -419,10 +526,271 @@ impl MemoryEngine {
         let conn = self.get_conn();
         let status = if approved { "approved" } else { "denied" };
         let changed = conn.execute(
-            "UPDATE pending_approvals SET status = ?1, decided_at = CURRENT_TIMESTAMP WHERE id = ?2 AND status = 'pending'",
+            "UPDATE pending_approvals SET status = ?1, decided_at = CURRENT_TIMESTAMP
+             WHERE id = ?2 AND status = 'pending'
+               AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)",
             params![status, id],
         )?;
+        if changed == 0 {
+            conn.execute(
+                "UPDATE pending_approvals SET status = 'expired', decided_at = CURRENT_TIMESTAMP
+                 WHERE id = ?1 AND status = 'pending'
+                   AND expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP",
+                params![id],
+            )?;
+        }
         Ok(changed == 1)
+    }
+
+    /// Create a one-time gateway approval. `binding_hash` covers the workspace,
+    /// image digest, tool, and canonical arguments; approving a request can
+    /// therefore never authorize a changed retry.
+    pub fn create_gateway_approval(
+        &self,
+        task_id: Uuid,
+        tool: &str,
+        args_json: &str,
+        binding_hash: &str,
+    ) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
+        let conn = self.get_conn();
+        conn.execute(
+            "INSERT INTO pending_approvals (id, task_id, tool, args_json, binding_hash, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now', '+10 minutes'))",
+            params![id, task_id.to_string(), tool, args_json, binding_hash],
+        )?;
+        Ok(id)
+    }
+
+    /// Consume exactly one approved, unexpired gateway approval. The UPDATE is
+    /// conditional so parallel retries cannot replay the same grant.
+    pub fn consume_gateway_approval(&self, binding_hash: &str) -> Result<bool> {
+        let conn = self.get_conn();
+        let changed = conn.execute(
+            "UPDATE pending_approvals SET status = 'used', used_at = CURRENT_TIMESTAMP
+             WHERE id = (
+                 SELECT id FROM pending_approvals
+                 WHERE binding_hash = ?1 AND status = 'approved'
+                   AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+                 ORDER BY decided_at ASC LIMIT 1
+             ) AND status = 'approved'",
+            params![binding_hash],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn start_gateway_session(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        workspace: &str,
+    ) -> Result<()> {
+        let conn = self.get_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO gateway_sessions
+             (session_id, task_id, workspace, state, started_at, last_activity_at)
+             VALUES (?1, ?2, ?3, 'running', ?4, ?4)",
+            params![session_id, task_id, workspace, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn identify_gateway_session(
+        &self,
+        session_id: &str,
+        client_name: Option<&str>,
+        client_version: Option<&str>,
+        protocol_version: &str,
+    ) -> Result<()> {
+        let conn = self.get_conn();
+        conn.execute(
+            "UPDATE gateway_sessions
+             SET client_name = ?1, client_version = ?2, protocol_version = ?3,
+                 last_activity_at = ?4
+             WHERE session_id = ?5",
+            params![
+                client_name,
+                client_version,
+                protocol_version,
+                chrono::Utc::now().to_rfc3339(),
+                session_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_gateway_session(&self, session_id: &str) -> Result<()> {
+        let conn = self.get_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE gateway_sessions
+             SET state = 'completed', last_activity_at = ?1, ended_at = ?1
+             WHERE session_id = ?2 AND state = 'running'",
+            params![now, session_id],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_tool_call_receipt(
+        &self,
+        call_id: &str,
+        session_id: &str,
+        task_id: &str,
+        client_name: Option<&str>,
+        plugin_name: Option<&str>,
+        image_digest: Option<&str>,
+        tool: &str,
+        policy_decision: &str,
+    ) -> Result<()> {
+        let conn = self.get_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO tool_call_receipts
+             (call_id, session_id, task_id, client_name, plugin_name, image_digest,
+              tool, policy_decision, started_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                call_id,
+                session_id,
+                task_id,
+                client_name,
+                plugin_name,
+                image_digest,
+                tool,
+                policy_decision,
+                now
+            ],
+        )?;
+        conn.execute(
+            "UPDATE gateway_sessions SET last_activity_at = ?1 WHERE session_id = ?2",
+            params![now, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_tool_call_receipt(
+        &self,
+        call_id: &str,
+        approval_id: Option<&str>,
+        duration_ms: i64,
+        result_class: &str,
+        trace_id: Option<&str>,
+        output_preview: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.get_conn();
+        conn.execute(
+            "UPDATE tool_call_receipts
+             SET approval_id = ?1, completed_at = ?2, duration_ms = ?3,
+                 result_class = ?4, trace_id = ?5, output_preview = ?6
+             WHERE call_id = ?7",
+            params![
+                approval_id,
+                chrono::Utc::now().to_rfc3339(),
+                duration_ms,
+                result_class,
+                trace_id,
+                output_preview,
+                call_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn recent_gateway_sessions(&self, limit: usize) -> Result<Vec<GatewaySessionRecord>> {
+        let conn = self.get_conn();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, task_id, client_name, client_version, protocol_version,
+                    workspace, state, started_at, last_activity_at, ended_at
+             FROM gateway_sessions ORDER BY last_activity_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |row| {
+            Ok(GatewaySessionRecord {
+                session_id: row.get(0)?,
+                task_id: row.get(1)?,
+                client_name: row.get(2)?,
+                client_version: row.get(3)?,
+                protocol_version: row.get(4)?,
+                workspace: row.get(5)?,
+                state: row.get(6)?,
+                started_at: row.get(7)?,
+                last_activity_at: row.get(8)?,
+                ended_at: row.get(9)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn recent_tool_call_receipts(&self, limit: usize) -> Result<Vec<ToolCallReceipt>> {
+        let conn = self.get_conn();
+        let mut stmt = conn.prepare(
+            "SELECT call_id, session_id, task_id, client_name, plugin_name, image_digest,
+                    tool, policy_decision, approval_id, started_at, completed_at, duration_ms,
+                    result_class, trace_id, output_preview
+             FROM tool_call_receipts ORDER BY started_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |row| {
+            Ok(ToolCallReceipt {
+                call_id: row.get(0)?,
+                session_id: row.get(1)?,
+                task_id: row.get(2)?,
+                client_name: row.get(3)?,
+                plugin_name: row.get(4)?,
+                image_digest: row.get(5)?,
+                tool: row.get(6)?,
+                policy_decision: row.get(7)?,
+                approval_id: row.get(8)?,
+                started_at: row.get(9)?,
+                completed_at: row.get(10)?,
+                duration_ms: row.get(11)?,
+                result_class: row.get(12)?,
+                trace_id: row.get(13)?,
+                output_preview: row.get(14)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Receipts created at or after `started_after`, newest first.  Timestamps
+    /// are RFC 3339 UTC strings, so SQLite's lexical comparison is stable.
+    pub fn tool_call_receipts_since(
+        &self,
+        started_after: &str,
+        limit: usize,
+    ) -> Result<Vec<ToolCallReceipt>> {
+        let conn = self.get_conn();
+        let mut stmt = conn.prepare(
+            "SELECT call_id, session_id, task_id, client_name, plugin_name, image_digest,
+                    tool, policy_decision, approval_id, started_at, completed_at, duration_ms,
+                    result_class, trace_id, output_preview
+             FROM tool_call_receipts
+             WHERE started_at >= ?1
+             ORDER BY started_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![started_after, limit as i64], |row| {
+            Ok(ToolCallReceipt {
+                call_id: row.get(0)?,
+                session_id: row.get(1)?,
+                task_id: row.get(2)?,
+                client_name: row.get(3)?,
+                plugin_name: row.get(4)?,
+                image_digest: row.get(5)?,
+                tool: row.get(6)?,
+                policy_decision: row.get(7)?,
+                approval_id: row.get(8)?,
+                started_at: row.get(9)?,
+                completed_at: row.get(10)?,
+                duration_ms: row.get(11)?,
+                result_class: row.get(12)?,
+                trace_id: row.get(13)?,
+                output_preview: row.get(14)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// The most recently created task's id, if any. Powers the `last` alias.
@@ -993,6 +1361,78 @@ mod tests {
             !mem.decide_pending_approval(&approval_id, false).unwrap(),
             "a decision must not be overwritten"
         );
+    }
+
+    #[test]
+    fn gateway_approval_is_single_use_and_bound_to_its_hash() {
+        let mem = setup_test_db("test_gateway_approval_binding");
+        let task_id = Uuid::new_v4();
+        mem.create_task(task_id, None, "gateway approval test")
+            .unwrap();
+        let approval = mem
+            .create_gateway_approval(
+                task_id,
+                "write_file",
+                r#"{\"path\":\"output/a.txt\"}"#,
+                "hash-a",
+            )
+            .unwrap();
+        assert!(mem.decide_pending_approval(&approval, true).unwrap());
+        assert!(mem.consume_gateway_approval("hash-a").unwrap());
+        assert!(!mem.consume_gateway_approval("hash-a").unwrap());
+        assert!(!mem.consume_gateway_approval("hash-b").unwrap());
+    }
+
+    #[test]
+    fn expired_gateway_approval_cannot_be_listed_or_approved() {
+        let mem = setup_test_db("test_gateway_approval_expiry");
+        let task_id = Uuid::new_v4();
+        mem.create_task(task_id, None, "expiry test").unwrap();
+        let approval = mem
+            .create_gateway_approval(task_id, "write_file", "{}", "expiry-hash")
+            .unwrap();
+        assert_eq!(mem.list_pending_approvals().unwrap().len(), 1);
+        mem.expire_pending_approval(&approval).unwrap();
+        assert!(mem.list_pending_approvals().unwrap().is_empty());
+        assert!(!mem.decide_pending_approval(&approval, true).unwrap());
+    }
+
+    #[test]
+    fn gateway_session_and_receipt_are_queryable_for_dashboard_metrics() {
+        let mem = setup_test_db("test_gateway_dashboard_receipts");
+        let task_id = Uuid::new_v4();
+        mem.create_task(task_id, None, "gateway session").unwrap();
+        mem.start_gateway_session("gateway-test", &task_id.to_string(), "C:/workspace")
+            .unwrap();
+        mem.identify_gateway_session("gateway-test", Some("Codex"), Some("1.0"), "2025-06-18")
+            .unwrap();
+        mem.start_tool_call_receipt(
+            "call-test",
+            "gateway-test",
+            &task_id.to_string(),
+            Some("Codex"),
+            Some("filesystem"),
+            Some("python@sha256:test"),
+            "read_file",
+            "AutoApprove",
+        )
+        .unwrap();
+        mem.finish_tool_call_receipt(
+            "call-test",
+            None,
+            12,
+            "completed",
+            Some("trace-test"),
+            Some("read content"),
+        )
+        .unwrap();
+
+        let sessions = mem.recent_gateway_sessions(5).unwrap();
+        assert_eq!(sessions[0].client_name.as_deref(), Some("Codex"));
+        let receipts = mem.recent_tool_call_receipts(5).unwrap();
+        assert_eq!(receipts[0].tool, "read_file");
+        assert_eq!(receipts[0].duration_ms, Some(12));
+        assert_eq!(receipts[0].result_class.as_deref(), Some("completed"));
     }
 
     #[test]

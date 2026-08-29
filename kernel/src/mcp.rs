@@ -1,6 +1,8 @@
+use crate::config::McpServerConfig;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::Path;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -37,11 +39,83 @@ struct McpCallToolResponse {
 pub struct McpClient {
     child: Child,
     stdout_reader: BufReader<tokio::process::ChildStdout>,
-    stdin_writer: tokio::process::ChildStdin,
+    stdin_writer: Option<tokio::process::ChildStdin>,
     request_id: u64,
 }
 
 impl McpClient {
+    /// Start a reviewed production plugin in a hermetic Docker container. The
+    /// image entrypoint is the MCP server; configuration arguments are passed
+    /// only as image arguments and never through a host shell.
+    pub fn spawn_container(server: &McpServerConfig, workspace: &Path) -> Result<Self> {
+        let workspace = workspace.canonicalize()?;
+        let mut docker_args = vec![
+            "run".to_string(),
+            "-i".to_string(),
+            "--rm".to_string(),
+            "--read-only".to_string(),
+            "--cap-drop=ALL".to_string(),
+            "--security-opt=no-new-privileges:true".to_string(),
+            "--network=none".to_string(),
+            "--tmpfs".to_string(),
+            "/tmp:rw,noexec,nosuid,nodev,size=64m".to_string(),
+            "--pids-limit=128".to_string(),
+            "--memory=512m".to_string(),
+            "--workdir=/workspace".to_string(),
+        ];
+        for root in &server.read_roots {
+            docker_args.push("--mount".to_string());
+            docker_args.push(mount_spec(&workspace, root, true)?);
+        }
+        for root in &server.write_roots {
+            docker_args.push("--mount".to_string());
+            docker_args.push(mount_spec(&workspace, root, false)?);
+        }
+        for name in &server.secrets {
+            let value = std::env::var(name)
+                .map_err(|_| anyhow!("declared secret '{}' is not set in the environment", name))?;
+            docker_args.push("-e".to_string());
+            docker_args.push(format!("{}={}", name, value));
+        }
+        docker_args.push(server.image.clone());
+        docker_args.extend(server.args.clone());
+
+        let mut command = Command::new("docker");
+        command
+            .args(&docker_args)
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        for var in [
+            "PATH",
+            "SystemRoot",
+            "SystemDrive",
+            "TEMP",
+            "TMP",
+            "PATHEXT",
+        ] {
+            if let Ok(value) = std::env::var(var) {
+                command.env(var, value);
+            }
+        }
+        let mut child = command.spawn()?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("Failed to open container stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("Failed to open container stdout"))?;
+        Ok(McpClient {
+            child,
+            stdout_reader: BufReader::new(stdout),
+            stdin_writer: Some(stdin),
+            request_id: 1,
+        })
+    }
+
     pub fn spawn(
         cmd: &str,
         args: &[&str],
@@ -130,7 +204,7 @@ impl McpClient {
             }
         }
 
-        // Inject declared secrets into the child's environment (native mode).
+        // Inject declared secrets into the legacy developer child's environment.
         // In docker mode they were already passed via `-e` above, so skip to
         // avoid leaking them to the `docker` CLI process env.
         if runtime_mode != "docker" {
@@ -158,7 +232,7 @@ impl McpClient {
         Ok(McpClient {
             child,
             stdout_reader,
-            stdin_writer: stdin,
+            stdin_writer: Some(stdin),
             request_id: 1,
         })
     }
@@ -191,8 +265,12 @@ impl McpClient {
         });
         let mut req_str = notify.to_string();
         req_str.push('\n');
-        self.stdin_writer.write_all(req_str.as_bytes()).await?;
-        self.stdin_writer.flush().await?;
+        let writer = self
+            .stdin_writer
+            .as_mut()
+            .ok_or_else(|| anyhow!("MCP client stdin is already closed"))?;
+        writer.write_all(req_str.as_bytes()).await?;
+        writer.flush().await?;
 
         Ok(())
     }
@@ -236,14 +314,40 @@ impl McpClient {
         Ok(call_resp.result)
     }
 
+    /// Close stdin first so an MCP server can finish its protocol lifecycle
+    /// and flush durable session state. Fall back to termination only when a
+    /// child ignores EOF; this is especially important for `client doctor`.
+    pub async fn close(mut self) -> Result<()> {
+        // `AsyncWriteExt::shutdown` alone is not enough to deliver EOF while
+        // the pipe handle remains owned by this process on Windows.
+        let mut writer = self
+            .stdin_writer
+            .take()
+            .ok_or_else(|| anyhow!("MCP client stdin is already closed"))?;
+        writer.shutdown().await?;
+        drop(writer);
+        match tokio::time::timeout(std::time::Duration::from_secs(3), self.child.wait()).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) => Err(error.into()),
+            Err(_) => {
+                let _ = self.child.start_kill();
+                Ok(())
+            }
+        }
+    }
+
     async fn send_request(&mut self, request: serde_json::Value) -> Result<serde_json::Value> {
         let expected_id = request.get("id").cloned();
 
         let mut req_str = request.to_string();
         req_str.push('\n');
 
-        self.stdin_writer.write_all(req_str.as_bytes()).await?;
-        self.stdin_writer.flush().await?;
+        let writer = self
+            .stdin_writer
+            .as_mut()
+            .ok_or_else(|| anyhow!("MCP client stdin is already closed"))?;
+        writer.write_all(req_str.as_bytes()).await?;
+        writer.flush().await?;
 
         // Read lines until we get the JSON-RPC response whose `id` matches our
         // request. Servers may interleave notifications (no `id`) or log lines;
@@ -303,6 +407,41 @@ impl McpClient {
         let id = self.request_id;
         self.request_id += 1;
         id
+    }
+}
+
+fn mount_spec(workspace: &Path, relative: &str, readonly: bool) -> Result<String> {
+    let source = workspace.join(relative).canonicalize()?;
+    if !source.starts_with(workspace) {
+        return Err(anyhow!("mount root '{}' escapes workspace", relative));
+    }
+    let destination = format!("/workspace/{}", relative.replace('\\', "/"));
+    let access = if readonly { ",readonly" } else { "" };
+    // Docker Desktop's Windows CLI does not accept Rust's extended-length
+    // `\\?\\` spelling for bind sources, even though Win32 APIs do.
+    let source_display = source.to_string_lossy();
+    let source_display = source_display
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&source_display);
+    Ok(format!(
+        "type=bind,source={},target={}{}",
+        source_display, destination, access
+    ))
+}
+
+#[cfg(test)]
+mod containment_tests {
+    use super::mount_spec;
+    use std::fs;
+
+    #[test]
+    fn mount_spec_canonicalizes_inside_workspace_and_rejects_escape() {
+        let root = std::env::temp_dir().join(format!("kerna-mount-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("read")).unwrap();
+        let spec = mount_spec(&root.canonicalize().unwrap(), "read", true).unwrap();
+        assert!(spec.contains("target=/workspace/read,readonly"));
+        assert!(mount_spec(&root, "..", true).is_err());
+        let _ = fs::remove_dir_all(root);
     }
 }
 

@@ -60,6 +60,30 @@ jobs:
       run: cargo test --verbose
       working-directory: ./kernel
 
+    # Observe is a separate executable but lives in this repository. Compile
+    # its public import path and run its fully local synthetic demo so a package
+    # move cannot leave the release-only entry point broken.
+    - name: Set up Python for Kerna Observe
+      if: matrix.os == 'ubuntu-latest'
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Smoke test Kerna Observe source entry point
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        python -m pip install --quiet httpx
+        python -m compileall -q observe examples/qoder-governed-mcp
+        python observe/packaging/kerna_observe.py demo --no-open --out reports/kerna-observe-demo.html
+
+    - name: Upload Kerna Observe demo report
+      if: always() && matrix.os == 'ubuntu-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: kerna-observe-demo
+        path: reports/kerna-observe-demo.html
+        if-no-files-found: error
+
     - name: Run Kerna Trust Bench
       if: matrix.os == 'ubuntu-latest'
       run: node benchmarks/kerna-trust/run.mjs --out reports/kerna-trust/ci.json

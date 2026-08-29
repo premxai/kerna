@@ -1,12 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 /// Configuration for a single MCP server that Kerna can spawn and route tool calls to.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct McpServerConfig {
     pub name: String,
+    /// Retained only to deserialize legacy development configs. Production
+    /// gateway startup validates `image` and never executes this value.
+    #[serde(default)]
     pub command: String,
 
     #[serde(default)]
@@ -55,6 +58,34 @@ pub struct McpServerConfig {
 
     #[serde(default = "default_docker_image")]
     pub docker_image: String,
+
+    /// Immutable OCI image reference for a production MCP plugin. It must use
+    /// a sha256 digest; mutable tags are refused by the gateway.
+    #[serde(default)]
+    pub image: String,
+
+    /// Optional explicit manifest path. If absent, Kerna uses its existing
+    /// adjacent/shipped manifest lookup rules.
+    #[serde(default)]
+    pub manifest_path: String,
+
+    /// SHA-256 fingerprint of the reviewed manifest file.
+    #[serde(default)]
+    pub manifest_sha256: String,
+
+    /// Base64 Ed25519 public key trusted for this plugin manifest.
+    #[serde(default)]
+    pub signing_public_key: String,
+
+    /// Project-relative directories mounted read-only into the plugin at the
+    /// corresponding path below /workspace.
+    #[serde(default)]
+    pub read_roots: Vec<String>,
+
+    /// Project-relative directories mounted read-write into the plugin. These
+    /// must not overlap any read root and still need gateway approval per call.
+    #[serde(default)]
+    pub write_roots: Vec<String>,
 }
 
 /// An MCP server is an operator-configured plugin binary, not a model-written command.
@@ -62,6 +93,145 @@ pub struct McpServerConfig {
 /// because the default cannot know the binary exists inside the image.
 fn default_mcp_runtime_mode() -> String {
     "native".to_string()
+}
+
+impl McpServerConfig {
+    /// Validate the production container contract before starting any plugin.
+    /// This is deliberately strict: a gateway must never silently downgrade an
+    /// untrusted MCP server from containment to a host process.
+    pub fn validate_container_contract(&self, workspace: &Path) -> anyhow::Result<()> {
+        use anyhow::{bail, Context};
+
+        if self.runtime_mode != "docker" {
+            bail!("plugin '{}' must set runtime_mode = \"docker\"", self.name);
+        }
+        if !self.image.contains("@sha256:") {
+            bail!(
+                "plugin '{}' must use an OCI image pinned by @sha256 digest",
+                self.name
+            );
+        }
+        let digest = self
+            .image
+            .rsplit_once("@sha256:")
+            .map(|(_, d)| d)
+            .unwrap_or_default();
+        if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+            bail!("plugin '{}' has an invalid OCI sha256 digest", self.name);
+        }
+        if self.manifest_sha256.len() != 64
+            || !self.manifest_sha256.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            bail!(
+                "plugin '{}' must declare a 64-character manifest_sha256",
+                self.name
+            );
+        }
+        if self.signing_public_key.trim().is_empty() {
+            bail!("plugin '{}' must declare signing_public_key", self.name);
+        }
+        let manifest_path = Path::new(&self.manifest_path);
+        if self.manifest_path.trim().is_empty()
+            || manifest_path.is_absolute()
+            || manifest_path.components().any(|part| {
+                matches!(
+                    part,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            bail!(
+                "plugin '{}' must use a project-relative manifest_path",
+                self.name
+            );
+        }
+        let manifest = workspace
+            .join(manifest_path)
+            .canonicalize()
+            .with_context(|| format!("manifest '{}' does not exist", self.manifest_path))?;
+        let root = workspace.canonicalize()?;
+        if !manifest.starts_with(root) {
+            bail!(
+                "plugin '{}' manifest_path escapes the project workspace",
+                self.name
+            );
+        }
+        validate_mount_roots(workspace, &self.read_roots, &self.write_roots)
+            .with_context(|| format!("invalid mount contract for plugin '{}'", self.name))?;
+        Ok(())
+    }
+
+    pub fn manifest_candidate(&self) -> Option<PathBuf> {
+        (!self.manifest_path.trim().is_empty()).then(|| PathBuf::from(&self.manifest_path))
+    }
+}
+
+/// Resolve contract mount roots without allowing absolute paths, traversal, or
+/// symlink escape. Read/write roots are deliberately disjoint so an operator
+/// can review exactly which data becomes mutable in a container.
+pub fn validate_mount_roots(
+    workspace: &Path,
+    read_roots: &[String],
+    write_roots: &[String],
+) -> anyhow::Result<()> {
+    use anyhow::{bail, Context};
+    let root = workspace
+        .canonicalize()
+        .context("workspace does not exist")?;
+    if read_roots.is_empty() && write_roots.is_empty() {
+        bail!("declare at least one read_roots or write_roots entry");
+    }
+
+    let resolve = |value: &str| -> anyhow::Result<PathBuf> {
+        let path = Path::new(value);
+        if value.trim().is_empty()
+            || path.is_absolute()
+            || path.components().any(|part| {
+                matches!(
+                    part,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            bail!(
+                "mount root '{}' must be a non-empty project-relative path",
+                value
+            );
+        }
+        let canonical = root
+            .join(path)
+            .canonicalize()
+            .with_context(|| format!("mount root '{}' does not exist", value))?;
+        if !canonical.starts_with(&root) {
+            bail!("mount root '{}' escapes the project workspace", value);
+        }
+        Ok(canonical)
+    };
+
+    let reads: Vec<PathBuf> = read_roots
+        .iter()
+        .map(|r| resolve(r))
+        .collect::<Result<_, _>>()?;
+    let writes: Vec<PathBuf> = write_roots
+        .iter()
+        .map(|r| resolve(r))
+        .collect::<Result<_, _>>()?;
+    for roots in [&reads, &writes] {
+        for (index, path) in roots.iter().enumerate() {
+            if roots.iter().skip(index + 1).any(|other| other == path) {
+                bail!("duplicate mount root '{}'", path.display());
+            }
+        }
+    }
+    for read in &reads {
+        if writes
+            .iter()
+            .any(|write| read.starts_with(write) || write.starts_with(read))
+        {
+            bail!("read and write roots must not overlap");
+        }
+    }
+    Ok(())
 }
 
 /// Configuration for a scheduled recurring goal.
@@ -588,6 +758,32 @@ mod tests {
         assert!(config.max_runtime_seconds > 0);
         assert!(config.max_llm_calls > 0);
         assert!(config.max_tool_calls > 0);
+    }
+
+    #[test]
+    fn production_plugin_contract_requires_digest_and_disjoint_roots() {
+        let root =
+            std::env::temp_dir().join(format!("kerna-container-contract-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("input")).unwrap();
+        fs::create_dir_all(root.join("output")).unwrap();
+        fs::write(root.join("manifest.toml"), "# fixture\n").unwrap();
+        let server = McpServerConfig {
+            name: "reviewed".to_string(),
+            command: String::new(), args: vec![], enabled: true, capabilities: vec![], allowed_paths: vec![],
+            approval_required: vec![], allow_tools: vec![], deny_tools: vec![], secrets: vec![],
+            runtime_mode: "docker".to_string(), docker_image: String::new(),
+            image: "example/reviewed@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            manifest_path: "manifest.toml".to_string(),
+            manifest_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            signing_public_key: "test-key".to_string(),
+            read_roots: vec!["input".to_string()], write_roots: vec!["output".to_string()],
+        };
+        assert!(server.validate_container_contract(&root).is_ok());
+        assert!(
+            validate_mount_roots(&root, &["input".to_string()], &["input".to_string()]).is_err()
+        );
+        assert!(validate_mount_roots(&root, &["..".to_string()], &[]).is_err());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

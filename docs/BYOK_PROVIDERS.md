@@ -20,24 +20,37 @@ When a provider uses `--api-key-env`, Kerna reads the key from the environment v
 Model routes allow you to define semantic aliases for your models. Instead of hardcoding `gpt-4o-mini` across your tasks, you can route tasks to `cheap` or `smart`.
 
 ```bash
-kerna route add cheap my-openai/gpt-4o-mini
-kerna route add smart anthropic/claude-sonnet-4-20250514
+kerna provider route set cheap my-openai/gpt-4o-mini
+kerna provider route set smart anthropic/claude-sonnet-4-20250514
 ```
 
-Now you can instruct Kerna to run a task using a route:
+Routes are selected by an explicit privacy label in `kerna.toml`; there is no
+silent fallback to a different provider:
 ```bash
-kerna run "Summarize this file" --route cheap
+kerna provider route resolve project
+kerna run "Summarize this file" --privacy project
 ```
 
 ## Privacy Routes
 
-Privacy routes act as hard constraints. If a task requires absolute data sovereignty, you can bind the `local_only` privacy route to a local provider like Ollama.
+Privacy routes act as hard constraints. Bind a privacy label to a named model
+route in `kerna.toml`; `local-only` additionally verifies the selected endpoint
+is loopback before a task starts.
 
-```bash
-kerna privacy-route add local_only ollama/llama3
+```toml
+[model_routes]
+offline-coding = "ollama/qwen2.5-coder:7b"
+project-default = "openrouter/openai/gpt-4o-mini"
+
+[privacy_routes]
+local-only = "offline-coding"
+project = "project-default"
 ```
 
-If a task is executed under the `local_only` context, Kerna will mathematically guarantee that the data never leaves the machine.
+Use `kerna provider route resolve local-only` to show the selected endpoint and
+`kerna provider models ollama` to discover models actually installed locally.
+Kerna does not maintain a hard-coded local-model catalogue: a local runtime is
+the source of truth for which models are available.
 
 ## Listing Providers
 

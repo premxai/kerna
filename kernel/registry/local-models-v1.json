@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "source": {
+    "repository": "https://github.com/0xSero/local-ai-registry",
+    "revision": "33c9f60209709936ad163198e4f74187fbbdc4f9",
+    "license": "MIT",
+    "imported_at": "2026-08-29"
+  },
+  "recipes": [
+    {
+      "id": "qwen38-awq-int4-rtx3090-vllm-tp4",
+      "model_instance_id": "cyankiwi-qwen3-8-27b-awq-int4--int4-w4a16",
+      "hardware_id": "rtx-3090-24gb",
+      "hardware_count": 4,
+      "min_vram_gb": 24,
+      "engine": "vllm",
+      "launch_kind": "docker",
+      "status": "validated",
+      "chat": true,
+      "reasoning": true,
+      "tools": true,
+      "has_evidence": true
+    },
+    {
+      "id": "lfm25-26b-bf16-rtx3090-sglang-tp1",
+      "model_instance_id": "liquidai-lfm2-5-2-6b--bf16",
+      "hardware_id": "rtx-3090-24gb",
+      "hardware_count": 1,
+      "min_vram_gb": 24,
+      "engine": "sglang",
+      "launch_kind": "docker",
+      "status": "validated",
+      "chat": true,
+      "reasoning": false,
+      "tools": false,
+      "has_evidence": true
+    }
+  ]
+}

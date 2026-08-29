@@ -1,5 +1,7 @@
 pub mod budget;
+mod client;
 mod config;
+mod contract;
 mod cron;
 pub mod embeddings;
 pub mod events;
@@ -11,6 +13,7 @@ mod mcp_governance;
 mod mcp_registry;
 mod memory;
 mod mockmcp;
+mod models;
 mod onboarding;
 mod packs;
 mod permissions;
@@ -26,7 +29,7 @@ mod watchdog;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
 use config::Config;
@@ -66,6 +69,18 @@ enum Commands {
         model: Option<String>,
     },
 
+    /// Create a deterministic, reviewable governed-MCP starter contract
+    Contract {
+        #[command(subcommand)]
+        action: ContractCommands,
+    },
+
+    /// Print a client MCP configuration; never edits client settings itself
+    Client {
+        #[command(subcommand)]
+        action: ClientCommands,
+    },
+
     /// Start the Kerna background daemon (Cron, Watchdog)
     Daemon,
 
@@ -84,9 +99,27 @@ enum Commands {
         token: Option<String>,
     },
 
+    /// Open a local live dashboard for governed MCP sessions and model routing
+    Dashboard {
+        /// Contract workspace containing kerna.toml
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Loopback port for the dashboard
+        #[arg(long, default_value = "8765")]
+        port: u16,
+        /// Do not open the local dashboard in a browser automatically
+        #[arg(long)]
+        no_open: bool,
+    },
+
     /// Run as an MCP server that proxies configured MCP servers through Kerna's
     /// policy engine and event log (point Claude Code / Cursor / Cline at this).
-    Gateway,
+    Gateway {
+        /// Contract directory containing kerna.toml. Avoids shell wrappers in
+        /// IDE MCP configuration and is required when the client has no cwd option.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
 
     /// Run the MockMCP deterministic integration test server
     Mockmcp {
@@ -178,7 +211,14 @@ enum Commands {
     Top,
 
     /// View system health and configuration
-    Doctor,
+    Doctor {
+        /// Include readiness checks for `kerna gateway`.
+        #[arg(long)]
+        gateway: bool,
+    },
+
+    /// Show the active containment, policy, and approval state for this project
+    Status,
 
     /// Watch a target continuously (Daemon must be running)
     Watch {
@@ -199,6 +239,12 @@ enum Commands {
     Provider {
         #[command(subcommand)]
         action: ProviderCommands,
+    },
+
+    /// Inspect the pinned local-model registry and verify local runtimes
+    Models {
+        #[command(subcommand)]
+        action: ModelCommands,
     },
 
     /// Manage LLM API keys (guided setup; keys live in environment variables)
@@ -226,6 +272,7 @@ enum Commands {
     },
 
     /// Inspect or decide pending local approval requests
+    #[command(name = "approvals", visible_alias = "approval")]
     Approval {
         #[command(subcommand)]
         action: ApprovalCommands,
@@ -255,6 +302,44 @@ enum Commands {
     Channel {
         #[command(subcommand)]
         action: ChannelCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ContractCommands {
+    /// Write a contract template without overwriting existing files
+    Init {
+        /// Template name (currently: deployment-assistant)
+        #[arg(long, default_value = "deployment-assistant")]
+        template: String,
+        /// Human-readable contract name
+        #[arg(long)]
+        name: String,
+        /// Directory that will receive kerna.toml and agent-contract.md
+        #[arg(long, default_value = ".")]
+        output: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ClientCommands {
+    /// Print a workspace-scoped MCP configuration for an IDE/client
+    Config {
+        /// qoder, claude-code, codex, or generic
+        #[arg(long)]
+        client: String,
+        /// Contract workspace containing kerna.toml
+        #[arg(long, default_value = ".")]
+        workspace: std::path::PathBuf,
+    },
+    /// Validate a generated adapter and perform an MCP initialize/tools-list handshake
+    Doctor {
+        /// codex, claude-code, qoder, or generic
+        #[arg(long)]
+        client: String,
+        /// Contract workspace containing kerna.toml
+        #[arg(long, default_value = ".")]
+        workspace: std::path::PathBuf,
     },
 }
 
@@ -404,6 +489,11 @@ pub enum ApprovalCommands {
         #[arg(index = 1)]
         id: String,
     },
+    /// Reject a pending approval (preferred spelling; `deny` remains supported)
+    Reject {
+        #[arg(index = 1)]
+        id: String,
+    },
 }
 
 /// Built-in routine templates → (cron, goal). Cron is 6-field (sec min hour
@@ -538,6 +628,11 @@ pub enum ProviderCommands {
         #[arg(index = 1)]
         name: String,
     },
+    /// Discover models actually installed in a local provider (for example Ollama)
+    Models {
+        #[arg(index = 1, default_value = "ollama")]
+        name: String,
+    },
     /// Manage model routing
     Route {
         #[command(subcommand)]
@@ -556,6 +651,32 @@ pub enum RouteCommands {
 
         #[arg(index = 2)]
         target: String, // e.g. "anthropic/claude-3-5-sonnet-latest"
+    },
+    /// Resolve and display the exact model selected by a privacy label
+    Resolve {
+        #[arg(index = 1)]
+        privacy_mode: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ModelCommands {
+    /// Detect the supported local hardware profile
+    Detect,
+    /// List the pinned curated model recipes and their provenance
+    List,
+    /// Recommend validated, evidence-backed recipes for detected hardware
+    Recommend {
+        #[arg(long, default_value = "coding")]
+        purpose: String,
+        /// Optional JSON hardware profile for an unsupported machine; it is never treated as evidence.
+        #[arg(long)]
+        profile: Option<PathBuf>,
+    },
+    /// Verify models actually reported by a local provider; never launches or downloads anything
+    Verify {
+        #[arg(long, default_value = "ollama")]
+        provider: String,
     },
 }
 
@@ -599,13 +720,39 @@ pub enum PolicyCommands {
 pub enum McpCommands {
     /// List configured plugins
     List,
-    /// Add a new plugin to config: kerna mcp add <name> <command> [args...]
+    /// Add a contained OCI MCP plugin to the project contract
     Add {
         name: String,
-        command: String,
-        /// Remaining arguments passed to the command (e.g. the server script path).
+        /// Digest-pinned OCI image whose entrypoint speaks MCP over stdio.
+        #[arg(long)]
+        image: String,
+        /// Reviewed manifest.toml path.
+        #[arg(long)]
+        manifest: String,
+        /// SHA-256 fingerprint of the reviewed manifest file.
+        #[arg(long)]
+        manifest_sha256: String,
+        /// Base64 Ed25519 public key that verifies the manifest signature.
+        #[arg(long)]
+        signing_public_key: String,
+        /// Project-relative directory mounted read-only (repeatable).
+        #[arg(long = "read-root")]
+        read_roots: Vec<String>,
+        /// Project-relative directory mounted read-write (repeatable).
+        #[arg(long = "write-root")]
+        write_roots: Vec<String>,
+        /// Arguments passed to the image entrypoint.
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
+    },
+    /// Sign a reviewed plugin manifest; the Ed25519 seed is read only from an environment variable.
+    SignManifest {
+        /// Project-relative path to manifest.toml.
+        #[arg(long)]
+        manifest: String,
+        /// Environment variable containing a base64 32-byte Ed25519 signing seed.
+        #[arg(long)]
+        signing_key_env: String,
     },
     /// Probe an MCP server for its raw capabilities
     Probe {
@@ -793,6 +940,54 @@ async fn main() -> Result<()> {
     // We rely on the local ctrl_c wait in Daemon instead of global exit(0)
 
     let cli = Cli::parse();
+
+    // Contracts must work in a brand-new directory. Do this before config and
+    // memory initialization so the command neither requires nor creates a
+    // runtime database in the caller's current directory.
+    match &cli.command {
+        Some(Commands::Contract { action }) => match action {
+            ContractCommands::Init {
+                template,
+                name,
+                output,
+            } => {
+                let files = contract::init(template, name, output)?;
+                println!("Created reviewed starter contract:");
+                println!("  {}", files.config.display());
+                println!("  {}", files.contract.display());
+                println!("Next: review the files, then run `kerna gateway` from that directory.");
+                return Ok(());
+            }
+        },
+        Some(Commands::Client { action }) => match action {
+            ClientCommands::Config { client, workspace } => {
+                print!("{}", client::config(client, workspace)?);
+                return Ok(());
+            }
+            ClientCommands::Doctor { client, workspace } => {
+                for line in client::doctor(client, workspace).await? {
+                    println!("{}", line);
+                }
+                return Ok(());
+            }
+        },
+        _ => {}
+    }
+    // IDE MCP launchers do not consistently support a per-server working
+    // directory on every platform. Let `gateway --workspace` select the
+    // contract before configuration and relative runtime paths are loaded.
+    match &cli.command {
+        Some(Commands::Gateway {
+            workspace: Some(workspace),
+        })
+        | Some(Commands::Dashboard {
+            workspace: Some(workspace),
+            ..
+        }) => {
+            std::env::set_current_dir(workspace)?;
+        }
+        _ => {}
+    }
     let mut config = Config::load();
 
     // Manifests narrow the effective runtime policy (tools, approval-required
@@ -801,7 +996,7 @@ async fn main() -> Result<()> {
     // plugin declarations. Configuration-management commands intentionally use
     // the unmodified config so adding a plugin cannot rewrite existing grants.
     let needs_effective_manifest_policy =
-        command_needs_mcp(&cli.command) || matches!(&cli.command, Some(Commands::Gateway));
+        command_needs_mcp(&cli.command) || matches!(&cli.command, Some(Commands::Gateway { .. }));
     if needs_effective_manifest_policy {
         if let Err(e) = plugin_manifest::apply_to_config(&mut config) {
             eprintln!("[-] Refusing to load plugin manifests: {}", e);
@@ -821,9 +1016,11 @@ async fn main() -> Result<()> {
     // not pay the cost — or print the banner — of booting every plugin.
     if !config.mcp_servers.is_empty() && command_needs_mcp(&cli.command) {
         let mut registry = mcp_registry.lock().await;
-        if let Err(e) = registry.initialize(&config.mcp_servers).await {
-            eprintln!("[!] Plugin initialization warning: {}", e);
-        }
+        let workspace = std::env::current_dir()?;
+        registry
+            .initialize_production(&config, &workspace)
+            .await
+            .map_err(|e| anyhow::anyhow!("refusing to start uncontained MCP plugins: {}", e))?;
         drop(registry);
     }
 
@@ -837,6 +1034,15 @@ async fn main() -> Result<()> {
             model,
         }) => {
             onboarding::run_onboarding(quick, ci, yes, no_setup, provider, model);
+        }
+        // Handled before runtime initialization above. Keeping this arm makes
+        // the exhaustive command dispatch explicit if that early return is
+        // ever refactored.
+        Some(Commands::Contract { .. }) => {
+            unreachable!("contract command returns before runtime setup")
+        }
+        Some(Commands::Client { .. }) => {
+            unreachable!("client command returns before runtime setup")
         }
         Some(Commands::Daemon) => {
             let watchdog = WatchdogEngine::new(memory.clone(), config.clone());
@@ -911,6 +1117,18 @@ async fn main() -> Result<()> {
             }
         }
 
+        Some(Commands::Dashboard { port, no_open, .. }) => {
+            let state = server::AppState {
+                config: config.clone(),
+                memory: memory.clone(),
+                mcp_registry: mcp_registry.clone(),
+                auth_token: None,
+            };
+            if let Err(e) = server::start_dashboard_server(state, port, !no_open).await {
+                eprintln!("[-] Dashboard failed: {}", e);
+            }
+        }
+
         Some(Commands::Mockmcp { action: _, mode }) => {
             let mut server = mockmcp::MockMcpServer::new(&mode);
             if let Err(e) = server.run().await {
@@ -918,18 +1136,21 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::Gateway) => {
+        Some(Commands::Gateway { .. }) => {
             // stdout is the MCP JSON-RPC channel, so spawn downstream servers in
             // quiet mode (diagnostics → stderr) and never println! to stdout.
             {
                 let mut registry = mcp_registry.lock().await;
                 registry.set_quiet(true);
-                if let Err(e) = registry.initialize(&config.mcp_servers).await {
-                    eprintln!("[gateway] downstream initialization warning: {}", e);
-                }
+                let workspace = std::env::current_dir()?;
+                registry
+                    .initialize_production(&config, &workspace)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("[gateway] refusing to start uncontained plugins: {}", e)
+                    })?;
             }
-            let mut gw =
-                gateway::Gateway::new(config.clone(), mcp_registry.clone(), memory.clone());
+            let gw = gateway::Gateway::new(config.clone(), mcp_registry.clone(), memory.clone());
             if let Err(e) = gw.run().await {
                 eprintln!("[gateway] fatal: {}", e);
             }
@@ -960,78 +1181,14 @@ async fn main() -> Result<()> {
             }
 
             if let Some(priv_mode) = privacy {
-                let route_target = match priv_mode.as_str() {
-                    "public" => config
-                        .privacy_routes
-                        .get("public")
-                        .map(|s| s.as_str())
-                        .unwrap_or("default"),
-                    "project" => config
-                        .privacy_routes
-                        .get("project")
-                        .map(|s| s.as_str())
-                        .unwrap_or("coding"),
-                    "private" => config
-                        .privacy_routes
-                        .get("private")
-                        .map(|s| s.as_str())
-                        .unwrap_or("private"),
-                    "local-only" => "local-only",
-                    _ => &priv_mode,
-                };
-
-                let target_route = if route_target == "local-only" {
-                    // Enforce local provider exists
-                    let has_local = config.providers.values().any(|p| {
-                        p.provider_type == "openai_compatible" || p.provider_type == "local"
-                    });
-                    if !has_local {
-                        eprintln!("No local provider configured for local-only privacy mode.\nRun: kerna provider add local --base-url http://localhost:11434/v1");
-                        std::process::exit(1);
-                    }
-                    // For now, if local-only, we expect a 'local' provider or 'private' route to be local
-                    config
-                        .model_routes
-                        .get("private")
-                        .cloned()
-                        .unwrap_or_else(|| "local/qwen2.5-coder".to_string())
-                } else {
-                    config
-                        .model_routes
-                        .get(route_target)
-                        .cloned()
-                        .unwrap_or_else(|| "openai/gpt-4o-mini".to_string())
-                };
-
-                // Split into provider and model
-                let parts: Vec<&str> = target_route.split('/').collect();
-                if parts.len() == 2 {
-                    config.llm_provider = parts[0].to_string();
-                    config.llm_model = parts[1].to_string();
-                }
-
-                // Fail-closed guarantee: `local-only` must resolve to a loopback
-                // endpoint. Refuse to run if data could leave the machine.
-                if priv_mode == "local-only" {
-                    match providers::resolve(
-                        &config,
-                        &config.llm_provider,
-                        Some(&config.llm_model),
-                        &config.llm_api_key,
-                    ) {
-                        Ok(resolved) if resolved.is_local() => {}
-                        Ok(resolved) => {
-                            eprintln!(
-                                "[-] Privacy violation: --privacy local-only resolved to a non-local endpoint ({}).\n    Configure a local provider (e.g. `kerna provider add ollama --base-url http://localhost:11434/v1`).",
-                                resolved.base_url
-                            );
-                            std::process::exit(1);
-                        }
-                        Err(e) => {
-                            eprintln!("[-] Cannot enforce local-only privacy: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
+                let (selected, _) =
+                    providers::resolve_privacy_route(&config, &priv_mode, &config.llm_api_key)?;
+                config.llm_provider = selected.provider;
+                config.llm_model = selected.model;
+                if priv_mode == "local-only" || priv_mode == "local_only" {
+                    let models =
+                        providers::discover_local_models(&config, &config.llm_provider).await?;
+                    providers::ensure_local_model_available(&models, &config.llm_model)?;
                 }
             }
 
@@ -1309,7 +1466,12 @@ async fn main() -> Result<()> {
             match action {
                 Some(McpCommands::Add {
                     name,
-                    command,
+                    image,
+                    manifest,
+                    manifest_sha256,
+                    signing_public_key,
+                    read_roots,
+                    write_roots,
                     args,
                 }) => {
                     if config.mcp_servers.iter().any(|s| s.name == name) {
@@ -1318,7 +1480,7 @@ async fn main() -> Result<()> {
                     }
                     let server = config::McpServerConfig {
                         name: name.clone(),
-                        command,
+                        command: String::new(),
                         args,
                         enabled: true, // Auto-enable on add
                         capabilities: vec![],
@@ -1327,12 +1489,61 @@ async fn main() -> Result<()> {
                         allow_tools: vec![],
                         deny_tools: vec![],
                         secrets: vec![],
-                        runtime_mode: "native".to_string(),
-                        docker_image: "ubuntu:latest".to_string(),
+                        runtime_mode: "docker".to_string(),
+                        docker_image: String::new(),
+                        image,
+                        manifest_path: manifest,
+                        manifest_sha256,
+                        signing_public_key,
+                        read_roots,
+                        write_roots,
                     };
+                    let workspace = std::env::current_dir()?;
+                    if let Err(error) =
+                        plugin_manifest::verify_production_server(&server, &workspace)
+                    {
+                        eprintln!("[-] Refusing to add uncontained plugin: {}", error);
+                        std::process::exit(1);
+                    }
                     config.mcp_servers.push(server);
                     config.save();
                     println!("[+] Added and enabled MCP server '{}'", name);
+                }
+                Some(McpCommands::SignManifest {
+                    manifest,
+                    signing_key_env,
+                }) => {
+                    let secret = std::env::var(&signing_key_env).map_err(|_| {
+                        anyhow::anyhow!(
+                            "signing key environment variable '{}' is not set",
+                            signing_key_env
+                        )
+                    })?;
+                    let workspace = std::env::current_dir()?;
+                    let relative = std::path::Path::new(&manifest);
+                    if relative.is_absolute()
+                        || relative.components().any(|part| {
+                            matches!(
+                                part,
+                                std::path::Component::ParentDir
+                                    | std::path::Component::RootDir
+                                    | std::path::Component::Prefix(_)
+                            )
+                        })
+                    {
+                        return Err(anyhow::anyhow!("manifest must be a project-relative path"));
+                    }
+                    let root = workspace.canonicalize()?;
+                    let path = workspace.join(relative).canonicalize()?;
+                    if !path.starts_with(root) {
+                        return Err(anyhow::anyhow!(
+                            "manifest must remain inside the project workspace"
+                        ));
+                    }
+                    let (fingerprint, public_key) = plugin_manifest::sign_manifest(&path, &secret)?;
+                    println!("[+] Signed {}", manifest);
+                    println!("manifest_sha256={}", fingerprint);
+                    println!("signing_public_key={}", public_key);
                 }
                 Some(McpCommands::Enable { name }) => {
                     if let Some(server) = config.mcp_servers.iter_mut().find(|s| s.name == name) {
@@ -1432,33 +1643,28 @@ async fn main() -> Result<()> {
                 Some(McpCommands::Doctor { name }) => {
                     if let Some(server) = config.mcp_servers.iter().find(|s| s.name == name) {
                         println!("Doctoring MCP Server: {}", server.name);
-                        let cmd_exists = std::path::Path::new(&server.command).exists() || {
-                            let checker = if cfg!(target_os = "windows") {
-                                "where"
-                            } else {
-                                "which"
-                            };
-                            std::process::Command::new(checker)
-                                .arg(&server.command)
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .status()
-                                .map(|s| s.success())
-                                .unwrap_or(false)
-                        };
-                        println!(
-                            "  Command exists: {}",
-                            if cmd_exists {
-                                "\x1b[32mOK\x1b[0m"
-                            } else {
-                                "\x1b[31mMISSING\x1b[0m"
+                        let workspace = std::env::current_dir()?;
+                        match plugin_manifest::verify_production_server(server, &workspace) {
+                            Ok(manifest) => {
+                                println!("  Signed manifest: \x1b[32mOK\x1b[0m");
+                                println!("  OCI image: {}", server.image);
+                                println!(
+                                    "  Docker image present: {}",
+                                    mcp_registry::image_available(&server.image)
+                                );
+                                println!(
+                                    "  Declared tools: {}",
+                                    manifest.plugin.capabilities.join(", ")
+                                );
+                                println!("  Read roots: {}", server.read_roots.join(", "));
+                                println!("  Write roots: {}", server.write_roots.join(", "));
                             }
-                        );
-                        println!("  Capabilities defined: {}", server.capabilities.len());
-                        println!("  Allowed paths defined: {}", server.allowed_paths.len());
+                            Err(error) => {
+                                println!("  Production readiness: \x1b[31mERROR\x1b[0m — {}", error)
+                            }
+                        }
                         println!(
-                            "\n  To test transport and list tools, run `kerna mcp probe {}`",
-                            server.name
+                            "\n  To test the governed transport, run `kerna gateway --workspace .` from this project",
                         );
                     } else {
                         eprintln!("[-] MCP server '{}' not found in config.", name);
@@ -1592,7 +1798,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::Doctor) => {
+        Some(Commands::Doctor { gateway }) => {
             println!("Kerna Doctor:\n");
 
             match rusqlite::Connection::open(&config.db_path) {
@@ -1652,6 +1858,10 @@ async fn main() -> Result<()> {
 
             let mut valid_plugins = 0;
             for server in &config.mcp_servers {
+                if server.runtime_mode == "docker" && !server.image.is_empty() {
+                    valid_plugins += 1;
+                    continue;
+                }
                 let cmd_exists = if std::path::Path::new(&server.command).exists() {
                     true
                 } else {
@@ -1762,6 +1972,70 @@ async fn main() -> Result<()> {
                         );
                     }
                 }
+            }
+
+            if gateway {
+                let enabled: Vec<_> = config
+                    .mcp_servers
+                    .iter()
+                    .filter(|server| server.enabled)
+                    .collect();
+                let auto_approved = config
+                    .permissions
+                    .iter()
+                    .filter(|rule| rule.action == "auto_approve")
+                    .count();
+                let confirmation_required = config
+                    .permissions
+                    .iter()
+                    .filter(|rule| rule.action == "require_confirmation")
+                    .count();
+                let denied = config
+                    .permissions
+                    .iter()
+                    .filter(|rule| rule.action == "deny")
+                    .count();
+
+                println!("Gateway readiness:");
+                if enabled.is_empty() {
+                    println!("  ERROR: no enabled downstream MCP server is configured.");
+                } else {
+                    let workspace = std::env::current_dir()?;
+                    let mut production_errors = Vec::new();
+                    if !sandbox::docker_available() {
+                        production_errors.push("Docker is unavailable".to_string());
+                    }
+                    for server in &enabled {
+                        if let Err(error) =
+                            crate::plugin_manifest::verify_production_server(server, &workspace)
+                        {
+                            production_errors.push(format!("{}: {}", server.name, error));
+                        } else if !mcp_registry::image_available(&server.image) {
+                            production_errors.push(format!(
+                                "{}: image is not available locally ({})",
+                                server.name, server.image
+                            ));
+                        }
+                    }
+                    if production_errors.is_empty() {
+                        println!(
+                            "  Ready: {} contained downstream MCP server(s); gateway uses stdio.",
+                            enabled.len()
+                        );
+                    } else {
+                        println!("  ERROR: production containment is not ready:");
+                        for error in production_errors {
+                            println!("    - {}", error);
+                        }
+                    }
+                }
+                println!(
+                    "  Policy: {} auto-approved, {} confirmation-required, {} denied rule(s).",
+                    auto_approved, confirmation_required, denied
+                );
+                println!(
+                    "  Note: denied tools are hidden. Confirmation-required calls queue a one-time local approval."
+                );
             }
         }
 
@@ -2034,6 +2308,21 @@ async fn main() -> Result<()> {
                     eprintln!("[-] Provider '{}' not found.", name);
                 }
             }
+            ProviderCommands::Models { name } => {
+                let models = providers::discover_local_models(&config, &name).await?;
+                if models.is_empty() {
+                    println!("No models reported by local provider '{}'.", name);
+                } else {
+                    println!("Local models reported by '{}':", name);
+                    for model in models {
+                        let size = model
+                            .size_bytes
+                            .map(|bytes| format!(" ({} bytes)", bytes))
+                            .unwrap_or_default();
+                        println!("- {}{}", model.id, size);
+                    }
+                }
+            }
             ProviderCommands::Route {
                 action: route_action,
             } => match route_action {
@@ -2047,13 +2336,87 @@ async fn main() -> Result<()> {
                     }
                 }
                 RouteCommands::Set { route_name, target } => {
+                    providers::parse_model_route_target(&config, &target)?;
                     config
                         .model_routes
                         .insert(route_name.clone(), target.clone());
                     config.save();
                     println!("[+] Route '{}' set to '{}'", route_name, target);
                 }
+                RouteCommands::Resolve { privacy_mode } => {
+                    let (route, resolved) = providers::resolve_privacy_route(
+                        &config,
+                        &privacy_mode,
+                        &config.llm_api_key,
+                    )?;
+                    println!("Privacy mode: {}", route.privacy_mode);
+                    println!("Model route: {}", route.route_name);
+                    println!("Target: {}/{}", route.provider, route.model);
+                    println!("Endpoint: {}", resolved.base_url);
+                    println!("Local endpoint: {}", resolved.is_local());
+                }
             },
+        },
+
+        Some(Commands::Models { action }) => match action {
+            ModelCommands::Detect => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&models::detect_hardware())?
+                );
+            }
+            ModelCommands::List => {
+                let catalog = models::catalog()?;
+                println!(
+                    "Catalog source: {} @ {}",
+                    catalog.source.repository, catalog.source.revision
+                );
+                println!(
+                    "License: {} · imported {}",
+                    catalog.source.license, catalog.source.imported_at
+                );
+                for recipe in catalog.recipes {
+                    println!(
+                        "- {} · {} × {} · {} · {} · tools={} · {}",
+                        recipe.model_instance_id,
+                        recipe.hardware_count,
+                        recipe.hardware_id,
+                        recipe.engine,
+                        recipe.status,
+                        recipe.tools,
+                        recipe.id
+                    );
+                }
+            }
+            ModelCommands::Recommend { purpose, profile } => {
+                let profile = match profile {
+                    Some(path) => models::load_manual_profile(&path)?,
+                    None => models::detect_hardware(),
+                };
+                let recipes = models::recommend(&profile, &purpose)?;
+                println!("Detected hardware: {}", serde_json::to_string(&profile)?);
+                if recipes.is_empty() {
+                    println!("No validated {} recipe matches this profile. Kerna will not make a launch claim.", purpose);
+                } else {
+                    for recipe in recipes {
+                        println!(
+                            "- {} ({}, {})",
+                            recipe.model_instance_id, recipe.engine, recipe.id
+                        );
+                    }
+                }
+            }
+            ModelCommands::Verify { provider } => {
+                let installed = providers::discover_local_models(&config, &provider).await?;
+                if installed.is_empty() {
+                    println!("{} reported no installed models.", provider);
+                } else {
+                    println!("Models reported by local provider '{}':", provider);
+                    for model in installed {
+                        println!("- {}", model.id);
+                    }
+                }
+            }
         },
 
         Some(Commands::Keys { action }) => {
@@ -2214,6 +2577,12 @@ async fn main() -> Result<()> {
                             secrets: vec![],
                             runtime_mode: "native".to_string(),
                             docker_image: "ubuntu:latest".to_string(),
+                            image: String::new(),
+                            manifest_path: String::new(),
+                            manifest_sha256: String::new(),
+                            signing_public_key: String::new(),
+                            read_roots: vec![],
+                            write_roots: vec![],
                         })
                         .is_none()
                     {
@@ -2553,7 +2922,63 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             }
+            ApprovalCommands::Reject { id } => {
+                if memory.decide_pending_approval(&id, false)? {
+                    println!("[+] Rejected approval {}.", id);
+                } else {
+                    eprintln!("[-] Approval {} is no longer pending.", id);
+                    std::process::exit(1);
+                }
+            }
         },
+
+        Some(Commands::Status) => {
+            let pending = memory.list_pending_approvals()?.len();
+            let active = config
+                .mcp_servers
+                .iter()
+                .filter(|server| server.enabled)
+                .collect::<Vec<_>>();
+            println!("Kerna project status\n");
+            println!("Containment: Docker required for gateway plugins");
+            println!("Network: disabled for production MCP containers");
+            println!("Enabled plugins: {}", active.len());
+            let workspace = std::env::current_dir()?;
+            for server in active {
+                let exposed =
+                    match crate::plugin_manifest::verify_production_server(server, &workspace) {
+                        Ok(manifest) => {
+                            let configured = if !server.allow_tools.is_empty() {
+                                server.allow_tools.clone()
+                            } else if !server.capabilities.is_empty() {
+                                server.capabilities.clone()
+                            } else {
+                                manifest.plugin.capabilities
+                            };
+                            if configured.is_empty() {
+                                "none".to_string()
+                            } else {
+                                configured.join(", ")
+                            }
+                        }
+                        Err(_) => "unverified (gateway will refuse startup)".to_string(),
+                    };
+                println!(
+                    "  {}  image={}  ro=[{}]  rw=[{}]  exposed=[{}]",
+                    server.name,
+                    if server.image.is_empty() {
+                        "<missing>"
+                    } else {
+                        &server.image
+                    },
+                    server.read_roots.join(","),
+                    server.write_roots.join(","),
+                    exposed
+                );
+            }
+            println!("Pending approvals: {}", pending);
+            println!("Audit store: {}", config.db_path);
+        }
 
         Some(Commands::Plugins { action }) => {
             let reg = match registry::load() {

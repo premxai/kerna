@@ -1,0 +1,1 @@
+Kerna reads this real project file through a read-only Docker bind mount.

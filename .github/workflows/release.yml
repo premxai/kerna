@@ -71,6 +71,7 @@ jobs:
               "desktop": toml_version("ui/src-tauri/Cargo.toml"),
               "desktop config": json.loads(Path("ui/src-tauri/tauri.conf.json").read_text())["version"],
               "npm wrapper": json.loads(Path("npm/package.json").read_text())["version"],
+              "kerna observe": re.search(r'^__version__\s*=\s*"([^"]+)"', Path("observe/__init__.py").read_text(), re.M).group(1),
           }
           mismatches = {name: version for name, version in versions.items() if version != expected}
           if mismatches:
@@ -210,6 +211,68 @@ jobs:
             dist/kerna-plugins.zip
             dist/kerna-plugins.zip.sha256
 
+  observe:
+    name: Build Kerna Observe ${{ matrix.name }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            binary: kerna-observe
+            asset: kerna-observe-linux-x86_64
+          - name: macOS Apple Silicon
+            os: macos-latest
+            binary: kerna-observe
+            asset: kerna-observe-macos-arm64
+          - name: macOS Intel
+            os: macos-15-intel
+            binary: kerna-observe
+            asset: kerna-observe-macos-x86_64
+          - name: Windows
+            os: windows-latest
+            binary: kerna-observe.exe
+            asset: kerna-observe-windows-x86_64.exe
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build self-contained Kerna Observe binary
+        run: |
+          python -m pip install --quiet pyinstaller httpx
+          python observe/packaging/build.py
+
+      - name: Smoke test packaged Kerna Observe binary
+        shell: bash
+        run: observe/dist/${{ matrix.binary }} --help
+
+      - name: Stage and checksum Kerna Observe
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "observe/dist/${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+          sha256sum "dist/${{ matrix.asset }}" > "dist/${{ matrix.asset }}.sha256"
+
+      - name: Upload Kerna Observe to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          name: Kerna ${{ inputs.release_tag || github.ref_name }}
+          generate_release_notes: true
+          overwrite_files: true
+          files: |
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.asset }}.sha256
+
   desktop:
     name: Build desktop ${{ matrix.name }}
     needs: plugins
@@ -271,6 +334,7 @@ jobs:
               "desktop": toml_version("ui/src-tauri/Cargo.toml"),
               "desktop config": json.loads(Path("ui/src-tauri/tauri.conf.json").read_text())["version"],
               "npm wrapper": json.loads(Path("npm/package.json").read_text())["version"],
+              "kerna observe": re.search(r'^__version__\s*=\s*"([^"]+)"', Path("observe/__init__.py").read_text(), re.M).group(1),
           }
           mismatches = {name: version for name, version in versions.items() if version != expected}
           if mismatches:

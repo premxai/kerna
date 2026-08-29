@@ -1,7 +1,8 @@
-use crate::config::McpServerConfig;
+use crate::config::{Config, McpServerConfig};
 use crate::mcp::{McpClient, McpTool};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Manages the lifecycle and routing of all registered MCP servers.
 pub struct McpRegistry {
@@ -81,7 +82,7 @@ impl McpRegistry {
                     path.display()
                 )),
                 Ok(None) => self.status(&format!(
-                    "[MCP] Legacy Warning: Plugin '{}' lacks a manifest.toml. Running with full config trust.",
+                    "[MCP] Development-only legacy warning: Plugin '{}' lacks a manifest.toml. Production gateway will refuse it.",
                     config.name
                 )),
                 Err(e) => {
@@ -155,6 +156,69 @@ impl McpRegistry {
             }
         }
 
+        Ok(())
+    }
+
+    /// Production gateway initialization. Unlike the legacy developer helper
+    /// above, this path has no native-process fallback: every configured MCP
+    /// server must have a verified manifest and a digest-pinned OCI image.
+    pub async fn initialize_production(&mut self, config: &Config, workspace: &Path) -> Result<()> {
+        if !crate::sandbox::docker_available() {
+            return Err(anyhow!(
+                "Docker is required for production MCP plugins but is unavailable"
+            ));
+        }
+        for configured in &config.mcp_servers {
+            if !configured.enabled {
+                continue;
+            }
+            let mut server = configured.clone();
+            let manifest = crate::plugin_manifest::verify_production_server(&server, workspace)?;
+            if !image_available(&server.image) {
+                return Err(anyhow!(
+                    "contained plugin image for '{}' is not available locally: {}. Pull and review it before starting the gateway",
+                    server.name,
+                    server.image
+                ));
+            }
+            crate::plugin_manifest::apply_manifest_to_server(&mut server, &manifest)?;
+            let mut client = McpClient::spawn_container(&server, workspace).map_err(|error| {
+                anyhow!(
+                    "failed to start contained plugin '{}': {}",
+                    server.name,
+                    error
+                )
+            })?;
+            client.initialize().await.map_err(|error| {
+                anyhow!(
+                    "plugin '{}' failed MCP initialization: {}",
+                    server.name,
+                    error
+                )
+            })?;
+            let tools = client.list_tools().await.map_err(|error| {
+                anyhow!("plugin '{}' failed tools/list: {}", server.name, error)
+            })?;
+            self.status(&format!(
+                "[MCP] Contained server '{}' registered {} tools:",
+                server.name,
+                tools.len()
+            ));
+            for tool in tools {
+                if self.tool_to_server.contains_key(&tool.name) {
+                    return Err(anyhow!(
+                        "tool '{}' from '{}' conflicts with an already configured plugin",
+                        tool.name,
+                        server.name
+                    ));
+                }
+                self.tool_to_server
+                    .insert(tool.name.clone(), server.name.clone());
+                self.all_tools.push(tool);
+            }
+            self.clients.insert(server.name.clone(), client);
+            self.server_configs.insert(server.name.clone(), server);
+        }
         Ok(())
     }
 
@@ -242,9 +306,38 @@ impl McpRegistry {
         self.tool_to_server.get(tool_name).cloned()
     }
 
+    /// Whether a discovered tool survives server-level allow/deny/capability
+    /// filters and is therefore safe to advertise to an MCP client.
+    pub fn tool_is_callable(&self, tool_name: &str) -> bool {
+        let Some(server_name) = self.tool_to_server.get(tool_name) else {
+            return false;
+        };
+        let Some(config) = self.server_configs.get(server_name) else {
+            return false;
+        };
+        !(config.deny_tools.contains(&tool_name.to_string())
+            || config.deny_tools.contains(&"*".to_string()))
+            && (config.allow_tools.is_empty()
+                || config.allow_tools.contains(&tool_name.to_string())
+                || config.allow_tools.contains(&"*".to_string()))
+            && (config.capabilities.is_empty()
+                || config.capabilities.contains(&tool_name.to_string())
+                || config.capabilities.contains(&"*".to_string()))
+    }
+
     /// Get all tool names.
     #[allow(dead_code)]
     pub fn tool_names(&self) -> Vec<String> {
         self.tool_to_server.keys().cloned().collect()
     }
+}
+
+pub fn image_available(image: &str) -> bool {
+    std::process::Command::new("docker")
+        .args(["image", "inspect", image])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
