@@ -52,8 +52,8 @@ Run a subcommand with --help for its options.
 def _install(argv: list[str]) -> int:
     import argparse
 
-    from m0.cascade.datadir import data_dir
-    from m0.cascade.interceptor import DEFAULT_PORT
+    from observe.cascade.datadir import data_dir
+    from observe.cascade.interceptor import DEFAULT_PORT
 
     ap = argparse.ArgumentParser(prog="kerna-observe install")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -79,8 +79,8 @@ def _models(argv: list[str]) -> int:
     """
     import argparse
 
-    from m0.registry.device import profile, render
-    from m0.registry.models import candidates_for, refused
+    from observe.registry.device import profile, render
+    from observe.registry.models import candidates_for, refused
 
     ap = argparse.ArgumentParser(prog="kerna-observe models")
     ap.add_argument("--vram", type=float, default=None,
@@ -157,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         return _models(rest)
 
     if verb == "demo":
-        from m0.cascade.showcase import main as demo_main
+        from observe.cascade.showcase import main as demo_main
 
         return demo_main(rest)
 
@@ -165,12 +165,12 @@ def main(argv: list[str] | None = None) -> int:
         return _install(rest)
 
     if verb == "run":
-        from m0.cascade.interceptor import main as serve_main
+        from observe.cascade.interceptor import main as serve_main
 
         return serve_main(rest)
 
     if verb == "report":
-        from m0.cascade.dashboard import main as report_main
+        from observe.cascade.dashboard import main as report_main
 
         return report_main(rest)
 

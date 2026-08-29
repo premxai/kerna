@@ -1,0 +1,7 @@
+# The only third-party dependency the sidecar has. Everything else it uses is in
+# the standard library, which is what makes the packaged binary small and what lets
+# a clone run the demo after one install.
+httpx>=0.27
+
+# Needed only to build the single-file binary, not to run from source.
+# pyinstaller>=6.0

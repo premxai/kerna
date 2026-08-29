@@ -5,7 +5,7 @@ through actual HTTP. No GPU, no API key, no provider account — the point is to
 the *plumbing* in production shape, which is the part that has to be boring and correct
 long before the routing claim is earned.
 
-    python -m m0.cascade.demo
+    python -m observe.cascade.demo
 
 What it proves, and what it deliberately does not:
 
@@ -126,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # The handler classifies nothing yet (classification is C2), so patch the one hook
     # the demo needs: treat every request as the promoted class.
-    import m0.cascade.interceptor as interceptor_module
+    from . import interceptor as interceptor_module
 
     original = interceptor_module.handle_completion
 

@@ -16,14 +16,15 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 # Intermediates go outside the repo. This tree lives under OneDrive, whose sync agent
 # holds handles on files PyInstaller wants to delete -- the build then fails with
 # WinError 5 and, worse, leaves the previous binary in dist/ so the next test run
 # silently exercises stale code.
 WORK = Path(tempfile.gettempdir()) / "kerna-observe-build"
-EVALS = ROOT / "evals"
-ENTRY = ROOT / "packaging" / "kerna_observe.py"
+# The repository root is the package root: `observe` is imported as a package.
+PKG_ROOT = ROOT
+ENTRY = ROOT / "observe" / "packaging" / "kerna_observe.py"
 NAME = "kerna-observe"
 
 
@@ -41,7 +42,7 @@ def main() -> int:
         sys.executable, "-m", "PyInstaller",
         "--onefile",
         "--name", NAME,
-        "--paths", str(EVALS),
+        "--paths", str(PKG_ROOT),
         "--console",
         "--noconfirm",
         "--clean",
@@ -50,12 +51,12 @@ def main() -> int:
         "--specpath", str(WORK),
         # The cascade package is reached through runtime imports in the subcommand
         # dispatch, so the analyser cannot see it by following imports alone.
-        "--hidden-import", "m0.cascade.interceptor",
-        "--hidden-import", "m0.cascade.dashboard",
-        "--hidden-import", "m0.cascade.datadir",
-        "--hidden-import", "m0.cascade.showcase",
-        "--hidden-import", "m0.registry.models",
-        "--hidden-import", "m0.registry.device",
+        "--hidden-import", "observe.cascade.interceptor",
+        "--hidden-import", "observe.cascade.dashboard",
+        "--hidden-import", "observe.cascade.datadir",
+        "--hidden-import", "observe.cascade.showcase",
+        "--hidden-import", "observe.registry.models",
+        "--hidden-import", "observe.registry.device",
         # Nothing here reads a corpus or validates a schema; the eval harness's
         # dependencies would triple the binary for code that never runs in it.
         "--exclude-module", "yaml",

@@ -46,7 +46,7 @@ from __future__ import annotations
 import json
 from typing import Iterable
 
-# Kept local rather than imported from m0.grammar: that module serves the eval corpora and
+# Kept local rather than imported from the eval harness's grammar module: that one serves the corpora and
 # its grammars are checked against gbnf.py's parser. This one is for the live EXPLORE path
 # and answers to llama.cpp's sampler, so the two are deliberately not coupled.
 _JSON_TAIL = """

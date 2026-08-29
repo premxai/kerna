@@ -53,7 +53,7 @@ Nothing here should ever be quoted.
 ## Why the sidecar runs in-process
 
 Under PyInstaller `sys.executable` is the packaged binary, not a Python interpreter, so
-spawning `python -m m0.cascade.interceptor` works from a source checkout and fails in the
+spawning `python -m observe.cascade.interceptor` works from a source checkout and fails in the
 artifact people actually download. The demo builds the same handler the real command
 builds and serves it on a thread.
 
