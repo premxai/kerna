@@ -2,6 +2,60 @@
 
 All notable changes to Kerna will be documented in this file.
 
+## [v0.2.9] - 2026-08-29
+
+### Added — govern the client you already use
+
+- **`kerna gateway`**, an MCP server built on the official `rmcp` SDK. Point Qoder,
+  Claude Code, Codex or any MCP client at it and every `tools/call` passes through
+  the fail-closed policy engine and lands in the event log first. It governs MCP
+  tools only; a client's native editor and terminal stay outside that boundary, and
+  the docs say so rather than implying otherwise.
+- **`kerna contract init`** writes a reviewable `kerna.toml` and a plain-English
+  `agent-contract.md`. Nothing in it is model-generated. It enables the demo server
+  bundled in the binary, so the policy boundary can be shown on a machine with no
+  Docker and no connectors; `--no-demo-server` omits it.
+- **`kerna client config` / `kerna client doctor`** print a client configuration and
+  then prove it, by starting the gateway and completing a real MCP handshake.
+  Printing rather than editing is deliberate: adding ourselves to somebody's client
+  config on their behalf is not ours to do.
+- **`kerna dashboard`**, loopback-only and CSRF-guarded, reading the SQLite the
+  gateway writes. Sessions, tool-call receipts with latencies, approvals,
+  containment state and detected hardware, updated live over SSE.
+- **A curated local-model catalogue**, pinned to a revision of an MIT-licensed
+  registry, which recommends nothing on hardware it has no evidence for.
+- **`kerna-observe models`** now offers to fetch the largest model that fits, and
+  asks first. `--download` / `--no-download` keep it scriptable.
+
+### Fixed
+
+- **Budgets at the gateway.** A contract could ask for `max_tool_calls = 10` and be
+  served fourteen: the gateway had no budget code at all. It now enforces the three
+  it can observe — tool calls, wall clock, and bytes returned to the client — and
+  deliberately does not claim the three it cannot, since the model runs in the
+  customer's own client. Denied and approval-pending calls do not draw on the
+  budget; a loud policy must not exhaust the session it protects.
+  `kerna_session_status` reports the headroom left.
+- **The documented demo now runs.** The gateway demanded Docker before checking
+  whether anything was configured, so a fresh contract could not start it. The
+  verifier the certification calls a required proof never sent `protocolVersion`
+  or `notifications/initialized`, and asserted a server name the gateway did not
+  report — clients listed it as `rmcp`, the transport library.
+- **`kerna-observe demo` runs on a machine with nothing installed**, which is what
+  it always claimed. Three seams imported `httpx` to talk to 127.0.0.1; they use
+  the standard library now, and CI runs the demo with no packages so it stays true.
+- **The release workflow could not publish.** Its version check read
+  `observe.__version__`, which did not exist, so any tag would have died on an
+  `AttributeError` instead of reporting a version mismatch.
+- Clippy at `-D warnings --all-features`, and a dashboard SSE stream that compared
+  a `Value` against a `String` — never equal, so it would have pushed a fresh
+  snapshot every second to every open dashboard.
+
+### Upgrading
+
+No configuration changes are required. `runtime_mode = "demo"` is honoured for one
+reserved server name and is not a general escape from containment.
+
 ## [v0.2.8] - 2026-08-28
 
 ### Fixed — upgrade immediately from v0.2.6 or v0.2.7

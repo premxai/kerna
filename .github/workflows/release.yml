@@ -66,12 +66,18 @@ jobs:
                   raise SystemExit(f"Could not read a package version from {path}")
               return match.group(1)
 
+          def py_version(path):
+              match = re.search(r'^__version__\s*=\s*"([^"]+)"', Path(path).read_text(), re.M)
+              if not match:
+                  raise SystemExit(f"Could not read __version__ from {path}")
+              return match.group(1)
+
           versions = {
               "kernel": toml_version("kernel/Cargo.toml"),
               "desktop": toml_version("ui/src-tauri/Cargo.toml"),
               "desktop config": json.loads(Path("ui/src-tauri/tauri.conf.json").read_text())["version"],
               "npm wrapper": json.loads(Path("npm/package.json").read_text())["version"],
-              "kerna observe": re.search(r'^__version__\s*=\s*"([^"]+)"', Path("observe/__init__.py").read_text(), re.M).group(1),
+              "kerna observe": py_version("observe/__init__.py"),
           }
           mismatches = {name: version for name, version in versions.items() if version != expected}
           if mismatches:
@@ -268,12 +274,18 @@ jobs:
                   raise SystemExit(f"Could not read a package version from {path}")
               return match.group(1)
 
+          def py_version(path):
+              match = re.search(r'^__version__\s*=\s*"([^"]+)"', Path(path).read_text(), re.M)
+              if not match:
+                  raise SystemExit(f"Could not read __version__ from {path}")
+              return match.group(1)
+
           versions = {
               "kernel": toml_version("kernel/Cargo.toml"),
               "desktop": toml_version("ui/src-tauri/Cargo.toml"),
               "desktop config": json.loads(Path("ui/src-tauri/tauri.conf.json").read_text())["version"],
               "npm wrapper": json.loads(Path("npm/package.json").read_text())["version"],
-              "kerna observe": re.search(r'^__version__\s*=\s*"([^"]+)"', Path("observe/__init__.py").read_text(), re.M).group(1),
+              "kerna observe": py_version("observe/__init__.py"),
           }
           mismatches = {name: version for name, version in versions.items() if version != expected}
           if mismatches:
