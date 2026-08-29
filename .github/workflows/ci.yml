@@ -69,10 +69,13 @@ jobs:
       with:
         python-version: '3.11'
 
-    - name: Smoke test Kerna Observe source entry point
+    # Deliberately installs nothing. The demo's whole claim is that it runs on a
+    # fresh machine, and it stopped doing so for weeks because three seams
+    # imported httpx to talk to loopback. A run that pip-installs first cannot
+    # catch that again.
+    - name: Smoke test Kerna Observe source entry point (no dependencies)
       if: matrix.os == 'ubuntu-latest'
       run: |
-        python -m pip install --quiet httpx
         python -m compileall -q observe examples/qoder-governed-mcp
         python observe/packaging/kerna_observe.py demo --no-open --out reports/kerna-observe-demo.html
 
