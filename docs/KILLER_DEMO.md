@@ -7,7 +7,10 @@ This script demonstrates the unique value proposition of Kerna: observing, bound
 ```bash
 kerna init --quick
 kerna provider add openai --provider-type openai --api-key-env OPENAI_API_KEY
-kerna mcp add mockmcp "/path/to/kerna" -- mockmcp
+# Add a reviewed OCI plugin; native MCP commands are refused in production.
+kerna mcp add <name> --image <registry/name@sha256:digest> \
+  --manifest plugins/<name>/manifest.toml --manifest-sha256 <sha256> \
+  --signing-public-key <base64-ed25519-key> --read-root <path>
 ```
 
 ## Act 1: The Fast Path Deny
@@ -33,7 +36,7 @@ kerna mcp risk mockmcp
 Execute a task that intentionally fails due to constraints or lack of API keys, proving the execution guardrails.
 
 ```bash
-kerna run "Use MockMCP echo and explain what happened"
+kerna run "Use the reviewed MCP tool and explain what happened"
 ```
 
 Then immediately run:

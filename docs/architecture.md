@@ -47,7 +47,13 @@ When a user executes `kerna run <goal>`, the following strict lifecycle occurs:
 
 Kerna interacts with tools exclusively via the **Model Context Protocol (MCP)** over `stdio`. 
 
-Plugins are treated as untrusted child processes. Kerna spawns them in an isolated working directory (`./sandbox`). If a plugin hangs or times out, Kerna autonomously issues a `SIGKILL`, reaps the zombie process, records the failure, and allows the LLM to choose an alternative path.
+Plugins are treated as untrusted code. In production, Kerna admits only a
+verified, digest-pinned OCI MCP image and runs it with a read-only root,
+dropped capabilities, no network, and explicit project mounts. If a plugin
+hangs or times out, Kerna autonomously kills and reaps the container process,
+records the failure, and allows the client to choose an alternative path. A
+native child-process helper remains only for legacy development/conformance
+tests and is not a production boundary.
 
 ## 6. The Security Model
 

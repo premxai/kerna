@@ -729,7 +729,11 @@ mod simulate_three_outcomes {
         let dir = std::env::temp_dir().join("kerna-sim-ask");
         let _ = std::fs::create_dir_all(&dir);
         let decision = sandbox_in(&dir)
-            .simulate_command("run_command", r#"{"command":"ls"}"#, &manager("require_confirmation"))
+            .simulate_command(
+                "run_command",
+                r#"{"command":"ls"}"#,
+                &manager("require_confirmation"),
+            )
             .expect("simulates");
 
         assert!(
@@ -754,8 +758,14 @@ mod simulate_three_outcomes {
             )
             .expect("simulates");
 
-        assert!(!decision.is_allowed, "a path outside the workspace must not simulate as allowed");
-        assert!(decision.reasons.iter().any(|r| r.contains("outside the workspace")));
+        assert!(
+            !decision.is_allowed,
+            "a path outside the workspace must not simulate as allowed"
+        );
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|r| r.contains("outside the workspace")));
     }
 
     #[test]
@@ -778,7 +788,11 @@ mod simulate_three_outcomes {
         let dir = std::env::temp_dir().join("kerna-sim-allow");
         let _ = std::fs::create_dir_all(&dir);
         let decision = sandbox_in(&dir)
-            .simulate_command("run_command", r#"{"command":"ls"}"#, &manager("auto_approve"))
+            .simulate_command(
+                "run_command",
+                r#"{"command":"ls"}"#,
+                &manager("auto_approve"),
+            )
             .expect("simulates");
 
         assert!(decision.is_allowed && !decision.needs_confirmation);

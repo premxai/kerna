@@ -1,9 +1,10 @@
 # Kerna controlled-cohort release runbook
 
 Use this runbook for the first 5-10 user cohort. It produces a versioned
-GitHub release with CLI binaries, native desktop installers, and checksums. It
-does not authorize a broad public launch: code signing and macOS notarization
-are separate requirements for that later stage.
+GitHub release with Kerna CLI binaries, the `kerna-observe` companion binary,
+native desktop installers, and checksums. It does not authorize a broad public
+launch: code signing and macOS notarization are separate requirements for that
+later stage.
 
 ## Preconditions
 
@@ -26,6 +27,12 @@ cargo clippy --manifest-path kernel/Cargo.toml -- -D warnings
 cargo test --manifest-path kernel/Cargo.toml
 cargo audit
 
+python -m pip install httpx pyinstaller
+python -m compileall -q observe examples/qoder-governed-mcp
+python observe/packaging/kerna_observe.py demo --no-open --out reports/kerna-observe-demo.html
+python observe/packaging/build.py
+./observe/dist/kerna-observe --help
+
 npm --prefix ui ci
 npm --prefix ui run build
 cargo fmt --manifest-path ui/src-tauri/Cargo.toml -- --check
@@ -43,11 +50,13 @@ file copied from `target/`.
 2. Create an annotated tag whose version exactly matches all version files,
    for example `v0.2.0`.
 3. Push the tag. The release workflow rejects mismatched versions, builds the
-   CLI and desktop installers for its supported platforms, and attaches a
-   SHA-256 checksum file beside each artifact group.
+   CLI, Kerna Observe, and desktop installers for its supported platforms, and
+   attaches a SHA-256 checksum file beside each artifact group.
 4. Open the GitHub release and confirm every expected asset is present before
    sharing its URL:
    - CLI binary plus `<asset>.sha256` for Linux, macOS, and Windows;
+   - `kerna-observe-*` binary plus `<asset>.sha256` for Linux, macOS, and
+     Windows;
    - `kerna-plugins.zip` plus `kerna-plugins.zip.sha256`; extract the verified
      archive beside a manually installed CLI so curated packs are available;
    - native desktop installer(s) plus a platform-specific
@@ -60,6 +69,7 @@ checksum. On PowerShell:
 
 ```powershell
 Get-FileHash .\kerna-windows-x86_64.exe -Algorithm SHA256
+Get-FileHash .\kerna-observe-windows-x86_64.exe -Algorithm SHA256
 Get-FileHash .\Kerna_0.2.0_x64-setup.exe -Algorithm SHA256
 Get-FileHash .\kerna-plugins.zip -Algorithm SHA256
 Get-Content .\kerna-desktop-windows-SHA256SUMS

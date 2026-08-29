@@ -1,13 +1,18 @@
 # MCP UX and Security Operations
 
-Kerna provides first-class support for the Model Context Protocol (MCP), but adds a critical layer of operations, observability, and security on top.
+Kerna provides first-class support for the Model Context Protocol (MCP), but
+adds a critical layer of operations, observability, and security on top. In a
+governed production session, plugin execution is container-only.
 
 ## Adding an MCP Server
 
-You can register an MCP server through the CLI. Kerna will proxy the server via Stdio:
+You can register a digest-pinned OCI MCP server through the CLI. Kerna verifies
+its signed manifest and proxies the image via stdio:
 
 ```bash
-kerna mcp add mockmcp "path/to/kerna.exe" -- mockmcp
+kerna mcp add <name> --image <registry/name@sha256:digest> \
+  --manifest plugins/<name>/manifest.toml --manifest-sha256 <sha256> \
+  --signing-public-key <base64-ed25519-key> --read-root <path>
 ```
 
 ## The Risk Card
@@ -32,8 +37,12 @@ If an MCP server provides a dangerous tool (e.g., `execute_sql_query`) alongside
 ```toml
 [[mcp_servers]]
 name = "postgres_mcp"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb"]
+runtime_mode = "docker"
+image = "registry.example/postgres-mcp@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+manifest_path = "plugins/postgres_mcp/manifest.toml"
+manifest_sha256 = "<sha256>"
+signing_public_key = "<base64-ed25519-key>"
+read_roots = ["db-config"]
 allow_tools = ["list_tables", "describe_table"]
 deny_tools = ["execute_query"]
 ```

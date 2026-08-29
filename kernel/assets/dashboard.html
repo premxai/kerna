@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Kerna · Local trust runtime</title>
+  <style>
+    :root { --ink:#0b1116; --panel:#111b22; --panel2:#17242d; --line:#2c3d48; --text:#edf4f0; --muted:#9aacb3; --good:#6ad6a3; --warn:#f3c969; --bad:#fa9286; --focus:#98e1ff; --mono:ui-monospace,SFMono-Regular,Consolas,monospace; }
+    * { box-sizing:border-box } body { margin:0; background:var(--ink); color:var(--text); font:15px/1.5 Inter,system-ui,sans-serif; }
+    main { max-width:1240px; margin:auto; padding:28px clamp(16px,4vw,56px) 52px; }
+    header { border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:18px; padding-bottom:20px; }
+    h1,h2 { margin:0; letter-spacing:-.035em; } h1 { font-size:clamp(28px,4vw,44px); } h2 { font-size:16px; letter-spacing:-.01em; } p { margin:6px 0; } .kicker { color:var(--good); font:700 11px var(--mono); letter-spacing:.11em; text-transform:uppercase; }
+    .muted { color:var(--muted); } .boundary { max-width:580px; text-align:right; }
+    .metrics { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:1px; background:var(--line); border:1px solid var(--line); margin:24px 0; }
+    .metric { background:var(--panel); padding:15px; min-height:94px; } .metric strong { display:block; font:700 29px/1 var(--mono); margin-top:9px; }
+    .layout { display:grid; grid-template-columns:1.5fr 1fr; gap:18px; } .stack { display:grid; gap:18px; }
+    section { border:1px solid var(--line); background:var(--panel); padding:18px; } section > header { padding:0 0 12px; margin-bottom:10px; } .tag { color:var(--good); font:700 10px var(--mono); letter-spacing:.08em; }
+    table { border-collapse:collapse; width:100%; font-size:13px; } th { color:var(--muted); font:600 11px var(--mono); text-transform:uppercase; } td,th { border-bottom:1px solid var(--line); padding:9px 7px; text-align:left; vertical-align:top; } td code { color:#b8d9ff; }
+    button { border:1px solid #5aa87d; background:var(--good); color:#082016; cursor:pointer; font-weight:750; margin:4px 6px 4px 0; padding:7px 9px; } button.reject { background:transparent; border-color:#9c5d5a; color:#ffc0ba; } button:hover { filter:brightness(1.1) } button:focus-visible { outline:3px solid var(--focus); outline-offset:2px; }
+    .callout { background:var(--panel2); border-left:3px solid var(--good); padding:12px; } .empty { color:var(--muted); font-style:italic; } .state-good { color:var(--good) } .state-warn { color:var(--warn) } .state-bad { color:var(--bad) } pre { margin:0; max-height:230px; overflow:auto; white-space:pre-wrap; color:#d4e7db; font:12px/1.45 var(--mono); }
+    @media (max-width:900px) { header { display:block }.boundary{text-align:left;margin-top:12px}.metrics{grid-template-columns:repeat(3,1fr)}.layout{grid-template-columns:1fr} }
+    @media (max-width:520px) { main{padding:18px 12px}.metrics{grid-template-columns:repeat(2,1fr)} section{padding:13px} table{font-size:12px} }
+    @media (prefers-reduced-motion:reduce) { * { scroll-behavior:auto; transition:none!important; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div><p class="kicker">Kerna / local runtime</p><h1>Governed MCP activity</h1></div>
+      <p class="muted boundary">Kerna governs MCP calls that reach this gateway. Native editor and terminal actions, and external-client model selection, remain outside that boundary.</p>
+    </header>
+    <div id="metrics" class="metrics" aria-live="polite"></div>
+    <div class="layout">
+      <div class="stack">
+        <section><header><div><p class="tag">Connected clients</p><h2>Gateway sessions</h2></div></header><div id="sessions"></div></section>
+        <section><header><div><p class="tag">Live receipt ledger</p><h2>Recent governed calls</h2></div></header><div id="calls"></div></section>
+        <section><header><div><p class="tag">Audit detail</p><h2>Trace</h2></div></header><pre id="trace">Choose a receipt trace to inspect its redacted event record.</pre></section>
+      </div>
+      <aside class="stack">
+        <section><header><div><p class="tag">Human checkpoint</p><h2>Approval inbox</h2></div></header><div id="approvals"></div></section>
+        <section><header><div><p class="tag">Production boundary</p><h2>Containment</h2></div></header><div id="plugins"></div></section>
+        <section><header><div><p class="tag">Model posture</p><h2>Local models and routes</h2></div></header><div id="models" class="empty">Checking the local runtime…</div></section>
+      </aside>
+    </div>
+  </main>
+  <script>
+    const csrf = '{csrf}';
+    const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const table = (headers, rows) => `<table><tr>${headers.map((h) => `<th>${h}</th>`).join('')}</tr>${rows.join('')}</table>`;
+    function render(data) {
+      const m = data.metrics;
+      const cards = [['Active sessions',m.active_sessions],['Calls / last min',m.tool_calls],['Allowed',m.completed],['Denied',m.denied],['Errors',m.failed],['Awaiting approval',m.pending_approvals],['p95 latency',m.p95_duration_ms == null ? '—' : `${m.p95_duration_ms} ms`]];
+      document.querySelector('#metrics').innerHTML = cards.map(([label,value]) => `<div class="metric"><span class="muted">${label}</span><strong>${value}</strong></div>`).join('');
+      document.querySelector('#sessions').innerHTML = data.sessions.length ? table(['Client','Protocol','State','Last activity'], data.sessions.map((s) => `<tr><td>${esc(s.client_name || 'connecting…')} ${esc(s.client_version || '')}</td><td><code>${esc(s.protocol_version || '—')}</code></td><td class="state-good">${esc(s.state)}</td><td>${esc(s.last_activity_at)}</td></tr>`)) : '<p class="empty">No gateway session has been recorded.</p>';
+      document.querySelector('#calls').innerHTML = data.receipts.length ? table(['Tool','Decision','Result','Latency','Trace'], data.receipts.slice(0,20).map((r) => `<tr><td><code>${esc(r.tool)}</code></td><td>${esc(r.policy_decision)}</td><td>${esc(r.result_class || 'running')}</td><td>${r.duration_ms ?? '—'} ms</td><td>${r.trace_id ? `<button onclick="trace('${esc(r.task_id)}')">view</button>` : '—'}</td></tr>`)) : '<p class="empty">No governed tool call yet.</p>';
+      document.querySelector('#approvals').innerHTML = data.approvals.length ? data.approvals.map((a) => `<div class="callout"><code>${esc(a.tool)}</code><p class="muted">One exact retry only.</p><button onclick="decide('${esc(a.id)}','approve')">Approve once</button><button class="reject" onclick="decide('${esc(a.id)}','reject')">Reject</button></div>`).join('') : '<p class="empty">No pending approvals.</p>';
+      document.querySelector('#plugins').innerHTML = data.containment.length ? data.containment.map((p) => `<div class="callout"><strong>${esc(p.name)}</strong><p><span class="state-good">network: ${esc(p.network)}</span> · <code>${esc(p.image_digest)}</code></p><p class="muted">read: ${esc((p.read_roots || []).join(', ') || 'none')}<br>write: ${esc((p.write_roots || []).join(', ') || 'none')}</p></div>`).join('') : '<p class="empty">No enabled contained plugins.</p>';
+    }
+    async function decide(id, action) { const r = await fetch(`/api/v1/dashboard/approvals/${id}/${action}`, {method:'POST',headers:{'X-Kerna-Dashboard-CSRF':csrf}}); if (!r.ok) alert(await r.text()); }
+    async function trace(task) { const r = await fetch(`/api/v1/dashboard/traces/${encodeURIComponent(task)}`); document.querySelector('#trace').textContent = r.ok ? JSON.stringify(await r.json(),null,2) : await r.text(); }
+    async function loadModels() { try { const d = await (await fetch('/api/v1/dashboard/models')).json(); const health = d.local_runtime.endpoint_health; const installed = d.local_runtime.installed_models || []; const recipes = d.recommendations || []; document.querySelector('#models').innerHTML = `<div class="callout"><strong class="${health === 'healthy' ? 'state-good' : 'state-bad'}">Ollama: ${esc(health)}</strong><p class="muted">Runtime inventory: ${esc(installed.map((m) => m.id).join(', ') || 'none')}<br>Cloud-labelled entries are excluded from local-only routes.</p><p class="muted">Kerna-routed model: ${Object.keys(d.kerna_routed_model.routes || {}).length ? 'configured' : 'none configured'}<br>External client model: ${esc(d.external_client_model)}</p><p class="muted">Validated recommendations: ${recipes.length ? esc(recipes.map((r) => r.id).join(', ')) : 'none for this hardware'}</p></div>`; } catch { document.querySelector('#models').textContent = 'Local model runtime could not be read.'; } }
+    const events = new EventSource('/api/v1/dashboard/events'); events.addEventListener('snapshot', (event) => render(JSON.parse(event.data))); events.onerror = () => { document.querySelector('#metrics').setAttribute('aria-label','Live connection retrying'); };
+    loadModels();
+  </script>
+</body>
+</html>
