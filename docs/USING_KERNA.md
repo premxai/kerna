@@ -74,7 +74,11 @@ kerna mcp list                     # what's connected and what tools they expose
 kerna mcp risk files               # read the risk card BEFORE granting anything
 ```
 
-Add any other MCP server (yours or third-party) with `kerna mcp add <name> <command> [args...]` — e.g. `kerna mcp add fetch npx -y @modelcontextprotocol/server-fetch`. See [plugins/README.md](../plugins/README.md) for the catalog.
+For a production gateway, add only a reviewed OCI plugin image and signed
+manifest with `kerna mcp add <name> --image <image@sha256:...> --manifest
+<manifest.toml> --manifest-sha256 <hash> --signing-public-key <base64-key>
+--read-root <dir>`. Native commands are for legacy development tooling and are
+refused by the governed gateway. See [CROSS_IDE_CLI.md](CROSS_IDE_CLI.md).
 
 Nothing a plugin exposes can actually run until you grant it in `kerna.toml`. That's the whole point.
 

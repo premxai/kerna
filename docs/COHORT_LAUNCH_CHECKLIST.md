@@ -17,7 +17,7 @@ content.
 | Google connector contract | Manifest limits tools, secrets, network hosts, and requires approval for creation | Verified by manifest and plugin tests |
 | OAuth setup safety | PKCE loopback helper defaults to `calendar.events.readonly`; it will not begin consent without an explicit storage choice | Verified by plugin test |
 | Desktop control surface | Task receipts, local approval queue, routine scope, connector setup state, and latest tool-call result are represented | Desktop build and responsive visual smoke check verified |
-| Controlled-cohort artifact integrity | The release tag contains matching CLI binaries, native desktop installers, curated plugin bundle, and SHA-256 checksum sidecars. Verify the final tag below before inviting a cohort. | Required for each release |
+| Controlled-cohort artifact integrity | The release tag contains matching CLI and `kerna-observe` binaries, native desktop installers, curated plugin bundle, and SHA-256 checksum sidecars. Verify the final tag below before inviting a cohort. | Required for each release |
 
 ## Required live acceptance checks
 
@@ -54,7 +54,8 @@ stop expansion and file the receipt as a launch blocker.
 ## Controlled-cohort distribution checks
 
 1. Create the cohort tag and confirm the release contains the platform-specific
-   CLI, desktop installer, the curated `kerna-plugins.zip` bundle, and a
+   CLI, `kerna-observe` companion binary, desktop installer, the curated
+   `kerna-plugins.zip` bundle, and a
    corresponding SHA-256 checksum file for each downloaded artifact.
 2. Verify the downloaded CLI checksum before installing it. Verify the desktop
    installer against the release's `SHA256SUMS` file before sharing it with a

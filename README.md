@@ -75,6 +75,7 @@ irm https://raw.githubusercontent.com/premxai/kerna/main/install.ps1 | iex
 ### Build from source
 
 ```bash
+# Rust 1.88+ is required.
 cargo install --git https://github.com/premxai/kerna --bin kerna
 ```
 
@@ -126,6 +127,11 @@ Explore the [everyday guide](docs/EVERYDAY.md) and [full usage guide](docs/USING
 
 Kerna discovers MCP tools from your workspace configuration, classifies their risk, and governs every invocation. Installing a plugin does not silently grant it broad access.
 
+Production gateway plugins are digest-pinned OCI images with signed manifests;
+Kerna refuses native third-party plugin processes in a governed session. See the
+[cross-IDE/CLI runtime guide](docs/CROSS_IDE_CLI.md) for the contract,
+containment model, and approval workflow.
+
 ```bash
 # Browse available packs and install a curated set of local productivity tools.
 kerna pack list
@@ -137,6 +143,43 @@ kerna mcp risk <connector-name>
 ```
 
 The included packs cover local notes, calendar, weather, web reading, optional search, developer tools, and optional Google Workspace integration. See the [plugin catalog](plugins/README.md) and [plugin manifest specification](docs/PLUGIN_MANIFEST.md).
+
+## Govern existing coding clients
+
+Use the gateway when an existing coding client already speaks MCP. Kerna
+governs the tools routed through its MCP server, records those calls locally,
+and fails closed when a rule requires confirmation or denies a tool. It does
+not claim to govern a client's native editor, terminal, or built-in tools.
+
+```powershell
+# Generate a deterministic, reviewable workspace contract.
+kerna contract init --template deployment-assistant --name "Deployment assistant" --output .\kerna-demo
+
+# Print a client configuration; this command never changes client settings.
+kerna client config --client qoder --workspace .\kerna-demo | Set-Content .\kerna-demo\.mcp.json
+kerna client config --client claude-code --workspace .\kerna-demo
+kerna client config --client codex --workspace .\kerna-demo
+kerna client config --client generic --workspace .\kerna-demo
+
+# Validate the configuration shape and a real MCP initialize → tools/list handshake.
+kerna client doctor --client qoder --workspace .\kerna-demo
+```
+
+For Qoder, open the generated workspace as the project, approve/reload its
+project MCP server, and use Agent Mode. The contract starts with a harmless
+allowed `echo` call and a denied `network_probe` call so the policy boundary is
+visible before any real connector is added. See the complete [Qoder demo
+walkthrough](examples/qoder-governed-mcp/README.md), including a no-IDE stdio
+verifier. Claude Code and Codex snippets include an explicit workspace argument;
+paste them into the client’s project/user MCP configuration after reviewing the
+contract. Each adapter launches the direct `kerna gateway --workspace <path>`
+command—no shell wrapper or automatic client-configuration edit is involved.
+
+Open the local demo dashboard with `kerna dashboard --workspace .\kerna-demo`.
+It binds to `127.0.0.1`, streams durable governed-call receipts in real time,
+and separates Kerna-routed model state from external client model choice. See
+the [cross-IDE runtime guide](docs/CROSS_IDE_CLI.md) for model registry and
+approval details.
 
 ## Inspect and explain work
 

@@ -146,6 +146,12 @@ pub fn install(config: &mut Config, pack: &Pack) -> InstallReport {
                 secrets: p.secrets.clone(),
                 runtime_mode: "native".to_string(),
                 docker_image: "ubuntu:latest".to_string(),
+                image: String::new(),
+                manifest_path: String::new(),
+                manifest_sha256: String::new(),
+                signing_public_key: String::new(),
+                read_roots: vec![],
+                write_roots: vec![],
             });
             report.added.push(p.name.clone());
         }

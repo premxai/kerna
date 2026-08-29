@@ -1,5 +1,7 @@
 use crate::config::{Config, McpServerConfig};
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
+use base64::Engine;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -70,6 +72,40 @@ impl PluginManifest {
         Ok(manifest)
     }
 
+    /// Stable bytes signed by a plugin publisher. The manifest's runtime file
+    /// hash is intentionally not part of this representation: it is the
+    /// separately pinned review fingerprint in `kerna.toml`.
+    fn signing_payload(&self) -> Result<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.plugin.signature = None;
+        unsigned.plugin.manifest_sha256 = None;
+        Ok(toml::to_string(&unsigned)?.into_bytes())
+    }
+
+    pub fn verify_signature(&self, public_key_b64: &str) -> Result<()> {
+        let public_key = base64::engine::general_purpose::STANDARD
+            .decode(public_key_b64)
+            .context("signing_public_key is not valid base64")?;
+        let signature = self
+            .plugin
+            .signature
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("manifest is unsigned"))?;
+        let signature = base64::engine::general_purpose::STANDARD
+            .decode(signature)
+            .context("manifest signature is not valid base64")?;
+        let key: [u8; 32] = public_key
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("signing_public_key must decode to 32 bytes"))?;
+        let signature: [u8; 64] = signature
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("manifest signature must decode to 64 bytes"))?;
+        VerifyingKey::from_bytes(&key)
+            .context("invalid Ed25519 signing_public_key")?
+            .verify(&self.signing_payload()?, &Signature::from_bytes(&signature))
+            .map_err(|_| anyhow::anyhow!("manifest signature verification failed"))
+    }
+
     pub fn print_risk_card(&self) {
         let p = &self.plugin;
 
@@ -132,10 +168,46 @@ impl PluginManifest {
     }
 }
 
+/// Sign a publisher-owned manifest with an Ed25519 seed supplied out of band.
+/// The key is never written to the manifest or printed by the CLI. The result
+/// contains the complete file fingerprint and public key needed by `mcp add`.
+pub fn sign_manifest(path: &Path, secret_key_b64: &str) -> Result<(String, String)> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("could not read manifest '{}'", path.display()))?;
+    let mut manifest: PluginManifest = toml::from_str(&raw)
+        .with_context(|| format!("could not parse manifest '{}'", path.display()))?;
+    let secret_key = base64::engine::general_purpose::STANDARD
+        .decode(secret_key_b64)
+        .context("signing key is not valid base64")?;
+    let secret_key: [u8; 32] = secret_key
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signing key must decode to a 32-byte Ed25519 seed"))?;
+    let signer = SigningKey::from_bytes(&secret_key);
+
+    // These two fields are excluded from the signed representation. The
+    // fingerprint below binds the final serialized file in the contract.
+    manifest.plugin.manifest_sha256 = None;
+    manifest.plugin.signature = None;
+    let signature = signer.sign(&manifest.signing_payload()?);
+    manifest.plugin.signature =
+        Some(base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()));
+    let serialized = toml::to_string(&manifest)?;
+    let fingerprint = format!("{:x}", Sha256::digest(serialized.as_bytes()));
+    fs::write(path, serialized)
+        .with_context(|| format!("could not write manifest '{}'", path.display()))?;
+    Ok((
+        fingerprint,
+        base64::engine::general_purpose::STANDARD.encode(signer.verifying_key().to_bytes()),
+    ))
+}
+
 /// Locate a manifest for a configured MCP server. Prefer a manifest adjacent to
 /// the configured entrypoint, then fall back to Kerna's shipped plugin layout.
 /// This keeps manifests working for both local paths and installed packs.
 pub fn find_for_server(server: &McpServerConfig) -> Option<PathBuf> {
+    if let Some(path) = server.manifest_candidate() {
+        return path.is_file().then_some(path);
+    }
     let mut candidates = Vec::new();
 
     for arg in &server.args {
@@ -179,6 +251,40 @@ pub fn load_for_server(server: &McpServerConfig) -> Result<Option<(PathBuf, Plug
     }
 }
 
+/// Validate a production plugin before it is handed to the container runner.
+/// Signature validation and both fingerprints are checked before any image is
+/// started, eliminating a native or mutable-image downgrade path.
+pub fn verify_production_server(
+    server: &McpServerConfig,
+    workspace: &Path,
+) -> Result<PluginManifest> {
+    server.validate_container_contract(workspace)?;
+    let path = workspace.join(&server.manifest_path);
+    let manifest = PluginManifest::load(&path)
+        .with_context(|| format!("plugin '{}' is missing manifest.toml", server.name))?;
+    if manifest.plugin.name != server.name {
+        bail!(
+            "manifest '{}' does not match configured plugin '{}'",
+            manifest.plugin.name,
+            server.name
+        );
+    }
+    let observed = manifest
+        .plugin
+        .manifest_sha256
+        .as_deref()
+        .unwrap_or_default();
+    if !observed.eq_ignore_ascii_case(&server.manifest_sha256) {
+        bail!(
+            "manifest fingerprint mismatch for '{}': {}",
+            server.name,
+            path.display()
+        );
+    }
+    manifest.verify_signature(&server.signing_public_key)?;
+    Ok(manifest)
+}
+
 /// Apply the manifest's declarations to a configured server as additional
 /// restrictions. Configuration can only narrow a manifest declaration; it can
 /// never expand the tools or secrets a manifest permits.
@@ -187,6 +293,17 @@ pub fn apply_to_server(server: &mut McpServerConfig) -> Result<Option<PathBuf>> 
         return Ok(None);
     };
 
+    apply_manifest_to_server(server, &manifest)?;
+    Ok(Some(path))
+}
+
+/// Apply a manifest that has already been verified against an explicit
+/// workspace. Production initialization uses this form so relative manifest
+/// paths do not depend on the process current directory.
+pub fn apply_manifest_to_server(
+    server: &mut McpServerConfig,
+    manifest: &PluginManifest,
+) -> Result<()> {
     let declared_tools = &manifest.plugin.capabilities;
     server.capabilities = intersect_or_use_declared(&server.capabilities, declared_tools);
     server.allow_tools = intersect_or_use_declared(&server.allow_tools, declared_tools);
@@ -211,7 +328,7 @@ pub fn apply_to_server(server: &mut McpServerConfig) -> Result<Option<PathBuf>> 
         .secrets
         .retain(|secret| manifest.plugin.secrets.contains(secret));
 
-    Ok(Some(path))
+    Ok(())
 }
 
 /// Apply every configured plugin's manifest restrictions to the in-memory
@@ -252,7 +369,11 @@ fn append_unique(target: &mut Vec<String>, additions: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use uuid::Uuid;
 
     fn server(entrypoint: PathBuf) -> McpServerConfig {
         McpServerConfig {
@@ -271,6 +392,12 @@ mod tests {
             ],
             runtime_mode: "native".to_string(),
             docker_image: "ubuntu:latest".to_string(),
+            image: String::new(),
+            manifest_path: String::new(),
+            manifest_sha256: String::new(),
+            signing_public_key: String::new(),
+            read_roots: vec![],
+            write_roots: vec![],
         }
     }
 
@@ -341,6 +468,81 @@ entrypoint = "mcp_server.py"
         assert!(configured.allow_tools.is_empty());
         assert!(configured.deny_tools.contains(&"*".to_string()));
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn production_server_requires_a_valid_signed_manifest() {
+        let dir = std::env::temp_dir().join(format!("kerna-signed-manifest-{}", Uuid::new_v4()));
+        fs::create_dir_all(dir.join("input")).unwrap();
+        let manifest_path = dir.join("manifest.toml");
+        let mut manifest = PluginManifest {
+            plugin: PluginMetadata {
+                name: "test-plugin".to_string(),
+                version: "1.0.0".to_string(),
+                kind: "tool.mcp".to_string(),
+                entrypoint: "server".to_string(),
+                source: default_source(),
+                trust: default_trust(),
+                capabilities: vec!["read".to_string()],
+                requires_approval: vec![],
+                secrets: vec![],
+                allowed_paths: vec![],
+                network_allowlist: vec![],
+                declared_outputs: vec![],
+                max_output_bytes: default_max_output_bytes(),
+                manifest_sha256: None,
+                signature: None,
+            },
+        };
+        let signer = SigningKey::from_bytes(&[7; 32]);
+        let signature = signer.sign(&manifest.signing_payload().unwrap());
+        manifest.plugin.signature =
+            Some(base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()));
+        let content = toml::to_string(&manifest).unwrap();
+        fs::write(&manifest_path, &content).unwrap();
+        let fingerprint = format!("{:x}", Sha256::digest(content.as_bytes()));
+        let mut configured = server(manifest_path.clone());
+        configured.runtime_mode = "docker".to_string();
+        configured.image =
+            "example/test@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string();
+        configured.manifest_path = "manifest.toml".to_string();
+        configured.manifest_sha256 = fingerprint;
+        configured.signing_public_key =
+            base64::engine::general_purpose::STANDARD.encode(signer.verifying_key().to_bytes());
+        configured.read_roots = vec!["input".to_string()];
+        configured.capabilities = vec![];
+        configured.allow_tools = vec![];
+        assert!(verify_production_server(&configured, &dir).is_ok());
+        configured.manifest_sha256 = "0".repeat(64);
+        assert!(verify_production_server(&configured, &dir).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn signer_outputs_a_manifest_that_verifies_with_its_reported_public_key() {
+        let dir = std::env::temp_dir().join(format!("kerna-manifest-sign-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("manifest.toml");
+        fs::write(
+            &path,
+            r#"[plugin]
+name = "signed-fixture"
+version = "1.0.0"
+kind = "tool.mcp"
+entrypoint = "server"
+"#,
+        )
+        .unwrap();
+        let secret = base64::engine::general_purpose::STANDARD.encode([9u8; 32]);
+        let (fingerprint, public_key) = sign_manifest(&path, &secret).unwrap();
+        let loaded = PluginManifest::load(&path).unwrap();
+        assert_eq!(
+            loaded.plugin.manifest_sha256.as_deref(),
+            Some(fingerprint.as_str())
+        );
+        assert!(loaded.verify_signature(&public_key).is_ok());
         let _ = fs::remove_dir_all(dir);
     }
 }

@@ -1,0 +1,15 @@
+[plugin]
+name = "filesystem-fixture"
+version = "1.0.0"
+kind = "tool.mcp"
+entrypoint = "/workspace/plugin/server.py"
+source = "kerna-example"
+trust = "untrusted"
+capabilities = ["read_file", "write_file", "network_probe"]
+requires_approval = ["write_file"]
+secrets = []
+allowed_paths = ["read", "write"]
+network_allowlist = []
+declared_outputs = ["write"]
+max_output_bytes = 50000
+signature = "LeEagwIK2vyQEcYHfrHFRDruzZxnCw/b/SbwL1ffwN51nqIuFlBbH2sFPKF+ooy82Yuk6XZrZcfrox/1WTDhCg=="

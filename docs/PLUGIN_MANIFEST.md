@@ -1,6 +1,7 @@
 # Kerna Plugin Manifest (`manifest.toml`)
 
-Each curated Kerna MCP plugin includes a `manifest.toml` beside its entrypoint.
+Each curated Kerna MCP plugin includes a `manifest.toml` beside its entrypoint
+and is launched from a digest-pinned OCI image.
 The manifest is a **runtime contract**: it declares the MCP tools the plugin is
 allowed to expose, operations that need confirmation, and environment-variable
 names it may receive. Kerna applies those declarations as restrictions on the
@@ -53,17 +54,18 @@ For a plugin with a manifest:
 - `deny_tools`, global permissions, budget limits, folder boundaries, and other
   runtime policy still apply after the manifest contract.
 
-The manifest is not a sandbox. Its network, allowed-path, output, and trust
-metadata are shown in risk assessment and guide policy, but a native child
-process is not made OS-safe merely by declaring those values. Use a hardened
-runtime mode where available and grant only reviewed plugins.
+The manifest is part of the production admission check. Kerna verifies its
+Ed25519 signature and SHA-256 fingerprint before starting the image. The
+container still supplies the OS boundary: read-only root filesystem, dropped
+capabilities, no network, no Docker socket, and only project-relative mounts.
+Native plugin execution is refused by the gateway.
 
 ## Legacy plugins
 
-Third-party MCP servers without a manifest remain supported for compatibility,
-but Kerna marks them as **Legacy Warning** and relies entirely on explicit
-`kerna.toml` policy, filters, budgets, and the selected runtime boundary. Treat
-them as unreviewed until they have a tested manifest and connector record.
+Third-party MCP servers without a verified manifest or digest-pinned image are
+refused by the production gateway. The lower-level native process helper exists
+only for legacy development and conformance tests; it is not a production
+fallback.
 
 ## Author checklist
 

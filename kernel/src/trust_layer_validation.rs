@@ -37,6 +37,12 @@ async fn setup_test_env(
         enabled: true,
         runtime_mode: "local".to_string(),
         docker_image: String::new(),
+        image: String::new(),
+        manifest_path: String::new(),
+        manifest_sha256: String::new(),
+        signing_public_key: String::new(),
+        read_roots: vec![],
+        write_roots: vec![],
         capabilities: vec![
             "echo".to_string(),
             "hang".to_string(),
@@ -912,6 +918,12 @@ async fn test_mcp_risk_card_generation() {
         secrets: vec![],
         runtime_mode: "local".to_string(),
         docker_image: "".to_string(),
+        image: String::new(),
+        manifest_path: String::new(),
+        manifest_sha256: String::new(),
+        signing_public_key: String::new(),
+        read_roots: vec![],
+        write_roots: vec![],
     };
 
     let result = crate::mcp_governance::generate_risk_card(&config).await;
