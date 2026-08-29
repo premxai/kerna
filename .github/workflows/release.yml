@@ -107,6 +107,81 @@ jobs:
             dist/${{ matrix.asset }}
             dist/${{ matrix.asset }}.sha256
 
+  observe:
+    # The model-seam half. It lives in this repository now (`observe/`), so it builds
+    # here rather than by hand on somebody's laptop -- which is how the previous binary
+    # went twenty commits stale, was rebuilt, and went stale again the same day.
+    name: Build kerna-observe ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x86_64
+            built: kerna-observe.exe
+            asset: kerna-observe-windows-x86_64.exe
+          - os: macos-14
+            label: macos-arm64
+            built: kerna-observe
+            asset: kerna-observe-macos-arm64
+          - os: macos-13
+            label: macos-x86_64
+            built: kerna-observe
+            asset: kerna-observe-macos-x86_64
+          - os: ubuntu-latest
+            label: linux-x86_64
+            built: kerna-observe
+            asset: kerna-observe-linux-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install build dependencies
+        run: python -m pip install --quiet pyinstaller -r observe/requirements.txt
+
+      - name: Build
+        run: python observe/packaging/build.py
+
+      # A binary that starts is not one that works, and this repository has shipped the
+      # difference. The demo needs no key, no network, no local model and no runtime
+      # binary, which makes it the one end-to-end check that runs on every runner.
+      - name: Verify the artifact runs
+        shell: bash
+        run: |
+          work="$(mktemp -d)"
+          "$GITHUB_WORKSPACE/dist/${{ matrix.built }}" demo --no-open --out "$work/report.html"
+          test -s "$work/report.html" || { echo "demo produced no report"; exit 1; }
+          grep -q "synthetic" "$work/report.html" || { echo "report is not labelled synthetic"; exit 1; }
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          cd dist
+          mv "${{ matrix.built }}" "${{ matrix.asset }}"
+          if command -v sha256sum >/dev/null; then
+            sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          fi
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          name: Kerna ${{ inputs.release_tag || github.ref_name }}
+          generate_release_notes: true
+          overwrite_files: true
+          files: |
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.asset }}.sha256
+
   plugins:
     name: Package curated plugins
     needs: build

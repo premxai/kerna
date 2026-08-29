@@ -26,6 +26,19 @@ function assetName() {
   return null;
 }
 
+// Same platform map, parallel asset names. Kept as its own function rather than a
+// string transform of the first, so a rename on one side cannot silently produce a
+// download URL for a file that was never published.
+function observeAssetName() {
+  const p = process.platform;
+  const a = process.arch;
+  if (p === "win32" && a === "x64") return "kerna-observe-windows-x86_64.exe";
+  if (p === "darwin" && a === "arm64") return "kerna-observe-macos-arm64";
+  if (p === "darwin" && a === "x64") return "kerna-observe-macos-x86_64";
+  if (p === "linux" && a === "x64") return "kerna-observe-linux-x86_64";
+  return null;
+}
+
 function fail(msg) {
   console.error("\x1b[31m[kerna] " + msg + "\x1b[0m");
   console.error(
@@ -163,6 +176,31 @@ async function main() {
     await downloadVerified(pluginsUrl, pluginsZip);
     extractPlugins();
     console.log("[kerna] Installed curated plugins: " + path.join(binDir, "plugins"));
+
+    // The model-seam half. Fetched best-effort and never fatal: the runtime is what
+    // `kerna` means, and failing an install because the optional sidecar is missing
+    // from a release would break the primary product to deliver a secondary one.
+    const observeAsset = observeAssetName();
+    if (observeAsset) {
+      const observeOut = path.join(
+        binDir,
+        isWindows ? "kerna-observe.exe" : "kerna-observe"
+      );
+      try {
+        await downloadVerified(
+          "https://github.com/" + REPO + "/releases/download/v" + VERSION +
+            "/" + observeAsset,
+          observeOut
+        );
+        if (!isWindows) fs.chmodSync(observeOut, 0o755);
+        console.log("[kerna] Installed kerna-observe: " + observeOut);
+      } catch (e) {
+        console.log(
+          "[kerna] kerna-observe not installed (" + e.message + "). " +
+            "The runtime works without it; see the observe/ directory."
+        );
+      }
+    }
   } catch (e) {
     fail("download failed: " + e.message + " (is release v" + VERSION + " published?)");
   }
