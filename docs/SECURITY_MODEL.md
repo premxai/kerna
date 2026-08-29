@@ -29,6 +29,20 @@ Every task is assigned a `BudgetConfig` that defines hard limits on execution:
 - **`max_memory_writes`**: Limits durable memory poisoning.
 - **`max_output_bytes`**: Prevents memory exhaustion from runaway stdout streams.
 
+**Which budgets apply where.** `kerna run` owns the whole loop and enforces all
+six. The gateway sees only tool calls — the model runs in the customer's own
+client — so it enforces `max_tool_calls`, `max_runtime_seconds` and
+`max_output_bytes` per session, and does **not** claim `max_llm_calls`,
+`max_cost_usd` or `max_memory_writes`. A budget reported as satisfied because
+nothing measured it is not a control.
+
+A spent budget is fail-closed and durable for the session: the call is refused
+with the limit named, a `budget.exceeded` event and a receipt are written, and
+retries get the same answer. Denied and approval-pending calls do not draw on
+the budget — they reached no plugin, and a loud policy must not exhaust the
+session it is protecting. `kerna_session_status` reports the remaining headroom
+so an agent can stop at a boundary of its own choosing.
+
 ### 2. Capabilities and the Plugin Manifest
 Curated plugins define a `manifest.toml` that explicitly declares their MCP tool names, approval requirements, and requested secret names.
 - **Manifest contract**: A discovered manifest narrows the effective callable-tool set, adds approval requirements, and requires a matching config declaration before a secret is passed through. A malformed manifest prevents that plugin from starting.

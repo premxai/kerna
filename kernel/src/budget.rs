@@ -113,4 +113,33 @@ impl BudgetTracker {
             "memory_writes_used": self.memory_writes,
         })
     }
+
+    /// What is left, for a caller that wants to stop at a boundary of its own
+    /// choosing rather than be cut off at an arbitrary one.
+    ///
+    /// A budget with no warning band is a cliff: the agent with two calls left
+    /// behaves exactly like the one with two hundred, right up until the error.
+    /// Reporting the remainder is what lets it finish the file it is on and say
+    /// so, instead of stopping halfway through an edit.
+    pub fn remaining(&self) -> Remaining {
+        Remaining {
+            tool_calls: self.config.max_tool_calls.saturating_sub(self.tool_calls),
+            output_bytes: self
+                .config
+                .max_output_bytes
+                .saturating_sub(self.output_bytes),
+            runtime_seconds: self
+                .config
+                .max_runtime_seconds
+                .saturating_sub(self.start_time.elapsed().as_secs()),
+        }
+    }
+}
+
+/// The headroom left in the budgets a caller can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Remaining {
+    pub tool_calls: u64,
+    pub output_bytes: u64,
+    pub runtime_seconds: u64,
 }

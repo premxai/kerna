@@ -17,12 +17,7 @@ pub struct ContractFiles {
     pub contract: PathBuf,
 }
 
-pub fn init(
-    template: &str,
-    name: &str,
-    output: &Path,
-    demo_server: bool,
-) -> Result<ContractFiles> {
+pub fn init(template: &str, name: &str, output: &Path, demo_server: bool) -> Result<ContractFiles> {
     if template != DEPLOYMENT_ASSISTANT {
         bail!(
             "Unknown contract template '{template}'. Available templates: {DEPLOYMENT_ASSISTANT}."
@@ -157,10 +152,16 @@ governing real work.
 
 ## Budgets
 
+Enforced by the gateway, per client session. When one is spent the session
+stops serving tool calls and says which limit it hit; `kerna_session_status`
+reports what is left before that happens.
+
 - Maximum tool calls: 10
 - Maximum runtime: 120 seconds
-- Maximum output: 50,000 bytes
-- No model calls, memory writes, or cost budget in this gateway-only demo.
+- Maximum output returned to the client: 50,000 bytes
+
+The model runs in your own client, so LLM-call and cost budgets are not
+observable here and are not claimed. `kerna run` enforces those.
 
 ## Review checklist
 
@@ -202,7 +203,10 @@ mod tests {
             parsed["mcp_servers"][0]["name"].as_str(),
             Some(BUNDLED_DEMO_SERVER)
         );
-        assert_eq!(parsed["mcp_servers"][0]["runtime_mode"].as_str(), Some("demo"));
+        assert_eq!(
+            parsed["mcp_servers"][0]["runtime_mode"].as_str(),
+            Some("demo")
+        );
         assert_eq!(parsed["permissions"][0]["tool"].as_str(), Some("echo"));
         assert_eq!(
             parsed["permissions"][0]["action"].as_str(),

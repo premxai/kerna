@@ -12,6 +12,7 @@
 //! may be written there. All diagnostics go to stderr (see `McpRegistry`'s quiet
 //! mode).
 
+use crate::budget::{BudgetConfig, BudgetTracker, Remaining};
 use crate::config::Config;
 use crate::events::{Event, EventSink};
 use crate::mcp_registry::McpRegistry;
@@ -91,6 +92,16 @@ pub struct Gateway {
     sequence: i64,
     client_name: Option<String>,
     client_version: Option<String>,
+    /// Budgets for this client session.
+    ///
+    /// Only the three the gateway can actually observe are enforced here:
+    /// tool calls, wall clock, and the bytes handed back to the client. The
+    /// model runs in the customer's own client, so `max_llm_calls` and
+    /// `max_cost_usd` are not ours to count -- and a budget reported as
+    /// satisfied because nothing measured it is the same lie as a gate check
+    /// passing on zero observations. `kerna run` remains the path that
+    /// enforces all six.
+    budget: BudgetTracker,
 }
 
 /// Official RMCP server wrapper. It owns MCP negotiation and stdio framing;
@@ -230,6 +241,17 @@ impl Gateway {
         );
         let task_id = Uuid::new_v4();
         let session_id = format!("gateway-{}", Uuid::new_v4());
+        // The two the gateway cannot see are set to zero rather than to the
+        // configured value, so that a future caller reaching for them gets an
+        // immediate, obvious failure instead of a number nothing measured.
+        let budget = BudgetTracker::new(BudgetConfig {
+            max_runtime_seconds: config.max_runtime_seconds,
+            max_tool_calls: config.max_tool_calls,
+            max_output_bytes: config.max_output_bytes,
+            max_llm_calls: 0,
+            max_cost_usd: 0.0,
+            max_memory_writes: 0,
+        });
         Gateway {
             config,
             registry,
@@ -240,6 +262,7 @@ impl Gateway {
             sequence: 0,
             client_name: None,
             client_version: None,
+            budget,
         }
     }
 
@@ -439,7 +462,16 @@ impl Gateway {
         }
 
         if tool_name == "kerna_session_status" {
-            return session_card(&self.config, &self.memory, &self.task_id);
+            let remaining = self.budget.remaining();
+            return session_card(&self.config, &self.memory, &self.task_id, remaining);
+        }
+
+        // Wall clock first, and before anything else is looked at. A session
+        // past its runtime limit has spent its budget whether or not the next
+        // call would have been allowed, and answering it would extend a window
+        // the operator already closed.
+        if let Err(error) = self.budget.check_runtime() {
+            return self.refuse_on_budget(&call_id, &tool_name, None, started, error);
         }
 
         let server_name = {
@@ -603,6 +635,21 @@ impl Gateway {
             return error_result(&format!("Kerna gateway blocked this call. {}", reason));
         }
 
+        // Charged here, not earlier: a denied call and one waiting on approval
+        // have done no work and reached no plugin. The budget bounds what an
+        // agent gets to *do*, so refusing a call must not also spend from it --
+        // otherwise a policy that denies loudly would exhaust the session it
+        // was protecting.
+        if let Err(error) = self.budget.record_tool_call() {
+            return self.refuse_on_budget(
+                &call_id,
+                &tool_name,
+                server_name.as_deref(),
+                started,
+                error,
+            );
+        }
+
         // Forward to the downstream server (registry also enforces
         // allow_tools/deny_tools/capabilities filters).
         let forward = {
@@ -612,6 +659,21 @@ impl Gateway {
 
         match forward {
             Ok(result) => {
+                // The result exists, so the work is already done and the budget
+                // cannot undo it. What it can still do is stop the payload
+                // reaching the client, which is the thing `max_output_bytes`
+                // is actually protecting: an agent's context, and the bill for
+                // carrying it on every later turn.
+                let size = serde_json::to_string(&result).map(|s| s.len()).unwrap_or(0) as u64;
+                if let Err(error) = self.budget.record_output_bytes(size) {
+                    return self.refuse_on_budget(
+                        &call_id,
+                        &tool_name,
+                        server_name.as_deref(),
+                        started,
+                        error,
+                    );
+                }
                 let result_preview = redacted_preview(&result);
                 let trace_id = self.record(
                     "tool.call.completed",
@@ -773,6 +835,59 @@ impl Gateway {
         );
     }
 
+    /// Refuse a call because a budget is spent, and say which one.
+    ///
+    /// Deliberately the same shape as a policy denial: an MCP error the client
+    /// can read, a recorded event, and a closed receipt. An agent that is told
+    /// *why* it stopped can report that to the person waiting; one that gets a
+    /// bare failure retries, which is the worst available outcome for a limit
+    /// designed to stop work.
+    fn refuse_on_budget(
+        &mut self,
+        call_id: &str,
+        tool_name: &str,
+        server_name: Option<&str>,
+        started: Instant,
+        error: anyhow::Error,
+    ) -> serde_json::Value {
+        let reason = error.to_string();
+        let snapshot = self.budget.get_snapshot_json();
+        let remaining = self.budget.remaining();
+        let trace_id = self.record(
+            "budget.exceeded",
+            Some(tool_name),
+            "error",
+            Some("BudgetExceeded"),
+            json!({
+                "reason": reason,
+                "budget": snapshot,
+                "remaining": {
+                    "tool_calls": remaining.tool_calls,
+                    "output_bytes": remaining.output_bytes,
+                    "runtime_seconds": remaining.runtime_seconds,
+                },
+                "container": self.container_metadata(server_name)
+            }),
+        );
+        // A receipt may not have been opened yet -- the runtime check runs
+        // before the tool is even resolved -- so open one now if needed. A
+        // refusal with no receipt is a refusal the dashboard cannot show.
+        self.start_receipt(call_id, server_name, tool_name, "BudgetExceeded");
+        self.finish_receipt(
+            call_id,
+            None,
+            started.elapsed(),
+            "budget_exceeded",
+            trace_id.as_deref(),
+            None,
+        );
+        error_result(&format!(
+            "Kerna gateway stopped this call: {}. No further tool calls will be \
+             served in this session -- start a new one, or raise the limit in kerna.toml.",
+            reason
+        ))
+    }
+
     fn record(
         &mut self,
         event_type: &str,
@@ -856,7 +971,12 @@ fn canonical_json(value: &serde_json::Value) -> String {
     }
 }
 
-fn session_card(config: &Config, memory: &MemoryEngine, task_id: &Uuid) -> serde_json::Value {
+fn session_card(
+    config: &Config,
+    memory: &MemoryEngine,
+    task_id: &Uuid,
+    remaining: Remaining,
+) -> serde_json::Value {
     let pending = memory
         .list_pending_approvals()
         .map(|items| items.len())
@@ -913,13 +1033,16 @@ fn session_card(config: &Config, memory: &MemoryEngine, task_id: &Uuid) -> serde
         })
         .unwrap_or_else(|| "none".to_string());
     let text = format!(
-        "Kerna session card\\nSandbox: Docker required; network disabled\\nContained plugins: {}\\nTools exposed: {}\\nWrite state: {}\\nMounts: {}\\nPending approvals: {}\\nLast decision: {}\\nTrace ID: {}",
+        "Kerna session card\\nSandbox: Docker required; network disabled\\nContained plugins: {}\\nTools exposed: {}\\nWrite state: {}\\nMounts: {}\\nPending approvals: {}\\nLast decision: {}\\nBudget left: {} tool calls, {}s, {} bytes\\nTrace ID: {}",
         contained,
         if exposed.is_empty() { "none".to_string() } else { exposed.join(", ") },
         write_state,
         if mounts.is_empty() { "none" } else { &mounts },
         pending,
         last_decision,
+        remaining.tool_calls,
+        remaining.runtime_seconds,
+        remaining.output_bytes,
         task_id
     );
     json!({ "content": [{ "type": "text", "text": text }] })
@@ -1194,6 +1317,118 @@ mod tests {
             .await;
         assert_eq!(changed["isError"], json!(true));
         assert_eq!(memory.list_pending_approvals().unwrap().len(), 1);
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn the_tool_call_budget_stops_the_session_and_denials_do_not_spend_it() {
+        let db_path = format!("test_gateway_budget_{}.db", Uuid::new_v4());
+        let _ = fs::remove_file(&db_path);
+        let memory = Arc::new(MemoryEngine::new(&db_path).unwrap());
+
+        let mut config = Config {
+            db_path: db_path.clone(),
+            max_tool_calls: 2,
+            ..Config::default()
+        };
+        config.mcp_servers.push(McpServerConfig {
+            name: "mockmcp".to_string(),
+            command: kerna_bin(),
+            args: vec!["mockmcp".to_string()],
+            enabled: true,
+            runtime_mode: "local".to_string(),
+            docker_image: String::new(),
+            image: String::new(),
+            manifest_path: String::new(),
+            manifest_sha256: String::new(),
+            signing_public_key: String::new(),
+            read_roots: vec![],
+            write_roots: vec![],
+            capabilities: vec![],
+            allowed_paths: vec![],
+            approval_required: vec![],
+            allow_tools: vec![],
+            deny_tools: vec![],
+            secrets: vec![],
+        });
+        config.permissions.push(PermissionRule {
+            tool: "echo".to_string(),
+            action: "auto_approve".to_string(),
+        });
+        config.permissions.push(PermissionRule {
+            tool: "*".to_string(),
+            action: "deny".to_string(),
+        });
+
+        let registry = Arc::new(Mutex::new(McpRegistry::new()));
+        registry
+            .lock()
+            .await
+            .initialize(&config.mcp_servers)
+            .await
+            .unwrap();
+
+        let mut gw = Gateway::new(config, registry, memory.clone());
+        let _ = memory.create_task(gw.task_id, None, "MCP Gateway Session");
+
+        // Denied calls must not consume the budget: a loud policy would
+        // otherwise exhaust the session it exists to protect.
+        for _ in 0..5 {
+            let denied = gw
+                .handle_tool_call(json!({"name": "network_probe", "arguments": {}}))
+                .await;
+            assert_eq!(denied["isError"], json!(true));
+        }
+
+        // Two forwarded calls fit the budget of two.
+        for i in 0..2 {
+            let ok = gw
+                .handle_tool_call(json!({"name": "echo", "arguments": {"text": "hi"}}))
+                .await;
+            assert!(
+                ok.get("isError").is_none(),
+                "call {i} should succeed: {ok:?}"
+            );
+        }
+
+        // The third is refused, and says which limit it hit.
+        let stopped = gw
+            .handle_tool_call(json!({"name": "echo", "arguments": {"text": "hi"}}))
+            .await;
+        assert_eq!(stopped["isError"], json!(true));
+        let text = stopped["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("max tool calls of 2"),
+            "refusal must name the budget: {text}"
+        );
+
+        // Exhaustion is durable -- a retry gets the same answer, not a slot
+        // that quietly reopened.
+        let again = gw
+            .handle_tool_call(json!({"name": "echo", "arguments": {"text": "hi"}}))
+            .await;
+        assert_eq!(again["isError"], json!(true));
+
+        // And it is on the record, not only in the response.
+        let events = memory.get_events(&gw.task_id.to_string()).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "budget.exceeded"),
+            "a budget refusal must be auditable"
+        );
+
+        // The session card reports the remainder, so an agent can stop at a
+        // boundary of its own choosing rather than be cut off at an arbitrary one.
+        let card = gw
+            .handle_tool_call(json!({"name": "kerna_session_status", "arguments": {}}))
+            .await;
+        assert!(card["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Budget left: 0 tool calls"));
+
+        drop(gw);
         let _ = fs::remove_file(&db_path);
     }
 

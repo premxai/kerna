@@ -2019,7 +2019,10 @@ async fn main() -> Result<()> {
                     // not a stricter one. Reporting a containment error for a
                     // server the gateway starts happily is a false alarm, and
                     // the moment it is read is right before a demo.
-                    let (demo, contained): (Vec<&config::McpServerConfig>, Vec<&config::McpServerConfig>) = enabled
+                    let (demo, contained): (
+                        Vec<&config::McpServerConfig>,
+                        Vec<&config::McpServerConfig>,
+                    ) = enabled
                         .iter()
                         .copied()
                         .partition(|server| server.is_bundled_demo());
