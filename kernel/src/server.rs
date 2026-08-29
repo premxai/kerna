@@ -241,14 +241,22 @@ async fn dashboard_traces(
 
 async fn dashboard_events(State(state): State<DashboardState>) -> impl IntoResponse {
     let stream = async_stream::stream! {
-        let mut previous = String::new();
+        // Kept as a Value, not its rendering. Clippy's suggestion for the old
+        // string compare was to drop `.to_string()` and compare a Value against
+        // a String -- which is never equal, so the stream would have pushed a
+        // snapshot every second forever.
+        let mut previous: Option<Value> = None;
         loop {
             let snapshot = dashboard_snapshot(&state);
             let mut comparison = snapshot.clone();
-            comparison.as_object_mut().map(|object| object.remove("generated_at"));
+            if let Some(object) = comparison.as_object_mut() {
+                // The timestamp changes every tick; comparing with it in would
+                // make every snapshot look new.
+                object.remove("generated_at");
+            }
             let encoded = snapshot.to_string();
-            if comparison.to_string() != previous {
-                previous = comparison.to_string();
+            if previous.as_ref() != Some(&comparison) {
+                previous = Some(comparison);
                 yield Ok::<SseEvent, std::convert::Infallible>(
                     SseEvent::default().event("snapshot").data(encoded),
                 );

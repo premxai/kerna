@@ -267,8 +267,9 @@ mod tests {
     use crate::config::FolderGrant;
 
     fn sandbox_in(dir: &std::path::Path) -> ProcessSandbox {
+        // `new` takes `impl AsRef<Path>`, so the borrow goes straight in.
         ProcessSandbox::new(
-            dir.to_path_buf(),
+            dir,
             "native".to_string(),
             false,
             "none".to_string(),

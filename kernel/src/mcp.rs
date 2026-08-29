@@ -429,6 +429,13 @@ fn mount_spec(workspace: &Path, relative: &str, readonly: bool) -> Result<String
     ))
 }
 
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+        let _ = self.child.try_wait(); // Attempt to reap process handle
+    }
+}
+
 #[cfg(test)]
 mod containment_tests {
     use super::mount_spec;
@@ -442,12 +449,5 @@ mod containment_tests {
         assert!(spec.contains("target=/workspace/read,readonly"));
         assert!(mount_spec(&root, "..", true).is_err());
         let _ = fs::remove_dir_all(root);
-    }
-}
-
-impl Drop for McpClient {
-    fn drop(&mut self) {
-        let _ = self.child.start_kill();
-        let _ = self.child.try_wait(); // Attempt to reap process handle
     }
 }

@@ -752,9 +752,11 @@ mod tests {
 
     #[test]
     fn test_raw_api_keys_are_never_written_to_kerna_toml() {
-        let mut conf = Config::default();
-        conf.llm_api_key = "secret_sk_123456789".to_string();
-        conf.llm_fallback_api_key = Some("fallback_sk_987".to_string());
+        let conf = Config {
+            llm_api_key: "secret_sk_123456789".to_string(),
+            llm_fallback_api_key: Some("fallback_sk_987".to_string()),
+            ..Config::default()
+        };
 
         let toml_str = toml::to_string(&conf).unwrap();
 
@@ -840,11 +842,13 @@ mod tests {
 
     #[test]
     fn repairs_legacy_onboarding_defaults_without_changing_valid_values() {
-        let mut legacy = Config::default();
-        legacy.max_retries = 0;
-        legacy.max_tool_rounds = 0;
+        let mut legacy = Config {
+            max_retries: 0,
+            max_tool_rounds: 0,
+            network_mode: "  ".to_string(),
+            ..Config::default()
+        };
         legacy.runtime_mode.clear();
-        legacy.network_mode = "  ".to_string();
 
         assert!(legacy.repair_legacy_onboarding_defaults());
         assert_eq!(legacy.max_retries, 3);
