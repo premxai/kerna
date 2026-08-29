@@ -36,6 +36,17 @@ stops being credible the moment we start writing to their dotfiles.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+# Running this file directly puts *its own* directory on sys.path, not the repository
+# root, so `import observe` fails from a fresh clone. The packaged binary never hits
+# this because PyInstaller is told the package root explicitly -- which meant the
+# script path worked for nobody who had not already built a binary, and the first
+# thing a person does with a checkout is run the file.
+if __package__ in (None, ""):
+    _root = Path(__file__).resolve().parents[2]
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
 
 USAGE = """kerna-observe: measure what your coding agents cost, and what could run locally.
 
