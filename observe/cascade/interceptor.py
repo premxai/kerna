@@ -35,6 +35,7 @@ enables is earned.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from pathlib import Path
@@ -212,7 +213,6 @@ def stream_passthrough(
     policy decision inside it, which fails closed. **Plumbing fails open; decisions fail
     closed**, and conflating the two is the bug this is written to avoid.
     """
-    import httpx
 
     meta: dict[str, Any] = {"bytes": 0, "events": 0}
     base = upstream.rstrip("/")
@@ -237,36 +237,34 @@ def stream_passthrough(
     # `iter_raw()` honest and the relay genuinely byte-for-byte.
     upstream_headers = {**headers, "accept-encoding": "identity"}
 
-    with httpx.Client(timeout=timeout_s) as client:
-        with client.stream(
-            "POST", f"{base}/{endpoint}", json=payload, headers=upstream_headers
-        ) as response:
-            status = response.status_code
-            if on_response is not None:
-                on_response(status, dict(response.headers))
-            for chunk in response.iter_raw():
-                if not chunk:
-                    continue
-                meta["bytes"] += len(chunk)
-                meta["events"] += chunk.count(b"\ndata:") + chunk.count(b"data:")
-                if inspect is not None:
-                    inspect(chunk)
-                if gate is None:
-                    write(chunk)
-                else:
-                    for out in gate.feed(chunk):
-                        write(out)
-                # `usage` is read from what UPSTREAM sent, not from what we forwarded. A
-                # denial rewrites the stream, and the customer was still billed for the
-                # tokens that produced it ? a report reading its own output would
-                # understate spend at exactly the moment enforcement did something.
-                tail.extend(chunk)
-                if len(tail) > TAIL_CAP:
-                    del tail[:-TAIL_CAP]
-
-            if gate is not None:
-                for out in gate.finish():
+    with _open_stream(
+        f"{base}/{endpoint}", payload, upstream_headers, timeout_s
+    ) as (status, response_headers, chunks):
+        if on_response is not None:
+            on_response(status, response_headers)
+        for chunk in chunks:
+            if not chunk:
+                continue
+            meta["bytes"] += len(chunk)
+            meta["events"] += chunk.count(b"\ndata:") + chunk.count(b"data:")
+            if inspect is not None:
+                inspect(chunk)
+            if gate is None:
+                write(chunk)
+            else:
+                for out in gate.feed(chunk):
                     write(out)
+            # `usage` is read from what UPSTREAM sent, not from what we forwarded. A
+            # denial rewrites the stream, and the customer was still billed for the
+            # tokens that produced it ? a report reading its own output would
+            # understate spend at exactly the moment enforcement did something.
+            tail.extend(chunk)
+            if len(tail) > TAIL_CAP:
+                del tail[:-TAIL_CAP]
+
+        if gate is not None:
+            for out in gate.finish():
+                write(out)
 
     usage = _usage_from_tail(bytes(tail))
     if usage:
@@ -274,6 +272,55 @@ def stream_passthrough(
     if gate is not None:
         meta["gate"] = gate.stats.as_dict()
     return status, meta
+
+
+@contextlib.contextmanager
+def _open_stream(
+    url: str, payload: dict[str, Any], headers: dict[str, str], timeout_s: float
+) -> Any:
+    """Yield `(status, headers, chunk iterator)` for a streamed upstream request.
+
+    httpx when it is installed, `urllib` when it is not. The fallback exists so
+    the shipped demo — which streams to a stub on loopback — runs on a machine
+    where nothing has been installed. Both arms hand back **raw, undecoded**
+    bytes: the relay is byte-for-byte or it is corrupting the stream, and this
+    is the seam where that has gone wrong before.
+    """
+    try:
+        import httpx
+    except ImportError:
+        import urllib.error
+        import urllib.request
+
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={**headers, "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            response = urllib.request.urlopen(request, timeout=timeout_s)
+        except urllib.error.HTTPError as error:
+            # An error response still has a body upstream meant the client to
+            # see, so it is relayed like any other.
+            response = error
+
+        def read_chunks() -> Any:
+            while True:
+                chunk = response.read(8192)
+                if not chunk:
+                    return
+                yield chunk
+
+        try:
+            yield (response.status, dict(response.headers), read_chunks())
+        finally:
+            response.close()
+        return
+
+    with httpx.Client(timeout=timeout_s) as client:
+        with client.stream("POST", url, json=payload, headers=headers) as response:
+            yield (response.status_code, dict(response.headers), response.iter_raw())
 
 
 def _usage_from_tail(tail: bytes) -> dict[str, Any] | None:
@@ -313,12 +360,27 @@ def make_cloud_forwarder(
     fallback that gives up sooner than the provider does would manufacture failures the
     customer would not have had without us.
     """
-    import httpx
-
     base = upstream.rstrip("/")
-    client = httpx.Client(timeout=timeout_s)
+    # The client is built on the first forwarded request, not here. The demo
+    # constructs a forwarder it never calls, and it is the one command that has
+    # to run where nothing has been installed -- so needing httpx merely to
+    # *build* this made a stock-Python clone fail before it printed anything.
+    client: Any = None
 
     def forward(payload: dict[str, Any], headers: dict[str, str]) -> tuple[dict[str, Any], int]:
+        nonlocal client
+        if client is None:
+            try:
+                import httpx
+
+                client = httpx.Client(timeout=timeout_s)
+            except ImportError:
+                # A blocking JSON POST is something the standard library does
+                # perfectly well. httpx is worth having for real provider
+                # traffic -- connection reuse, HTTP/2, streaming -- but a
+                # missing optional dependency must not be the reason a clone
+                # cannot forward its first request.
+                return _forward_via_stdlib(f"{base}/{endpoint}", payload, headers, timeout_s)
         response = client.post(
             f"{base}/{endpoint}", json=payload, headers=headers
         )
@@ -330,6 +392,34 @@ def make_cloud_forwarder(
             return {"error": {"message": response.text[:500]}}, response.status_code
 
     return forward
+
+
+def _forward_via_stdlib(
+    url: str, payload: dict[str, Any], headers: dict[str, str], timeout_s: float
+) -> tuple[dict[str, Any], int]:
+    """The httpx-free path for one blocking JSON request."""
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={**headers, "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            body = response.read().decode("utf-8", "replace")
+            status = response.status
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", "replace")
+        status = error.code
+    except urllib.error.URLError as error:
+        return {"error": {"message": f"upstream unreachable: {error.reason}"}}, 502
+    try:
+        return json.loads(body), status
+    except ValueError:
+        return {"error": {"message": body[:500]}}, status
 
 
 # ------------------------------------------------------------------ HTTP server

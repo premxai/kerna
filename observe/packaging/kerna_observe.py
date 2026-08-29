@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 # Running this file directly puts *its own* directory on sys.path, not the repository
 # root, so `import observe` fails from a fresh clone. The packaged binary never hits
@@ -96,6 +97,10 @@ def _models(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="kerna-observe models")
     ap.add_argument("--vram", type=float, default=None,
                     help="size for a different machine, in GB, instead of this one")
+    ap.add_argument("--download", action="store_true",
+                    help="fetch the largest model that fits without asking")
+    ap.add_argument("--no-download", action="store_true",
+                    help="never fetch, and do not ask")
     args = ap.parse_args(argv)
 
     if args.vram is None:
@@ -127,6 +132,70 @@ def _models(argv: list[str]) -> int:
     print()
     print("Fitting is necessary and not sufficient: whether a model may be routed to")
     print("is earned per task class from measured agreement, never assumed from size.")
+
+    if args.vram is not None or not fits:
+        # Nothing to offer: either this is a what-if for another machine, or no
+        # model fits here.
+        return 0
+    return _offer_download(fits[0], download=args.download, skip=args.no_download)
+
+
+def _offer_download(card: Any, *, download: bool, skip: bool) -> int:
+    """Ask once whether to fetch the largest model that fits.
+
+    Asking beats doing. These files are gigabytes on someone's metered laptop,
+    and a tool that starts a download because it decided the machine could take
+    one is a tool people uninstall. `--download` and `--no-download` exist so
+    the same command is scriptable and so CI never blocks on a prompt.
+    """
+    import os
+    from pathlib import Path
+
+    from observe.registry.installer import download as fetch
+
+    if not card.downloadable:
+        print()
+        print(f"{card.name} fits, but has no verified download; refusing to guess a URL.")
+        return 0
+
+    # Same environment variable the standalone installer honours, so one machine
+    # does not end up with two copies of the same weights.
+    destination = Path(os.environ.get("LOCALM_MODELS", "models"))
+    existing = destination / card.hf_file
+    if existing.is_file():
+        print()
+        print(f"already downloaded: {existing}")
+        return 0
+
+    print()
+    print(f"largest model that fits: {card.name}  ({card.file_size_gb:.1f} GB download)")
+    print(f"destination: {destination.resolve()}")
+
+    if skip:
+        print("skipped (--no-download). Re-run without it when you want the model.")
+        return 0
+    if not download:
+        if not sys.stdin.isatty():
+            # Not a terminal: a prompt nobody can answer would hang a pipe.
+            print("Run with --download to fetch it, or --no-download to silence this.")
+            return 0
+        try:
+            answer = input("Download it now? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if answer not in ("y", "yes"):
+            print("Skipped. Nothing was downloaded; re-run when you want it.")
+            return 0
+
+    try:
+        path = fetch(card, destination)
+    except Exception as exc:  # noqa: BLE001
+        # A failed download is not a failed machine check. The report above it
+        # is still true and still worth having.
+        print(f"download failed: {exc}")
+        return 1
+    print(f"downloaded: {path}")
     return 0
 
 

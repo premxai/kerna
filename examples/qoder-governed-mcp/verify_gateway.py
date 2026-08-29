@@ -40,6 +40,13 @@ def call(process: subprocess.Popen[str], request: dict) -> dict:
     return json.loads(line)
 
 
+def notify(process: subprocess.Popen[str], method: str) -> None:
+    """Send a JSON-RPC notification, which by definition has no reply to read."""
+    assert process.stdin is not None
+    process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": method}) + "\n")
+    process.stdin.flush()
+
+
 def main() -> int:
     if not Path("kerna.toml").is_file():
         raise SystemExit("Run this from a contract workspace containing kerna.toml.")
@@ -60,7 +67,24 @@ def main() -> int:
         env=environment,
     )
     try:
-        initialize = call(process, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        # A real MCP client sends protocolVersion and clientInfo, then the
+        # initialized notification before its first request. Omitting either
+        # makes the server reject the session, so this verifier has to behave
+        # like the client it is standing in for.
+        initialize = call(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "kerna-verify-gateway", "version": "1"},
+                },
+            },
+        )
+        notify(process, "notifications/initialized")
         tools = call(process, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         echoed = call(process, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "echo", "arguments": {"text": "hello from Qoder"}}})
         blocked = call(process, {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "network_probe", "arguments": {}}})

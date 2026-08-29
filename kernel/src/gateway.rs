@@ -20,8 +20,9 @@ use crate::permissions::{PermissionLevel, PermissionManager};
 use anyhow::Result;
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, InitializeRequestParams,
-        ListToolsResult, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, Implementation,
+        InitializeRequestParams, ListToolsResult, ProtocolVersion, ServerCapabilities, ServerInfo,
+        Tool,
     },
     service::RequestContext,
     ErrorData as McpError, ServerHandler, ServiceExt,
@@ -145,9 +146,15 @@ impl RmcpGateway {
 
 impl ServerHandler for RmcpGateway {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Kerna is a local policy gateway. It governs only MCP calls routed through this server.",
-        )
+        let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions(
+                "Kerna is a local policy gateway. It governs only MCP calls routed through this server.",
+            );
+        // rmcp's default `Implementation` is built from its own crate env, so a
+        // client lists this server as "rmcp". The operator needs to see which
+        // process is governing their tools.
+        info.server_info = Implementation::new("kerna-gateway", env!("CARGO_PKG_VERSION"));
+        info
     }
 
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {

@@ -75,12 +75,47 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 from .circuit import CircuitBreaker
 from .classify import CLASS_VERSION
+
+
+def _post(url: str, payload: dict[str, Any], *, timeout: float = 30.0) -> str:
+    """POST JSON to our own loopback sidecar and return the body as text.
+
+    Deliberately `urllib` and not `httpx`. Every call here goes to 127.0.0.1 and
+    to a server this process just started, so there is nothing an HTTP library
+    would buy -- and the demo is the one command that must run on a machine
+    where nobody has installed anything yet.
+    """
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        # `Connection: close` matters for the streamed turn: without it the
+        # response has no length the client can see, and a single read() can
+        # return before the gate has emitted its closing frames -- which shows
+        # up as a denial that suppressed the tool call but never explained it.
+        headers={"Content-Type": "application/json", "Connection": "close"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            chunks: list[bytes] = []
+            while True:
+                chunk = response.read(8192)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks).decode("utf-8", "replace")
+    except urllib.error.HTTPError as error:
+        # An error status is still the sidecar's answer; the demo reports it
+        # rather than dying on it.
+        return error.read().decode("utf-8", "replace")
 from .dispatcher import Dispatcher
 from .interceptor import build_handler, make_cloud_forwarder
 from .recorder import TrafficRecorder
@@ -449,23 +484,20 @@ def _drive_routed_turn(port: int) -> dict[str, Any]:
     reply. A turn without both would be forwarded to the cloud and the demo would show
     the opposite of what it claims.
     """
-    import httpx
-
-    response = httpx.post(
+    body = _post(
         f"http://127.0.0.1:{port}/v1/chat/completions",
-        json={"model": "claude-opus-5",
-              "tools": [{"type": "function",
-                         "function": {"name": "Grep", "parameters": {}}}],
-              "messages": [
-                  {"role": "user", "content": "where is the retry logic?"},
-                  {"role": "assistant", "content": None, "tool_calls": [{
-                      "id": "c1", "type": "function",
-                      "function": {"name": "Grep", "arguments": "{}"}}]},
-                  {"role": "tool", "tool_call_id": "c1", "content": "3 matches"},
-              ]},
-        timeout=30,
+        {"model": "claude-opus-5",
+         "tools": [{"type": "function",
+                    "function": {"name": "Grep", "parameters": {}}}],
+         "messages": [
+             {"role": "user", "content": "where is the retry logic?"},
+             {"role": "assistant", "content": None, "tool_calls": [{
+                 "id": "c1", "type": "function",
+                 "function": {"name": "Grep", "arguments": "{}"}}]},
+             {"role": "tool", "tool_call_id": "c1", "content": "3 matches"},
+         ]},
     )
-    return response.json()
+    return json.loads(body)
 
 
 class _EnforcingSidecar:
@@ -514,17 +546,17 @@ class _EnforcingSidecar:
 
 
 def _drive_enforced_turn(port: int) -> str:
-    """One streaming turn through the enforcing sidecar; returns what the client got."""
-    import httpx
+    """One streaming turn through the enforcing sidecar; returns what the client got.
 
-    with httpx.stream(
-        "POST", f"http://127.0.0.1:{port}/v1/messages",
-        json={"model": "claude-opus-5", "stream": True, "max_tokens": 256,
-              "tools": [{"name": DENIED_TOOL, "input_schema": {"type": "object"}}],
-              "messages": [{"role": "user", "content": DEMO_GOAL}]},
-        timeout=30,
-    ) as response:
-        return "".join(response.iter_text())
+    Read whole rather than streamed: the demo asserts on the *complete* SSE body,
+    and the sidecar closes the connection at the end of the turn.
+    """
+    return _post(
+        f"http://127.0.0.1:{port}/v1/messages",
+        {"model": "claude-opus-5", "stream": True, "max_tokens": 256,
+         "tools": [{"name": DENIED_TOOL, "input_schema": {"type": "object"}}],
+         "messages": [{"role": "user", "content": DEMO_GOAL}]},
+    )
 
 
 def _write_kerna_config(workspace: Path, sidecar_port: int) -> None:
@@ -614,13 +646,10 @@ def main(argv: list[str] | None = None) -> int:
                     "skipped. Set KERNA_BIN or put `kerna` on PATH.")
             print("  runtime         not found - governance half skipped")
             # Still drive one request through the sidecar, so the cost half is real.
-            import httpx
-
-            httpx.post(
+            _post(
                 f"http://127.0.0.1:{sidecar.port}/v1/chat/completions",
-                json={"model": "claude-opus-5",
-                      "messages": [{"role": "user", "content": DEMO_GOAL}]},
-                timeout=30,
+                {"model": "claude-opus-5",
+                 "messages": [{"role": "user", "content": DEMO_GOAL}]},
             )
         else:
             print(f"  runtime         {kerna}")
