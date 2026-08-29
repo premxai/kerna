@@ -318,6 +318,9 @@ enum ContractCommands {
         /// Directory that will receive kerna.toml and agent-contract.md
         #[arg(long, default_value = ".")]
         output: std::path::PathBuf,
+        /// Omit the bundled demo server, leaving a contract that exposes no tools
+        #[arg(long)]
+        no_demo_server: bool,
     },
 }
 
@@ -950,11 +953,21 @@ async fn main() -> Result<()> {
                 template,
                 name,
                 output,
+                no_demo_server,
             } => {
-                let files = contract::init(template, name, output)?;
+                let files = contract::init(template, name, output, !no_demo_server)?;
                 println!("Created reviewed starter contract:");
                 println!("  {}", files.config.display());
                 println!("  {}", files.contract.display());
+                if *no_demo_server {
+                    println!(
+                        "This contract enables no server, so the gateway will expose no tools."
+                    );
+                } else {
+                    println!(
+                        "It enables the bundled demo server, which runs from this binary and is not contained."
+                    );
+                }
                 println!("Next: review the files, then run `kerna gateway` from that directory.");
                 return Ok(());
             }
@@ -2002,10 +2015,18 @@ async fn main() -> Result<()> {
                 } else {
                     let workspace = std::env::current_dir()?;
                     let mut production_errors = Vec::new();
-                    if !sandbox::docker_available() {
+                    // Doctor has to answer the question the gateway will answer,
+                    // not a stricter one. Reporting a containment error for a
+                    // server the gateway starts happily is a false alarm, and
+                    // the moment it is read is right before a demo.
+                    let (demo, contained): (Vec<&config::McpServerConfig>, Vec<&config::McpServerConfig>) = enabled
+                        .iter()
+                        .copied()
+                        .partition(|server| server.is_bundled_demo());
+                    if !contained.is_empty() && !sandbox::docker_available() {
                         production_errors.push("Docker is unavailable".to_string());
                     }
-                    for server in &enabled {
+                    for server in &contained {
                         if let Err(error) =
                             crate::plugin_manifest::verify_production_server(server, &workspace)
                         {
@@ -2018,10 +2039,18 @@ async fn main() -> Result<()> {
                         }
                     }
                     if production_errors.is_empty() {
-                        println!(
-                            "  Ready: {} contained downstream MCP server(s); gateway uses stdio.",
-                            enabled.len()
-                        );
+                        if !contained.is_empty() {
+                            println!(
+                                "  Ready: {} contained downstream MCP server(s); gateway uses stdio.",
+                                contained.len()
+                            );
+                        }
+                        for server in &demo {
+                            println!(
+                                "  Ready: '{}' is the bundled demo server. It runs from this binary and is NOT contained -- replace it before governing real work.",
+                                server.name
+                            );
+                        }
                     } else {
                         println!("  ERROR: production containment is not ready:");
                         for error in production_errors {

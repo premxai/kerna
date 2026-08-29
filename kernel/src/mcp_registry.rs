@@ -1,6 +1,6 @@
 use crate::config::{Config, McpServerConfig};
 use crate::mcp::{McpClient, McpTool};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -163,13 +163,25 @@ impl McpRegistry {
     /// above, this path has no native-process fallback: every configured MCP
     /// server must have a verified manifest and a digest-pinned OCI image.
     pub async fn initialize_production(&mut self, config: &Config, workspace: &Path) -> Result<()> {
-        if !crate::sandbox::docker_available() {
+        // Containment is only required when there is something to contain. A
+        // contract with no enabled plugins has no uncontained process to
+        // downgrade, and demanding Docker there stops the gateway on a fresh
+        // machine before it can govern anything at all.
+        let needs_container = config
+            .mcp_servers
+            .iter()
+            .any(|server| server.enabled && !server.is_bundled_demo());
+        if needs_container && !crate::sandbox::docker_available() {
             return Err(anyhow!(
                 "Docker is required for production MCP plugins but is unavailable"
             ));
         }
         for configured in &config.mcp_servers {
             if !configured.enabled {
+                continue;
+            }
+            if configured.is_bundled_demo() {
+                self.spawn_bundled_demo(configured).await?;
                 continue;
             }
             let mut server = configured.clone();
@@ -219,6 +231,58 @@ impl McpRegistry {
             self.clients.insert(server.name.clone(), client);
             self.server_configs.insert(server.name.clone(), server);
         }
+        Ok(())
+    }
+
+    /// Start the demo server that ships inside this binary.
+    ///
+    /// This is the one downstream server the gateway will run outside a
+    /// container, and it is deliberately not configurable: nothing from
+    /// `kerna.toml` reaches the command line. The child is this executable,
+    /// invoked as `kerna mockmcp`, so there is no third-party code and no
+    /// argument for a contract to inject. It exists so the policy boundary can
+    /// be demonstrated on a machine with no Docker and no connectors, and it
+    /// is labelled as a demo everywhere it is surfaced.
+    async fn spawn_bundled_demo(&mut self, configured: &McpServerConfig) -> Result<()> {
+        let executable = std::env::current_exe()
+            .context("could not resolve the running Kerna executable for the demo server")?;
+        let mut client = McpClient::spawn(
+            &executable.to_string_lossy(),
+            &["mockmcp"],
+            "native",
+            "",
+            "none",
+            None,
+            &[],
+        )
+        .map_err(|error| anyhow!("failed to start the bundled demo server: {}", error))?;
+        client
+            .initialize()
+            .await
+            .map_err(|error| anyhow!("bundled demo server failed MCP initialization: {}", error))?;
+        let tools = client
+            .list_tools()
+            .await
+            .map_err(|error| anyhow!("bundled demo server failed tools/list: {}", error))?;
+        self.status(&format!(
+            "[MCP] Demo server '{}' registered {} tools (bundled, not contained):",
+            configured.name,
+            tools.len()
+        ));
+        for tool in tools {
+            if self.tool_to_server.contains_key(&tool.name) {
+                return Err(anyhow!(
+                    "tool '{}' from the demo server conflicts with an already configured plugin",
+                    tool.name
+                ));
+            }
+            self.tool_to_server
+                .insert(tool.name.clone(), configured.name.clone());
+            self.all_tools.push(tool);
+        }
+        self.clients.insert(configured.name.clone(), client);
+        self.server_configs
+            .insert(configured.name.clone(), configured.clone());
         Ok(())
     }
 

@@ -95,7 +95,22 @@ fn default_mcp_runtime_mode() -> String {
     "native".to_string()
 }
 
+/// The one server name the gateway will run from its own binary. Reserved so a
+/// contract cannot claim the exemption for a third-party plugin.
+pub const BUNDLED_DEMO_SERVER: &str = "kerna-demo-tools";
+
 impl McpServerConfig {
+    /// True for the demo server that ships inside this executable.
+    ///
+    /// Both halves are required, and neither is a path or a command: the
+    /// exemption names a fixed server and a fixed runtime mode, and the
+    /// registry ignores `command`, `args`, and `image` when it applies. A
+    /// contract cannot use this to escape containment because there is nothing
+    /// in it for a contract to point at.
+    pub fn is_bundled_demo(&self) -> bool {
+        self.runtime_mode == "demo" && self.name == BUNDLED_DEMO_SERVER
+    }
+
     /// Validate the production container contract before starting any plugin.
     /// This is deliberately strict: a gateway must never silently downgrade an
     /// untrusted MCP server from containment to a host process.
@@ -784,6 +799,43 @@ mod tests {
         );
         assert!(validate_mount_roots(&root, &["..".to_string()], &[]).is_err());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_demo_exemption_cannot_be_claimed_by_a_third_party_plugin() {
+        // The demo server is the one thing the gateway starts outside a
+        // container, so the exemption has to be unreachable by anything a
+        // contract can write. Both halves are required, and neither is a path.
+        let mut server = McpServerConfig {
+            name: BUNDLED_DEMO_SERVER.to_string(),
+            command: "curl".to_string(),
+            args: vec!["evil.example".to_string()],
+            enabled: true,
+            capabilities: vec![],
+            allowed_paths: vec![],
+            approval_required: vec![],
+            allow_tools: vec![],
+            deny_tools: vec![],
+            secrets: vec![],
+            runtime_mode: "demo".to_string(),
+            docker_image: String::new(),
+            image: String::new(),
+            manifest_path: String::new(),
+            manifest_sha256: String::new(),
+            signing_public_key: String::new(),
+            read_roots: vec![],
+            write_roots: vec![],
+        };
+        // The reserved name plus the demo mode is the only combination that
+        // qualifies -- and the registry ignores `command` and `args` entirely.
+        assert!(server.is_bundled_demo());
+
+        server.name = "totally-legitimate-plugin".to_string();
+        assert!(!server.is_bundled_demo());
+
+        server.name = BUNDLED_DEMO_SERVER.to_string();
+        server.runtime_mode = "native".to_string();
+        assert!(!server.is_bundled_demo());
     }
 
     #[test]
