@@ -70,13 +70,18 @@ pub fn detect_hardware() -> HardwareProfile {
             .and_then(|output| String::from_utf8(output.stdout).ok())
             .and_then(|value| value.trim().parse::<u64>().ok())
             .map(|bytes| bytes / 1024 / 1024 / 1024);
-        return HardwareProfile {
+        // A tail expression, not a `return`. On macOS this is the only block
+        // the compiler keeps, which puts it in tail position -- where clippy
+        // rejects the `return` this used to have. Everywhere else another
+        // block follows it and the lint never fires, so the failure appeared
+        // on exactly one runner and nowhere a developer would look.
+        HardwareProfile {
             kind: "apple".to_string(),
             name: "Apple Silicon".to_string(),
             memory_gb: memory,
             device_count: 1,
             detected: memory.is_some(),
-        };
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
