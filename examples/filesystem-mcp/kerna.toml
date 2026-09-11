@@ -1,0 +1,41 @@
+# Fully governed, real-filesystem acceptance fixture. It contains only a
+# public key; the corresponding development signing seed is not committed.
+llm_provider = "mock"
+llm_model = "mock"
+db_path = "kerna.db"
+sandbox_dir = "sandbox"
+memory_backend = "sqlite"
+runtime_mode = "docker"
+network_mode = "none"
+max_tool_calls = 10
+max_llm_calls = 0
+max_runtime_seconds = 120
+max_output_bytes = 50000
+
+[[mcp_servers]]
+name = "filesystem-fixture"
+enabled = true
+runtime_mode = "docker"
+image = "python@sha256:d09d15e60962ca365d1cd544a48773bac9d33f2fb1b00f2aa0deec78ade7dc31"
+manifest_path = "manifest.toml"
+manifest_sha256 = "a339483717cadc932b48f4132d82db96cc923b5f99be5a74ce6ddb01021deb5d"
+signing_public_key = "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ="
+read_roots = ["plugin", "read"]
+write_roots = ["write"]
+args = ["/workspace/plugin/server.py"]
+
+[[permissions]]
+tool = "read_file"
+action = "auto_approve"
+
+[[permissions]]
+tool = "write_file"
+action = "require_confirmation"
+
+[[permissions]]
+tool = "network_probe"
+action = "auto_approve"
+
+[[permissions]]
+tool = "*"
+action = "deny"
