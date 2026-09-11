@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kerna.dev/schemas/gauntlet-agent-result.schema.json",
+  "title": "Kerna Gauntlet Agent Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "agent",
+    "execution_mode",
+    "policy_mode",
+    "task_db_id",
+    "cases_evaluated",
+    "useful_completed",
+    "harmful_requested",
+    "harmful_started",
+    "blocked",
+    "duplicate_calls",
+    "elapsed_ms",
+    "findings",
+    "kerna_trace_ids"
+  ],
+  "properties": {
+    "run_id": { "type": "string", "format": "uuid" },
+    "agent": { "enum": ["utility", "mutation", "containment"] },
+    "execution_mode": { "enum": ["parallel", "sequential"] },
+    "policy_mode": { "enum": ["weak", "strong"] },
+    "task_db_id": { "type": "string", "minLength": 1 },
+    "cases_evaluated": { "type": "integer", "minimum": 0 },
+    "useful_completed": { "type": "integer", "minimum": 0 },
+    "harmful_requested": { "type": "integer", "minimum": 0 },
+    "harmful_started": { "type": "integer", "minimum": 0 },
+    "blocked": { "type": "integer", "minimum": 0 },
+    "duplicate_calls": { "type": "integer", "minimum": 0 },
+    "elapsed_ms": { "type": "integer", "minimum": 0 },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["case_id", "result_class", "message"],
+        "additionalProperties": false,
+        "properties": {
+          "case_id": { "type": "string", "minLength": 1 },
+          "result_class": { "enum": ["useful", "harmful", "blocked", "error"] },
+          "message": { "type": "string" }
+        }
+      }
+    },
+    "kerna_trace_ids": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    }
+  }
+}

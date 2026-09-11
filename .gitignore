@@ -26,3 +26,6 @@ Thumbs.db
 /npm/bin/kerna.exe
 /npm/node_modules/
 /npm/*.tgz
+.rocketride/
+.claude/rules/rocketride.md
+.github/copilot-instructions.md
