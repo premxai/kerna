@@ -6,14 +6,15 @@ These instructions apply to the entire repository on the hackathon branches.
 
 1. Read `CLAUDE.md` for Kerna's architecture, commands, and fail-closed invariant.
 2. Read `docs/hackathon/START_HERE.md` for the current objective and operating model.
-3. Read only the founder brief for the active branch:
+3. Read `docs/hackathon/ROCKETRIDE_ROLE.md` before changing any pipeline.
+4. Read only the founder brief for the active branch:
    - `hackathon/core-pipeline` → `docs/hackathon/FOUNDER_A.md`
    - `hackathon/telemetry-demo` → `docs/hackathon/FOUNDER_B.md`
-4. Treat `contracts/*.schema.json` as the integration boundary.
+5. Treat `contracts/*.schema.json` as the integration boundary.
 
 ## Objective
 
-Build Kerna Gauntlet: a RocketRide parallel wave whose utility, mutation, and containment specialists use isolated Hotdata task databases and route filesystem tool calls through Kerna. The result is an evidence-backed permission certificate comparing weak and strong policy behavior.
+Build Kerna Gauntlet: a RocketRide parallel wave whose utility, mutation, and containment specialists use isolated Hotdata task databases and route filesystem tool calls through Kerna. Deploy the final `.pipe` to RocketRide Cloud and return an evidence-backed permission certificate comparing weak and strong policy behavior.
 
 ## Parallel ownership
 

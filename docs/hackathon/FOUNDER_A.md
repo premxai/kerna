@@ -2,7 +2,7 @@
 
 > **Role:** Integration Captain
 > **Branch:** `hackathon/core-pipeline`
-> **Goal:** Make the end-to-end RocketRide → Hotdata → Kerna certification run work twice from a clean command.
+> **Goal:** Make the end-to-end RocketRide Cloud → Hotdata → Kerna certification run work twice from a clean command.
 
 ## Your mission
 
@@ -50,7 +50,8 @@ You are the implementation and integration engineer for Kerna Gauntlet, a 4.5-ho
 
 ### 0:20–1:05 — Prove the sponsor seams
 
-- [ ] Start RocketRide and select a working model.
+- [ ] Sign into RocketRide Cloud, apply event credits, generate an API key, and select a working model.
+- [ ] Keep the local runtime available for visual debugging and fallback.
 - [ ] If the managed model is blocked for ten minutes, use Ollama `qwen3:8b`.
 - [ ] Recover Docker once; do not spend the sprint repeatedly debugging it.
 - [ ] Run Kerna’s filesystem acceptance test twice.
@@ -66,6 +67,7 @@ You are the implementation and integration engineer for Kerna Gauntlet, a 4.5-ho
 - [ ] Give each specialist a distinct Hotdata task database.
 - [ ] Route filesystem actions through a Kerna MCP Client.
 - [ ] Build `gauntlet-parallel.pipe` with one concurrent wave.
+- [ ] Deploy the working `.pipe` to RocketRide Cloud.
 - [ ] Return strict JSON matching the frozen result schema.
 - [ ] Add deterministic merge logic before any optional generated summary.
 
@@ -95,6 +97,7 @@ You are the implementation and integration engineer for Kerna Gauntlet, a 4.5-ho
 - [ ] Freeze `hackathon/kerna-gauntlet`.
 - [ ] Run the complete demo twice.
 - [ ] Keep RocketRide canvas, Kerna receipt, and one Hotdata query preloaded.
+- [ ] Keep the RocketRide Cloud execution trace preloaded.
 - [ ] Push the final branch and verify it from an incognito browser.
 - [ ] Rehearse your 0:00–1:45 and 2:40–3:00 speaking blocks.
 
