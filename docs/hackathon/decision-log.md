@@ -10,4 +10,5 @@ Founder A owns this file. Both founders agree on decisions before Founder A reco
 | Evidence owner | Founder B | Keeps Hotdata, metrics, documentation, and demo packaging independent | Hotdata integration blocked after sponsor escalation |
 | Result contracts | JSON Schemas in `contracts/` | Independent tasks need a machine-checkable boundary | Both founders agree a field is required |
 | Model fallback | Ollama `qwen3:8b` | Preserves a local demo if managed model access is unavailable | Sponsor supplies a verified managed model |
+| RocketRide deployment | Cloud for final demo; local for development/fallback | The sponsor prize rewards Cloud deployment and tracks usage | Cloud remains unavailable after ten minutes and sponsor escalation |
 | Feature freeze | 3:35 elapsed | Leaves 55 minutes to integrate and rehearse | Never extend; freeze earlier if unstable |

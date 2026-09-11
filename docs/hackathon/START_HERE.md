@@ -11,7 +11,7 @@ This branch is the complete handoff package for the two-founder hackathon build.
 | Item | Role in the product |
 |---|---|
 | Track | Multi-Agent / Parallel Agents |
-| RocketRide | Runs the three specialists concurrently and merges their results |
+| RocketRide | Visually defines, concurrently runs, observes, and Cloud-deploys the three-specialist pipeline |
 | Hotdata | Supplies isolated task databases and persistent cross-run telemetry |
 | Kerna | Enforces tool permissions before execution and records receipts |
 
@@ -39,20 +39,22 @@ Founder A:
 1. `AGENTS.md`
 2. `CLAUDE.md`
 3. `docs/hackathon/FOUNDER_A.md`
-4. `docs/hackathon/COMMAND_CENTER.md`
-5. `docs/hackathon/BLUEPRINT.md`
-6. `contracts/agent-result.schema.json`
-7. `contracts/telemetry-event.schema.json`
+4. `docs/hackathon/ROCKETRIDE_ROLE.md`
+5. `docs/hackathon/COMMAND_CENTER.md`
+6. `docs/hackathon/BLUEPRINT.md`
+7. `contracts/agent-result.schema.json`
+8. `contracts/telemetry-event.schema.json`
 
 Founder B:
 
 1. `AGENTS.md`
 2. `CLAUDE.md`
 3. `docs/hackathon/FOUNDER_B.md`
-4. `docs/hackathon/COMMAND_CENTER.md`
-5. `docs/hackathon/BLUEPRINT.md`
-6. `contracts/agent-result.schema.json`
-7. `contracts/telemetry-event.schema.json`
+4. `docs/hackathon/ROCKETRIDE_ROLE.md`
+5. `docs/hackathon/COMMAND_CENTER.md`
+6. `docs/hackathon/BLUEPRINT.md`
+7. `contracts/agent-result.schema.json`
+8. `contracts/telemetry-event.schema.json`
 
 The full audit is in `docs/hackathon/READINESS_AUDIT.md`. Read it when diagnosing a blocker or challenging an assumption.
 
@@ -70,7 +72,7 @@ HOTDATA_TELEMETRY_DB_ID=
 
 Use separate temporary service tokens when the sponsor dashboards support them. Share only non-secret IDs. Never put real values in Git, Notion, Codex messages, screenshots, or Discord.
 
-Install and activate RocketRide on each laptop that needs its tooling. Its extension generates `.rocketride/docs/` locally. Docker Desktop has previously failed on Founder A's laptop with a stale `sailor-ingest.sock`; the decision table in `COMMAND_CENTER.md` limits recovery time.
+Create a RocketRide Cloud account, apply the event credits, and generate an API key. Install and activate RocketRide locally on each laptop that needs its tooling; its extension generates `.rocketride/docs/`. Build and debug on the visual canvas, then deploy the final `.pipe` to RocketRide Cloud. Docker Desktop has previously failed on Founder A's laptop with a stale `sailor-ingest.sock`; the decision table in `COMMAND_CENTER.md` limits recovery time.
 
 ## Branch and file ownership
 

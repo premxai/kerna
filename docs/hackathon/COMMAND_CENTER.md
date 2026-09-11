@@ -8,7 +8,7 @@
 | ⏱️ Build window | 4.5 hours / 270 minutes |
 | 👥 Team | Two founders, two laptops |
 | 🧠 Codex | One task per founder with separate authorized identities; Founder A-only fallback |
-| 🪐 Orchestration | RocketRide local runtime |
+| 🪐 Orchestration | RocketRide Cloud final deployment; local runtime for development/fallback |
 | 🔥 Data layer | Hotdata task databases + persistent telemetry database |
 | 🛡️ Enforcement | Kerna v0.2.9 MCP gateway |
 | 🎛️ Demo surfaces | RocketRide canvas + Kerna dashboard + live Hotdata query |
