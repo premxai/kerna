@@ -5,6 +5,7 @@
 *.db-shm
 *.db-wal
 kerna.toml
+!examples/filesystem-mcp/kerna.toml
 /sandbox
 /reports
 .venv-agentdojo/

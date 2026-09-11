@@ -40,7 +40,16 @@ def main():
     )
     output = os.path.join(ROOT, "write", "blackbox.txt")
     try:
-        initialized = request(proc, 1, "initialize", {"protocolVersion": "2025-06-18"})
+        initialized = request(
+            proc,
+            1,
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "kerna-filesystem-verifier", "version": "1.0.0"},
+            },
+        )
         assert initialized["result"]["protocolVersion"] == "2025-06-18"
         notify(proc, "notifications/initialized")
         names = {tool["name"] for tool in request(proc, 2, "tools/list")["result"]["tools"]}
