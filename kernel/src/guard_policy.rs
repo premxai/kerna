@@ -87,6 +87,12 @@ impl ActionIntent {
             domain,
         }
     }
+
+    /// Digest only the normalized action contract. Raw model arguments never enter this digest;
+    /// their deterministic SHA-256 is already represented by `arguments_digest`.
+    pub fn canonical_digest(&self) -> String {
+        stable_digest(self)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -190,6 +196,11 @@ impl GuardPolicy {
         let text =
             std::fs::read_to_string(path).map_err(|error| PolicyError::Read(error.to_string()))?;
         Self::parse_toml(&text)
+    }
+
+    /// Digest the validated, ordered policy contract for approval binding.
+    pub fn digest(&self) -> String {
+        stable_digest(self)
     }
 
     pub fn validate(&self) -> Result<(), PolicyError> {
@@ -626,9 +637,16 @@ fn risk_tags(
 
 fn secret_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    ["/.ssh/", "/.aws/", "/.gnupg/", "/.config/gcloud/", "/.env", "id_rsa"]
-        .iter()
-        .any(|needle| lower.contains(needle))
+    [
+        "/.ssh/",
+        "/.aws/",
+        "/.gnupg/",
+        "/.config/gcloud/",
+        "/.env",
+        "id_rsa",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
         || lower == ".env"
         || lower.starts_with(".env.")
         || lower.starts_with(".ssh/")
@@ -737,12 +755,12 @@ fn offline_build_or_test(executable: Option<&str>, command: &str) -> bool {
             .nth(1)
             .is_some_and(|word| matches!(word, "run" | "test")),
         Some("rg" | "rustc") => true,
-        Some("git") => command
-            .split_whitespace()
-            .nth(1)
-            .is_some_and(|word| {
-                matches!(word, "branch" | "diff" | "log" | "ls-files" | "rev-parse" | "show" | "status")
-            }),
+        Some("git") => command.split_whitespace().nth(1).is_some_and(|word| {
+            matches!(
+                word,
+                "branch" | "diff" | "log" | "ls-files" | "rev-parse" | "show" | "status"
+            )
+        }),
         Some("go") => command
             .split_whitespace()
             .nth(1)
@@ -757,6 +775,11 @@ fn offline_build_or_test(executable: Option<&str>, command: &str) -> bool {
 
 fn arguments_digest(arguments: &Value) -> String {
     let bytes = serde_json::to_vec(arguments).expect("JSON value always serializes");
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn stable_digest<T: Serialize>(value: &T) -> String {
+    let bytes = serde_json::to_vec(value).expect("canonical policy values always serialize");
     format!("{:x}", Sha256::digest(bytes))
 }
 

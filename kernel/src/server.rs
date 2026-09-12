@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::guard_policy::{ActionIntent, AgentKind, GuardPolicy, PolicyEffect};
 use crate::mcp_registry::McpRegistry;
+use crate::memory::GuardActionBinding;
 use crate::memory::MemoryEngine;
 use crate::scheduler::TaskScheduler;
 use axum::{
@@ -31,6 +32,15 @@ pub struct AppState {
     pub mcp_registry: Arc<Mutex<McpRegistry>>,
     /// When set, requests must present `Authorization: Bearer <token>`.
     pub auth_token: Option<String>,
+}
+
+#[derive(Clone)]
+struct GuardStreamContext {
+    session_id: String,
+    task_id: String,
+    agent: AgentKind,
+    agent_version: String,
+    worktree_baseline: String,
 }
 
 #[derive(Clone)]
@@ -134,6 +144,21 @@ async fn handle_guard_anthropic(
             )
         }
     };
+    let context = match start_guard_stream(&state, AgentKind::ClaudeCode, "anthropic_messages") {
+        Ok(context) => context,
+        Err(_) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Kerna could not persist the Claude session receipt.",
+            )
+        }
+    };
+    if observe_anthropic_results(&state.memory, &context, &body).is_err() {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Kerna could not persist the Claude tool result receipt.",
+        );
+    }
     let base = std::env::var("KERNA_ANTHROPIC_UPSTREAM")
         .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
     let mut request = reqwest::Client::new()
@@ -148,7 +173,7 @@ async fn handle_guard_anthropic(
         }
     }
     match request.send().await {
-        Ok(upstream) => relay_anthropic(upstream, state.guard_policy, state.memory),
+        Ok(upstream) => relay_anthropic(upstream, state.guard_policy, state.memory, context),
         Err(_) => error_response(
             StatusCode::BAD_GATEWAY,
             "Anthropic upstream is unavailable.",
@@ -195,6 +220,81 @@ fn provider_url(base: &str, path: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), path)
 }
 
+fn start_guard_stream(
+    state: &AppState,
+    agent: AgentKind,
+    protocol: &str,
+) -> Result<GuardStreamContext, String> {
+    let session_id = state
+        .auth_token
+        .as_deref()
+        .map(|token| format!("guard-{:x}", Sha256::digest(token.as_bytes())))
+        .unwrap_or_else(|| format!("guard-{}", Uuid::new_v4()));
+    let task_id = Uuid::new_v4();
+    let agent_name = match agent {
+        AgentKind::ClaudeCode => "claude_code",
+        AgentKind::Codex => "codex",
+    };
+    let agent_version =
+        std::env::var("KERNA_GUARD_AGENT_VERSION").unwrap_or_else(|_| "unknown".to_owned());
+    let worktree_baseline =
+        std::env::var("KERNA_WORKTREE_BASELINE").unwrap_or_else(|_| "unbound".to_owned());
+    state
+        .memory
+        .create_task(task_id, Some(&session_id), "Kerna Guard protocol session")
+        .map_err(|error| error.to_string())?;
+    state
+        .memory
+        .start_gateway_session(&session_id, &task_id.to_string(), &worktree_baseline)
+        .map_err(|error| error.to_string())?;
+    state
+        .memory
+        .identify_gateway_session(
+            &session_id,
+            Some(agent_name),
+            Some(&agent_version),
+            protocol,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(GuardStreamContext {
+        session_id,
+        task_id: task_id.to_string(),
+        agent,
+        agent_version,
+        worktree_baseline,
+    })
+}
+
+fn observe_anthropic_results(
+    memory: &MemoryEngine,
+    context: &GuardStreamContext,
+    body: &[u8],
+) -> Result<(), String> {
+    let Ok(request) = serde_json::from_slice::<Value>(body) else {
+        return Ok(());
+    };
+    let Some(messages) = request.get("messages").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for message in messages {
+        let Some(content) = message.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for block in content {
+            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                continue;
+            }
+            let Some(call_id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                continue;
+            };
+            memory
+                .observe_guard_result(&context.session_id, call_id)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 fn upstream_response(
     status: reqwest::StatusCode,
     stream: impl futures_core::Stream<Item = Result<Bytes, std::convert::Infallible>> + Send + 'static,
@@ -216,11 +316,15 @@ fn relay_anthropic(
     mut upstream: reqwest::Response,
     policy: Arc<GuardPolicy>,
     memory: Arc<MemoryEngine>,
+    context: GuardStreamContext,
 ) -> axum::response::Response {
     let status = upstream.status();
     let stream = async_stream::stream! {
+        let stream_context = context.clone();
+        let stream_memory = memory.clone();
+        let decision_policy = policy.clone();
         let mut gate = crate::guard_protocol::AnthropicStreamGate::new(move |action| {
-            stream_policy_decision(&policy, action)
+            stream_policy_decision_with_receipt(&decision_policy, &stream_memory, &stream_context, action)
         });
         'relay: loop {
             match upstream.chunk().await {
@@ -228,7 +332,7 @@ fn relay_anthropic(
                     Ok(frames) => {
                         for frame in frames { yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(frame)); }
                         while let Some(action) = gate.pending_approval().cloned() {
-                            let decision = wait_for_stream_approval(&memory, &action).await;
+                            let decision = wait_for_stream_approval(&memory, &policy, &context, &action).await;
                             match gate.resolve_pending(decision) {
                                 Ok(frames) => for frame in frames { yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(frame)); },
                                 Err(_) => break 'relay,
@@ -246,6 +350,7 @@ fn relay_anthropic(
                 Err(_) => break,
             }
         }
+        let _ = memory.finish_gateway_session(&context.session_id);
     };
     upstream_response(status, stream)
 }
@@ -266,7 +371,7 @@ fn relay_openai(
                     Ok(frames) => {
                         for frame in frames { yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(frame)); }
                         while let Some(action) = gate.pending_approval().cloned() {
-                            let decision = wait_for_stream_approval(&memory, &action).await;
+                            let decision = wait_for_stream_approval_legacy(&memory, &action).await;
                             match gate.resolve_pending(decision) {
                                 Ok(frames) => for frame in frames { yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(frame)); },
                                 Err(_) => break 'relay,
@@ -329,6 +434,127 @@ fn stream_policy_decision_with_smoke(
     }
 }
 
+fn guard_binding(
+    policy: &GuardPolicy,
+    context: &GuardStreamContext,
+    action: &crate::guard_protocol::ActionCandidate,
+) -> (ActionIntent, GuardActionBinding) {
+    let intent = ActionIntent::from_candidate(
+        action,
+        context.session_id.clone(),
+        context.agent,
+        context.agent_version.clone(),
+    );
+    let protocol = match action.protocol {
+        crate::guard_protocol::Protocol::AnthropicMessages => "anthropic_messages",
+        crate::guard_protocol::Protocol::OpenAiResponses => "openai_responses",
+    };
+    let agent = match context.agent {
+        AgentKind::ClaudeCode => "claude_code",
+        AgentKind::Codex => "codex",
+    };
+    let policy_digest = policy.digest();
+    let canonical_action_digest = intent.canonical_digest();
+    let binding_material = json!({
+        "session_id": context.session_id,
+        "task_id": context.task_id,
+        "agent": agent,
+        "agent_version": context.agent_version,
+        "protocol": protocol,
+        "canonical_action_digest": canonical_action_digest,
+        "policy_digest": policy_digest,
+        "worktree_baseline": context.worktree_baseline,
+    });
+    let binding_hash = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&binding_material).expect("binding always serializes"))
+    );
+    (
+        intent,
+        GuardActionBinding {
+            call_id: action.id.clone(),
+            session_id: context.session_id.clone(),
+            task_id: context.task_id.clone(),
+            agent: agent.to_owned(),
+            agent_version: context.agent_version.clone(),
+            protocol: protocol.to_owned(),
+            tool: action.raw_tool_name.clone(),
+            canonical_action_digest,
+            policy_digest,
+            worktree_baseline: context.worktree_baseline.clone(),
+            binding_hash,
+        },
+    )
+}
+
+fn stream_policy_decision_with_receipt(
+    policy: &GuardPolicy,
+    memory: &MemoryEngine,
+    context: &GuardStreamContext,
+    action: &crate::guard_protocol::ActionCandidate,
+) -> crate::guard_protocol::GateDecision {
+    let (intent, binding) = guard_binding(policy, context, action);
+    let mut decision = policy.evaluate(&intent);
+    let smoke_command = wp0_smoke_command(action);
+    if std::env::var("KERNA_WP0_ALLOW_SMOKE_ECHO").ok().as_deref() == Some("1")
+        && smoke_command == Some("echo KERNA_ALLOW_TEST")
+    {
+        decision.effect = PolicyEffect::Allow;
+        decision.reason = "WP0 inert smoke allow".to_owned();
+    } else if std::env::var("KERNA_WP0_HOLD_SMOKE_ECHO").ok().as_deref() == Some("1")
+        && smoke_command == Some("echo KERNA_ASK_TEST")
+    {
+        decision.effect = PolicyEffect::Ask;
+        decision.reason = "WP0 inert smoke approval".to_owned();
+    }
+    let effect = match decision.effect {
+        PolicyEffect::Allow => "allow",
+        PolicyEffect::Ask => "ask",
+        PolicyEffect::Deny => "deny",
+    };
+    let summary = json!({
+        "protocol": binding.protocol,
+        "agent": binding.agent,
+        "agent_version": binding.agent_version,
+        "tool": binding.tool,
+        "kind": intent.kind,
+        "canonical_resource": intent.canonical_resource,
+        "redacted_display": intent.redacted_display,
+        "risk_tags": intent.risk_tags,
+        "arguments_sha256": intent.arguments_digest,
+        "canonical_action_digest": binding.canonical_action_digest,
+        "policy_digest": binding.policy_digest,
+        "worktree_baseline": binding.worktree_baseline,
+        "policy_effect": effect,
+        "policy_reason": decision.reason,
+    })
+    .to_string();
+    match memory.create_guard_action(
+        &binding,
+        effect,
+        &summary,
+        decision.effect == PolicyEffect::Ask,
+    ) {
+        Ok(Some(_)) if decision.effect == PolicyEffect::Ask => {
+            crate::guard_protocol::GateDecision::Hold
+        }
+        Ok(None) if decision.effect == PolicyEffect::Allow => {
+            crate::guard_protocol::GateDecision::Allow
+        }
+        Ok(None) if decision.effect == PolicyEffect::Deny => {
+            crate::guard_protocol::GateDecision::Deny {
+                reason: "denied by Kerna policy".to_owned(),
+            }
+        }
+        Ok(_) => crate::guard_protocol::GateDecision::Deny {
+            reason: "approval persistence is unavailable".to_owned(),
+        },
+        Err(_) => crate::guard_protocol::GateDecision::Deny {
+            reason: "approval persistence is unavailable".to_owned(),
+        },
+    }
+}
+
 fn wp0_smoke_command(action: &crate::guard_protocol::ActionCandidate) -> Option<&str> {
     match (action.protocol, action.raw_tool_name.as_str()) {
         (crate::guard_protocol::Protocol::AnthropicMessages, "Bash") => {
@@ -342,10 +568,74 @@ fn wp0_smoke_command(action: &crate::guard_protocol::ActionCandidate) -> Option<
     }
 }
 
-/// Queue a single held protocol action for the local dashboard. This is deliberately
-/// a WP0 compatibility bridge: it stores a digest and display metadata, never raw tool
-/// arguments, and it does not claim the receipt bindings delivered in WP3.
 async fn wait_for_stream_approval(
+    memory: &MemoryEngine,
+    policy: &GuardPolicy,
+    context: &GuardStreamContext,
+    action: &crate::guard_protocol::ActionCandidate,
+) -> crate::guard_protocol::GateDecision {
+    let (_, binding) = guard_binding(policy, context, action);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        let approval_id =
+            match memory.guard_approval_for_call(&binding.session_id, &binding.call_id) {
+                Ok(Some(id)) => id,
+                Ok(None) if tokio::time::Instant::now() >= deadline => {
+                    let _ = memory.expire_guard_approval(&binding);
+                    let _ = memory.deny_guard_action(&binding);
+                    return crate::guard_protocol::GateDecision::Deny {
+                        reason: "approval expired".to_owned(),
+                    };
+                }
+                Ok(None) => {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+                Err(_) => {
+                    return crate::guard_protocol::GateDecision::Deny {
+                        reason: "approval persistence is unavailable".to_owned(),
+                    }
+                }
+            };
+        match memory.pending_approval_decision(&approval_id) {
+            Ok(Some(true)) => {
+                return match memory.release_guard_action(&binding) {
+                    Ok(true) => crate::guard_protocol::GateDecision::Allow,
+                    Ok(false) | Err(_) => crate::guard_protocol::GateDecision::Deny {
+                        reason: "approval was not valid for this Claude action".to_owned(),
+                    },
+                }
+            }
+            Ok(Some(false)) => {
+                let receipt_ok = memory.deny_guard_action(&binding).unwrap_or(false);
+                return crate::guard_protocol::GateDecision::Deny {
+                    reason: if receipt_ok {
+                        "denied by local approval".to_owned()
+                    } else {
+                        "approval receipt persistence is unavailable".to_owned()
+                    },
+                };
+            }
+            Ok(None) if tokio::time::Instant::now() >= deadline => {
+                let _ = memory.expire_guard_approval(&binding);
+                let _ = memory.deny_guard_action(&binding);
+                return crate::guard_protocol::GateDecision::Deny {
+                    reason: "approval expired".to_owned(),
+                };
+            }
+            Ok(None) => tokio::time::sleep(Duration::from_millis(250)).await,
+            Err(_) => {
+                return crate::guard_protocol::GateDecision::Deny {
+                    reason: "approval persistence is unavailable".to_owned(),
+                }
+            }
+        }
+    }
+}
+
+/// Preserved only for the uncertified OpenAI compatibility adapter. Claude uses the bound
+/// receipt path above; Codex receives no WP3 support claim until its provider-backed gate.
+async fn wait_for_stream_approval_legacy(
     memory: &MemoryEngine,
     action: &crate::guard_protocol::ActionCandidate,
 ) -> crate::guard_protocol::GateDecision {
@@ -592,7 +882,12 @@ fn decide_dashboard_approval(
     if !dashboard_mutation_is_authorized(&state, &headers) {
         return error_response(StatusCode::FORBIDDEN, "Dashboard CSRF validation failed.");
     }
-    match state.app.memory.decide_pending_approval(&id, approved) {
+    let decision = match state.app.memory.decide_guard_approval(&id, approved) {
+        Ok(true) => Ok(true),
+        Ok(false) => state.app.memory.decide_pending_approval(&id, approved),
+        Err(error) => Err(error),
+    };
+    match decision {
         Ok(true) => {
             Json(json!({"ok": true, "status": if approved { "approved" } else { "rejected" }}))
                 .into_response()

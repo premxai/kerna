@@ -2,6 +2,7 @@ use crate::events::{Event, EventSink};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -46,6 +47,23 @@ pub struct ToolCallReceipt {
     pub result_class: Option<String>,
     pub trace_id: Option<String>,
     pub output_preview: Option<String>,
+}
+
+/// Immutable identity used to bind a Claude action, its policy, and its approval.
+/// It contains normalized metadata and digests only; raw model arguments are never stored.
+#[derive(Debug, Clone)]
+pub struct GuardActionBinding {
+    pub call_id: String,
+    pub session_id: String,
+    pub task_id: String,
+    pub agent: String,
+    pub agent_version: String,
+    pub protocol: String,
+    pub tool: String,
+    pub canonical_action_digest: String,
+    pub policy_digest: String,
+    pub worktree_baseline: String,
+    pub binding_hash: String,
 }
 
 impl MemoryEngine {
@@ -256,6 +274,14 @@ impl MemoryEngine {
                 tool TEXT NOT NULL,
                 args_json TEXT NOT NULL,
                 binding_hash TEXT,
+                call_id TEXT,
+                session_id TEXT,
+                agent TEXT,
+                agent_version TEXT,
+                protocol TEXT,
+                policy_digest TEXT,
+                worktree_baseline TEXT,
+                canonical_action_digest TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 decided_at DATETIME,
@@ -269,6 +295,14 @@ impl MemoryEngine {
         // conditional ADD COLUMN, so tolerate the duplicate-column result.
         for migration in [
             "ALTER TABLE pending_approvals ADD COLUMN binding_hash TEXT",
+            "ALTER TABLE pending_approvals ADD COLUMN call_id TEXT",
+            "ALTER TABLE pending_approvals ADD COLUMN session_id TEXT",
+            "ALTER TABLE pending_approvals ADD COLUMN agent TEXT",
+            "ALTER TABLE pending_approvals ADD COLUMN agent_version TEXT",
+            "ALTER TABLE pending_approvals ADD COLUMN protocol TEXT",
+            "ALTER TABLE pending_approvals ADD COLUMN policy_digest TEXT",
+            "ALTER TABLE pending_approvals ADD COLUMN worktree_baseline TEXT",
+            "ALTER TABLE pending_approvals ADD COLUMN canonical_action_digest TEXT",
             "ALTER TABLE pending_approvals ADD COLUMN expires_at DATETIME",
             "ALTER TABLE pending_approvals ADD COLUMN used_at DATETIME",
         ] {
@@ -276,6 +310,41 @@ impl MemoryEngine {
         }
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pending_approvals_status ON pending_approvals(status, created_at);",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_approvals_guard_call
+             ON pending_approvals(session_id, call_id, status);",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS guard_receipt_events (
+                event_id TEXT PRIMARY KEY,
+                call_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                agent_version TEXT NOT NULL,
+                protocol TEXT NOT NULL,
+                tool TEXT NOT NULL,
+                canonical_action_digest TEXT NOT NULL,
+                policy_digest TEXT NOT NULL,
+                worktree_baseline TEXT NOT NULL,
+                approval_id TEXT,
+                sequence INTEGER NOT NULL,
+                previous_hash TEXT NOT NULL,
+                event_hash TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            );",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guard_receipt_events_call
+             ON guard_receipt_events(call_id, sequence);",
             [],
         )?;
 
@@ -311,6 +380,12 @@ impl MemoryEngine {
                 plugin_name TEXT,
                 image_digest TEXT,
                 tool TEXT NOT NULL,
+                agent_version TEXT,
+                protocol TEXT,
+                canonical_action_digest TEXT,
+                policy_digest TEXT,
+                worktree_baseline TEXT,
+                binding_hash TEXT,
                 policy_decision TEXT NOT NULL,
                 approval_id TEXT,
                 started_at TEXT NOT NULL,
@@ -319,9 +394,19 @@ impl MemoryEngine {
                 result_class TEXT,
                 trace_id TEXT,
                 output_preview TEXT
-            );",
+             );",
             [],
         )?;
+        for migration in [
+            "ALTER TABLE tool_call_receipts ADD COLUMN agent_version TEXT",
+            "ALTER TABLE tool_call_receipts ADD COLUMN protocol TEXT",
+            "ALTER TABLE tool_call_receipts ADD COLUMN canonical_action_digest TEXT",
+            "ALTER TABLE tool_call_receipts ADD COLUMN policy_digest TEXT",
+            "ALTER TABLE tool_call_receipts ADD COLUMN worktree_baseline TEXT",
+            "ALTER TABLE tool_call_receipts ADD COLUMN binding_hash TEXT",
+        ] {
+            let _ = conn.execute(migration, []);
+        }
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tool_call_receipts_started
              ON tool_call_receipts(started_at DESC);",
@@ -579,6 +664,459 @@ impl MemoryEngine {
         Ok(changed == 1)
     }
 
+    /// Record a Claude action request and, when needed, create its bound approval in the same
+    /// SQLite transaction. For non-approval decisions the terminal receipt event is committed
+    /// before the caller is allowed to release or deny the protocol action.
+    pub fn create_guard_action(
+        &self,
+        binding: &GuardActionBinding,
+        policy_decision: &str,
+        summary: &str,
+        needs_approval: bool,
+    ) -> Result<Option<String>> {
+        let conn = self.get_conn();
+        let tx = conn.unchecked_transaction()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let result_class = (!needs_approval).then_some(match policy_decision {
+            "allow" => "released",
+            _ => "blocked",
+        });
+        tx.execute(
+            "INSERT INTO tool_call_receipts
+             (call_id, session_id, task_id, client_name, tool, agent_version, protocol,
+              canonical_action_digest, policy_digest, worktree_baseline, binding_hash,
+              policy_decision, started_at, result_class)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                binding.call_id,
+                binding.session_id,
+                binding.task_id,
+                binding.agent,
+                binding.tool,
+                binding.agent_version,
+                binding.protocol,
+                binding.canonical_action_digest,
+                binding.policy_digest,
+                binding.worktree_baseline,
+                binding.binding_hash,
+                policy_decision,
+                now,
+                result_class,
+            ],
+        )?;
+        append_guard_receipt_event(&tx, binding, "requested", None, &now, summary)?;
+
+        let approval_id = if needs_approval {
+            let id = Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO pending_approvals
+                 (id, task_id, tool, args_json, binding_hash, call_id, session_id, agent,
+                  agent_version, protocol, policy_digest, worktree_baseline,
+                  canonical_action_digest, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                         datetime('now', '+5 minutes'))",
+                params![
+                    id,
+                    binding.task_id,
+                    binding.tool,
+                    summary,
+                    binding.binding_hash,
+                    binding.call_id,
+                    binding.session_id,
+                    binding.agent,
+                    binding.agent_version,
+                    binding.protocol,
+                    binding.policy_digest,
+                    binding.worktree_baseline,
+                    binding.canonical_action_digest,
+                ],
+            )?;
+            append_guard_receipt_event(&tx, binding, "approval_pending", Some(&id), &now, summary)?;
+            Some(id)
+        } else {
+            let event = if policy_decision == "allow" {
+                "released"
+            } else {
+                "denied"
+            };
+            append_guard_receipt_event(&tx, binding, event, None, &now, summary)?;
+            None
+        };
+        tx.commit()?;
+        Ok(approval_id)
+    }
+
+    pub fn guard_approval_for_call(
+        &self,
+        session_id: &str,
+        call_id: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.get_conn();
+        conn.query_row(
+            "SELECT id FROM pending_approvals
+             WHERE session_id = ?1 AND call_id = ?2 AND status = 'pending'
+               AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+             ORDER BY created_at ASC LIMIT 1",
+            params![session_id, call_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Record the browser's decision before making an approved row visible to the stream.
+    /// Generic legacy approvals still use `decide_pending_approval` and are not mixed with this
+    /// guard-only path.
+    pub fn decide_guard_approval(&self, id: &str, approved: bool) -> Result<bool> {
+        let conn = self.get_conn();
+        let row: Option<(
+            Option<String>,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+        )> = conn
+            .query_row(
+                "SELECT call_id, session_id, task_id, agent, agent_version, protocol, tool,
+                        canonical_action_digest, policy_digest, worktree_baseline, expires_at
+                 FROM pending_approvals WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            Some(call_id),
+            session_id,
+            task_id,
+            agent,
+            agent_version,
+            protocol,
+            tool,
+            canonical_action_digest,
+            policy_digest,
+            worktree_baseline,
+            _expires_at,
+        )) = row
+        else {
+            return Ok(false);
+        };
+        let binding = GuardActionBinding {
+            call_id: call_id.to_owned(),
+            session_id: session_id.to_owned(),
+            task_id,
+            agent,
+            agent_version,
+            protocol,
+            tool,
+            canonical_action_digest,
+            policy_digest,
+            worktree_baseline,
+            binding_hash: String::new(),
+        };
+        let tx = conn.unchecked_transaction()?;
+        let expired: bool = tx.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM pending_approvals
+                 WHERE id = ?1 AND status = 'pending'
+                   AND expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP
+             )",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if expired {
+            tx.execute(
+                "UPDATE pending_approvals SET status = 'expired', decided_at = CURRENT_TIMESTAMP
+                 WHERE id = ?1 AND status = 'pending'",
+                params![id],
+            )?;
+            append_guard_receipt_event(
+                &tx,
+                &binding,
+                "approval_decided",
+                Some(id),
+                &chrono::Utc::now().to_rfc3339(),
+                r#"{"approval_decision":"expired"}"#,
+            )?;
+            tx.commit()?;
+            return Ok(false);
+        }
+        let changed = tx.execute(
+            "UPDATE pending_approvals SET status = ?1, decided_at = CURRENT_TIMESTAMP
+             WHERE id = ?2 AND status = 'pending'",
+            params![if approved { "approved" } else { "denied" }, id],
+        )?;
+        if changed == 1 {
+            let payload = if approved {
+                r#"{"approval_decision":"approved"}"#
+            } else {
+                r#"{"approval_decision":"denied"}"#
+            };
+            append_guard_receipt_event(
+                &tx,
+                &binding,
+                "approval_decided",
+                Some(id),
+                &chrono::Utc::now().to_rfc3339(),
+                payload,
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed == 1)
+    }
+
+    /// Atomically consume a matching approved decision and commit the release receipt. A caller
+    /// must not release the buffered protocol bytes unless this returns true.
+    pub fn release_guard_action(&self, binding: &GuardActionBinding) -> Result<bool> {
+        let conn = self.get_conn();
+        let tx = conn.unchecked_transaction()?;
+        let approval_id: Option<String> = tx
+            .query_row(
+                "SELECT id FROM pending_approvals
+                 WHERE call_id = ?1 AND session_id = ?2 AND task_id = ?3 AND agent = ?4
+                   AND agent_version = ?5 AND protocol = ?6 AND policy_digest = ?7
+                   AND worktree_baseline = ?8 AND canonical_action_digest = ?9
+                   AND binding_hash = ?10 AND status = 'approved'
+                   AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+                 ORDER BY decided_at ASC LIMIT 1",
+                params![
+                    binding.call_id,
+                    binding.session_id,
+                    binding.task_id,
+                    binding.agent,
+                    binding.agent_version,
+                    binding.protocol,
+                    binding.policy_digest,
+                    binding.worktree_baseline,
+                    binding.canonical_action_digest,
+                    binding.binding_hash,
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(approval_id) = approval_id else {
+            tx.rollback()?;
+            return Ok(false);
+        };
+        let changed = tx.execute(
+            "UPDATE pending_approvals SET status = 'used', used_at = CURRENT_TIMESTAMP
+             WHERE id = ?1 AND status = 'approved'",
+            params![approval_id],
+        )?;
+        if changed != 1 {
+            tx.rollback()?;
+            return Ok(false);
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        tx.execute(
+            "UPDATE tool_call_receipts SET approval_id = ?1, result_class = 'released'
+             WHERE call_id = ?2 AND session_id = ?3",
+            params![approval_id, binding.call_id, binding.session_id],
+        )?;
+        append_guard_receipt_event(
+            &tx,
+            binding,
+            "released",
+            Some(&approval_id),
+            &now,
+            r#"{"release":"approved"}"#,
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn expire_guard_approval(&self, binding: &GuardActionBinding) -> Result<bool> {
+        let conn = self.get_conn();
+        let tx = conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE pending_approvals SET status = 'expired', decided_at = CURRENT_TIMESTAMP
+             WHERE session_id = ?1 AND call_id = ?2 AND task_id = ?3 AND agent = ?4
+               AND agent_version = ?5 AND protocol = ?6 AND policy_digest = ?7
+               AND worktree_baseline = ?8 AND canonical_action_digest = ?9
+               AND binding_hash = ?10 AND status = 'pending'",
+            params![
+                binding.session_id,
+                binding.call_id,
+                binding.task_id,
+                binding.agent,
+                binding.agent_version,
+                binding.protocol,
+                binding.policy_digest,
+                binding.worktree_baseline,
+                binding.canonical_action_digest,
+                binding.binding_hash,
+            ],
+        )?;
+        if changed == 1 {
+            append_guard_receipt_event(
+                &tx,
+                binding,
+                "approval_decided",
+                None,
+                &chrono::Utc::now().to_rfc3339(),
+                r#"{"approval_decision":"expired"}"#,
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed == 1)
+    }
+
+    pub fn deny_guard_action(&self, binding: &GuardActionBinding) -> Result<bool> {
+        let conn = self.get_conn();
+        let tx = conn.unchecked_transaction()?;
+        let approval_id: Option<String> = tx
+            .query_row(
+                "SELECT id FROM pending_approvals
+                 WHERE call_id = ?1 AND session_id = ?2 AND task_id = ?3 AND agent = ?4
+                   AND agent_version = ?5 AND protocol = ?6 AND policy_digest = ?7
+                   AND worktree_baseline = ?8 AND canonical_action_digest = ?9
+                   AND binding_hash = ?10 AND status IN ('denied', 'expired')
+                 ORDER BY decided_at DESC LIMIT 1",
+                params![
+                    binding.call_id,
+                    binding.session_id,
+                    binding.task_id,
+                    binding.agent,
+                    binding.agent_version,
+                    binding.protocol,
+                    binding.policy_digest,
+                    binding.worktree_baseline,
+                    binding.canonical_action_digest,
+                    binding.binding_hash,
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(approval_id) = approval_id else {
+            tx.rollback()?;
+            return Ok(false);
+        };
+        tx.execute(
+            "UPDATE pending_approvals SET status = 'used', used_at = CURRENT_TIMESTAMP
+             WHERE id = ?1 AND status IN ('denied', 'expired')",
+            params![approval_id],
+        )?;
+        tx.execute(
+            "UPDATE tool_call_receipts SET approval_id = ?1, result_class = 'blocked'
+             WHERE call_id = ?2 AND session_id = ?3",
+            params![approval_id, binding.call_id, binding.session_id],
+        )?;
+        append_guard_receipt_event(
+            &tx,
+            binding,
+            "denied",
+            Some(&approval_id),
+            &chrono::Utc::now().to_rfc3339(),
+            r#"{"release":"denied"}"#,
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Correlate a later Anthropic `tool_result` to the released action without storing its
+    /// content. Only a released action can advance to result_observed.
+    pub fn observe_guard_result(&self, session_id: &str, call_id: &str) -> Result<bool> {
+        let conn = self.get_conn();
+        let row: Option<(
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            String,
+            Option<String>,
+        )> = conn
+            .query_row(
+                "SELECT task_id, client_name, tool, agent_version, protocol,
+                        canonical_action_digest, policy_digest, worktree_baseline, approval_id
+                 FROM tool_call_receipts
+                 WHERE session_id = ?1 AND call_id = ?2 AND result_class = 'released'",
+                params![session_id, call_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            task_id,
+            agent,
+            tool,
+            agent_version,
+            protocol,
+            canonical_action_digest,
+            policy_digest,
+            worktree_baseline,
+            approval_id,
+        )) = row
+        else {
+            return Ok(false);
+        };
+        let tx = conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE tool_call_receipts SET result_class = 'result_observed',
+             completed_at = ?1 WHERE session_id = ?2 AND call_id = ?3 AND result_class = 'released'",
+            params![chrono::Utc::now().to_rfc3339(), session_id, call_id],
+        )?;
+        if changed != 1 {
+            tx.rollback()?;
+            return Ok(false);
+        }
+        let binding = GuardActionBinding {
+            call_id: call_id.to_owned(),
+            session_id: session_id.to_owned(),
+            task_id,
+            agent: agent.unwrap_or_else(|| "claude_code".to_owned()),
+            agent_version: agent_version.unwrap_or_else(|| "unknown".to_owned()),
+            protocol: protocol.unwrap_or_else(|| "anthropic_messages".to_owned()),
+            tool,
+            canonical_action_digest,
+            policy_digest,
+            worktree_baseline,
+            binding_hash: "unknown".to_owned(),
+        };
+        append_guard_receipt_event(
+            &tx,
+            &binding,
+            "result_observed",
+            approval_id.as_deref(),
+            &chrono::Utc::now().to_rfc3339(),
+            r#"{"result":"observed"}"#,
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn start_gateway_session(
         &self,
         session_id: &str,
@@ -589,8 +1127,15 @@ impl MemoryEngine {
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO gateway_sessions
-             (session_id, task_id, workspace, state, started_at, last_activity_at)
-             VALUES (?1, ?2, ?3, 'running', ?4, ?4)",
+              (session_id, task_id, workspace, state, started_at, last_activity_at)
+              VALUES (?1, ?2, ?3, 'running', ?4, ?4)
+              ON CONFLICT(session_id) DO UPDATE SET
+                  task_id = excluded.task_id,
+                  workspace = excluded.workspace,
+                  state = 'running',
+                  started_at = excluded.started_at,
+                  last_activity_at = excluded.last_activity_at,
+                  ended_at = NULL",
             params![session_id, task_id, workspace, now],
         )?;
         Ok(())
@@ -1217,6 +1762,79 @@ impl MemoryEngine {
     }
 }
 
+fn append_guard_receipt_event(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &GuardActionBinding,
+    event_type: &str,
+    approval_id: Option<&str>,
+    created_at: &str,
+    payload_json: &str,
+) -> Result<()> {
+    let previous_hash: String = tx
+        .query_row(
+            "SELECT event_hash FROM guard_receipt_events ORDER BY sequence DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    let sequence: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM guard_receipt_events",
+        [],
+        |row| row.get(0),
+    )?;
+    let event_id = Uuid::new_v4().to_string();
+    let hash_input = serde_json::json!({
+        "previous_hash": previous_hash,
+        "sequence": sequence,
+        "event_id": event_id,
+        "call_id": binding.call_id,
+        "session_id": binding.session_id,
+        "task_id": binding.task_id,
+        "event_type": event_type,
+        "agent": binding.agent,
+        "agent_version": binding.agent_version,
+        "protocol": binding.protocol,
+        "tool": binding.tool,
+        "canonical_action_digest": binding.canonical_action_digest,
+        "policy_digest": binding.policy_digest,
+        "worktree_baseline": binding.worktree_baseline,
+        "approval_id": approval_id.unwrap_or_default(),
+        "created_at": created_at,
+        "payload_json": payload_json,
+    })
+    .to_string();
+    let event_hash = format!("{:x}", Sha256::digest(hash_input.as_bytes()));
+    tx.execute(
+        "INSERT INTO guard_receipt_events
+         (event_id, call_id, session_id, task_id, event_type, agent, agent_version, protocol,
+          tool, canonical_action_digest, policy_digest, worktree_baseline, approval_id, sequence,
+          previous_hash, event_hash, created_at, payload_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        params![
+            event_id,
+            binding.call_id,
+            binding.session_id,
+            binding.task_id,
+            event_type,
+            binding.agent,
+            binding.agent_version,
+            binding.protocol,
+            binding.tool,
+            binding.canonical_action_digest,
+            binding.policy_digest,
+            binding.worktree_baseline,
+            approval_id,
+            sequence,
+            previous_hash,
+            event_hash,
+            created_at,
+            payload_json,
+        ],
+    )?;
+    Ok(())
+}
+
 impl EventSink for MemoryEngine {
     fn record(&self, event: Event) -> Result<()> {
         let conn = self.get_conn();
@@ -1433,6 +2051,97 @@ mod tests {
         assert_eq!(receipts[0].tool, "read_file");
         assert_eq!(receipts[0].duration_ms, Some(12));
         assert_eq!(receipts[0].result_class.as_deref(), Some("completed"));
+    }
+
+    #[test]
+    fn claude_guard_approval_is_single_use_and_receipt_chain_is_complete() {
+        let mem = setup_test_db("test_claude_guard_receipts");
+        let task_id = Uuid::new_v4();
+        mem.create_task(task_id, None, "Claude guard receipt test")
+            .unwrap();
+        let binding = GuardActionBinding {
+            call_id: "toolu_test_1".to_owned(),
+            session_id: "guard-session-test".to_owned(),
+            task_id: task_id.to_string(),
+            agent: "claude_code".to_owned(),
+            agent_version: "1.2.3".to_owned(),
+            protocol: "anthropic_messages".to_owned(),
+            tool: "write_file".to_owned(),
+            canonical_action_digest: "sha256:action".to_owned(),
+            policy_digest: "sha256:policy".to_owned(),
+            worktree_baseline: "sha256:baseline".to_owned(),
+            binding_hash: "sha256:binding".to_owned(),
+        };
+        let summary = r#"{"tool":"write_file","args_sha256":"sha256:args","redacted_display":"write_file output.txt","risk_tags":["filesystem_write"]}"#;
+
+        let approval_id = mem
+            .create_guard_action(&binding, "ask", summary, true)
+            .unwrap()
+            .expect("ask must create an approval");
+        assert_eq!(
+            mem.guard_approval_for_call(&binding.session_id, &binding.call_id)
+                .unwrap(),
+            Some(approval_id.clone())
+        );
+        assert!(mem.decide_guard_approval(&approval_id, true).unwrap());
+        assert!(mem.release_guard_action(&binding).unwrap());
+        assert!(!mem.release_guard_action(&binding).unwrap());
+        assert!(mem
+            .observe_guard_result(&binding.session_id, &binding.call_id)
+            .unwrap());
+        assert!(!mem
+            .observe_guard_result(&binding.session_id, &binding.call_id)
+            .unwrap());
+
+        let conn = mem.get_conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT sequence, event_type, previous_hash, event_hash, payload_json
+                 FROM guard_receipt_events ORDER BY sequence ASC",
+            )
+            .unwrap();
+        let events: Vec<(i64, String, String, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.1.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "requested",
+                "approval_pending",
+                "approval_decided",
+                "released",
+                "result_observed",
+            ]
+        );
+        assert_eq!(events[0].2, "");
+        for pair in events.windows(2) {
+            assert_eq!(pair[1].2, pair[0].3, "receipt chain must link in order");
+        }
+        assert!(events
+            .iter()
+            .all(|event| !event.4.contains("secret-content")
+                && !event.4.contains("output/secret.txt")));
+        let result_class: String = conn
+            .query_row(
+                "SELECT result_class FROM tool_call_receipts WHERE call_id = ?1",
+                params![binding.call_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(result_class, "result_observed");
     }
 
     #[test]
