@@ -3,8 +3,9 @@ use crate::mcp_registry::McpRegistry;
 use crate::memory::MemoryEngine;
 use crate::scheduler::TaskScheduler;
 use axum::{
+    body::{Body, Bytes},
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         Html, IntoResponse,
@@ -94,6 +95,8 @@ fn error_response(status: StatusCode, message: impl Into<String>) -> axum::respo
 pub async fn start_server(state: AppState, bind: &str, port: u16) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/v1/chat/completions", post(handle_chat_completion))
+        .route("/anthropic/v1/messages", post(handle_guard_anthropic))
+        .route("/openai/v1/responses", post(handle_guard_openai))
         .with_state(state);
 
     let ip: std::net::IpAddr = bind
@@ -104,6 +107,160 @@ pub async fn start_server(state: AppState, bind: &str, port: u16) -> anyhow::Res
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Relay an Anthropic Messages stream through the protocol gate. The session token
+/// authenticates only to Kerna; the provider key is read in this trusted broker process.
+async fn handle_guard_anthropic(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    if !is_authorized(&state, &headers) {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "Missing or invalid session token.",
+        );
+    }
+    let key = match std::env::var("ANTHROPIC_API_KEY") {
+        Ok(value) if !value.is_empty() => value,
+        _ => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Anthropic broker key is unavailable.",
+            )
+        }
+    };
+    let base = std::env::var("KERNA_ANTHROPIC_UPSTREAM")
+        .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
+    let mut request = reqwest::Client::new()
+        .post(provider_url(&base, "v1/messages"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-api-key", key)
+        .header("anthropic-version", "2023-06-01")
+        .body(body);
+    for name in ["anthropic-version", "anthropic-beta"] {
+        if let Some(value) = headers.get(name) {
+            request = request.header(name, value);
+        }
+    }
+    match request.send().await {
+        Ok(upstream) => relay_anthropic(upstream),
+        Err(_) => error_response(
+            StatusCode::BAD_GATEWAY,
+            "Anthropic upstream is unavailable.",
+        ),
+    }
+}
+
+/// Relay an OpenAI Responses stream through the protocol gate. The caller's Authorization
+/// header is deliberately not forwarded: it is a Kerna session credential, not a provider key.
+async fn handle_guard_openai(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    if !is_authorized(&state, &headers) {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "Missing or invalid session token.",
+        );
+    }
+    let key = match std::env::var("OPENAI_API_KEY") {
+        Ok(value) if !value.is_empty() => value,
+        _ => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "OpenAI broker key is unavailable.",
+            )
+        }
+    };
+    let base = std::env::var("KERNA_OPENAI_UPSTREAM")
+        .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+    let request = reqwest::Client::new()
+        .post(provider_url(&base, "responses"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .bearer_auth(key)
+        .body(body);
+    match request.send().await {
+        Ok(upstream) => relay_openai(upstream),
+        Err(_) => error_response(StatusCode::BAD_GATEWAY, "OpenAI upstream is unavailable."),
+    }
+}
+
+fn provider_url(base: &str, path: &str) -> String {
+    format!("{}/{}", base.trim_end_matches('/'), path)
+}
+
+fn upstream_response(
+    status: reqwest::StatusCode,
+    stream: impl futures_core::Stream<Item = Result<Bytes, std::convert::Infallible>> + Send + 'static,
+) -> axum::response::Response {
+    let mut response = axum::response::Response::new(Body::from_stream(stream));
+    *response.status_mut() =
+        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    response
+}
+
+fn relay_anthropic(mut upstream: reqwest::Response) -> axum::response::Response {
+    let status = upstream.status();
+    let stream = async_stream::stream! {
+        let mut gate = crate::guard_protocol::AnthropicStreamGate::new(|_| {
+            crate::guard_protocol::GateDecision::Deny {
+                reason: "no Kerna policy decision is available".to_owned(),
+            }
+        });
+        loop {
+            match upstream.chunk().await {
+                Ok(Some(chunk)) => match gate.feed(&chunk) {
+                    Ok(frames) => for frame in frames { yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(frame)); },
+                    Err(_) => break,
+                },
+                Ok(None) => {
+                    if let Ok(frames) = gate.finish() {
+                        for frame in frames { yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(frame)); }
+                    }
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+    };
+    upstream_response(status, stream)
+}
+
+fn relay_openai(mut upstream: reqwest::Response) -> axum::response::Response {
+    let status = upstream.status();
+    let stream = async_stream::stream! {
+        let mut gate = crate::guard_protocol::OpenAiResponsesStreamGate::new(|_| {
+            crate::guard_protocol::GateDecision::Deny {
+                reason: "no Kerna policy decision is available".to_owned(),
+            }
+        });
+        loop {
+            match upstream.chunk().await {
+                Ok(Some(chunk)) => match gate.feed(&chunk) {
+                    Ok(frames) => for frame in frames { yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(frame)); },
+                    Err(_) => break,
+                },
+                Ok(None) => {
+                    if let Ok(frames) = gate.finish() {
+                        for frame in frames { yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(frame)); }
+                    }
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+    };
+    upstream_response(status, stream)
 }
 
 /// Start the local-only observability surface. It reads durable SQLite records
@@ -566,5 +723,17 @@ mod tests {
         valid.insert("origin", "http://127.0.0.1:8765".parse().unwrap());
         valid.insert("x-kerna-dashboard-csrf", "wrong".parse().unwrap());
         assert!(!dashboard_mutation_is_authorized(&state, &valid));
+    }
+
+    #[test]
+    fn provider_urls_append_exactly_one_path_separator() {
+        assert_eq!(
+            provider_url("https://api.anthropic.com", "v1/messages"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            provider_url("http://127.0.0.1:8081/v1/", "responses"),
+            "http://127.0.0.1:8081/v1/responses"
+        );
     }
 }
