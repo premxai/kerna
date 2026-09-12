@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::mcp_registry::McpRegistry;
 use crate::memory::MemoryEngine;
+use crate::permissions::{PermissionLevel, PermissionManager};
 use crate::scheduler::TaskScheduler;
 use axum::{
     body::{Body, Bytes},
@@ -145,7 +146,7 @@ async fn handle_guard_anthropic(
         }
     }
     match request.send().await {
-        Ok(upstream) => relay_anthropic(upstream),
+        Ok(upstream) => relay_anthropic(upstream, state.config),
         Err(_) => error_response(
             StatusCode::BAD_GATEWAY,
             "Anthropic upstream is unavailable.",
@@ -183,7 +184,7 @@ async fn handle_guard_openai(
         .bearer_auth(key)
         .body(body);
     match request.send().await {
-        Ok(upstream) => relay_openai(upstream),
+        Ok(upstream) => relay_openai(upstream, state.config),
         Err(_) => error_response(StatusCode::BAD_GATEWAY, "OpenAI upstream is unavailable."),
     }
 }
@@ -209,13 +210,11 @@ fn upstream_response(
     response
 }
 
-fn relay_anthropic(mut upstream: reqwest::Response) -> axum::response::Response {
+fn relay_anthropic(mut upstream: reqwest::Response, config: Config) -> axum::response::Response {
     let status = upstream.status();
     let stream = async_stream::stream! {
-        let mut gate = crate::guard_protocol::AnthropicStreamGate::new(|_| {
-            crate::guard_protocol::GateDecision::Deny {
-                reason: "no Kerna policy decision is available".to_owned(),
-            }
+        let mut gate = crate::guard_protocol::AnthropicStreamGate::new(move |action| {
+            stream_policy_decision(&config, action)
         });
         loop {
             match upstream.chunk().await {
@@ -236,13 +235,11 @@ fn relay_anthropic(mut upstream: reqwest::Response) -> axum::response::Response 
     upstream_response(status, stream)
 }
 
-fn relay_openai(mut upstream: reqwest::Response) -> axum::response::Response {
+fn relay_openai(mut upstream: reqwest::Response, config: Config) -> axum::response::Response {
     let status = upstream.status();
     let stream = async_stream::stream! {
-        let mut gate = crate::guard_protocol::OpenAiResponsesStreamGate::new(|_| {
-            crate::guard_protocol::GateDecision::Deny {
-                reason: "no Kerna policy decision is available".to_owned(),
-            }
+        let mut gate = crate::guard_protocol::OpenAiResponsesStreamGate::new(move |action| {
+            stream_policy_decision(&config, action)
         });
         loop {
             match upstream.chunk().await {
@@ -261,6 +258,41 @@ fn relay_openai(mut upstream: reqwest::Response) -> axum::response::Response {
         }
     };
     upstream_response(status, stream)
+}
+
+fn stream_policy_decision(
+    config: &Config,
+    action: &crate::guard_protocol::ActionCandidate,
+) -> crate::guard_protocol::GateDecision {
+    let smoke_allow = std::env::var("KERNA_WP0_ALLOW_SMOKE_ECHO").ok().as_deref() == Some("1");
+    stream_policy_decision_with_smoke(config, action, smoke_allow)
+}
+
+fn stream_policy_decision_with_smoke(
+    config: &Config,
+    action: &crate::guard_protocol::ActionCandidate,
+    smoke_allow: bool,
+) -> crate::guard_protocol::GateDecision {
+    // WP0 can prove a real client release without granting a broadly dangerous
+    // name-only `Bash` rule. The opt-in is broker-local and matches one inert command.
+    if smoke_allow
+        && action.raw_tool_name == "Bash"
+        && action.arguments["command"] == "echo KERNA_ALLOW_TEST"
+    {
+        return crate::guard_protocol::GateDecision::Allow;
+    }
+    match PermissionManager::new(config.clone())
+        .decide(&action.raw_tool_name, None)
+        .effective
+    {
+        PermissionLevel::AutoApprove => crate::guard_protocol::GateDecision::Allow,
+        PermissionLevel::RequireConfirmation => crate::guard_protocol::GateDecision::Deny {
+            reason: "approval is required but not available in the broker yet".to_owned(),
+        },
+        PermissionLevel::Deny => crate::guard_protocol::GateDecision::Deny {
+            reason: "denied by Kerna policy".to_owned(),
+        },
+    }
 }
 
 /// Start the local-only observability surface. It reads durable SQLite records
@@ -735,5 +767,55 @@ mod tests {
             provider_url("http://127.0.0.1:8081/v1/", "responses"),
             "http://127.0.0.1:8081/v1/responses"
         );
+    }
+
+    #[test]
+    fn stream_policy_is_fail_closed_and_releases_only_an_explicit_exact_allow() {
+        let action = crate::guard_protocol::ActionCandidate {
+            protocol: crate::guard_protocol::Protocol::AnthropicMessages,
+            id: "toolu_test".to_owned(),
+            raw_tool_name: "Bash".to_owned(),
+            arguments: serde_json::json!({"command": "echo KERNA_ALLOW_TEST"}),
+        };
+        assert!(matches!(
+            stream_policy_decision(&Config::default(), &action),
+            crate::guard_protocol::GateDecision::Deny { .. }
+        ));
+
+        let mut config = Config::default();
+        config.permissions.push(crate::config::PermissionRule {
+            tool: "Bash".to_owned(),
+            action: "auto_approve".to_owned(),
+        });
+        assert_eq!(
+            stream_policy_decision(&config, &action),
+            crate::guard_protocol::GateDecision::Allow
+        );
+    }
+
+    #[test]
+    fn wp0_smoke_allow_releases_only_the_inert_exact_command() {
+        let config = Config::default();
+        let mut action = crate::guard_protocol::ActionCandidate {
+            protocol: crate::guard_protocol::Protocol::AnthropicMessages,
+            id: "toolu_test".to_owned(),
+            raw_tool_name: "Bash".to_owned(),
+            arguments: serde_json::json!({"command": "echo KERNA_ALLOW_TEST"}),
+        };
+        assert_eq!(
+            stream_policy_decision_with_smoke(&config, &action, true),
+            crate::guard_protocol::GateDecision::Allow
+        );
+        action.arguments = serde_json::json!({"command": "echo KERNA_DENY_TEST"});
+        assert!(matches!(
+            stream_policy_decision_with_smoke(&config, &action, true),
+            crate::guard_protocol::GateDecision::Deny { .. }
+        ));
+        action.raw_tool_name = "Write".to_owned();
+        action.arguments = serde_json::json!({"command": "echo KERNA_ALLOW_TEST"});
+        assert!(matches!(
+            stream_policy_decision_with_smoke(&config, &action, true),
+            crate::guard_protocol::GateDecision::Deny { .. }
+        ));
     }
 }
