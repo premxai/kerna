@@ -112,7 +112,10 @@
       "policy": {
         "version": 1,
         "default": "deny",
-        "rules": [{ "id": "shell", "effect": "allow", "kind": "shell" }]
+        "rules": [
+          { "id": "network", "effect": "ask", "risk_tag": "network_access" },
+          { "id": "shell", "effect": "allow", "kind": "shell" }
+        ]
       },
       "claude": { "tool": "Bash", "arguments": { "command": "curl https://example.com" } },
       "openai": { "tool": "exec_command", "arguments": { "cmd": "curl https://example.com" } },
