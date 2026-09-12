@@ -15,11 +15,15 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use base64::Engine;
+use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::io::Write;
 use std::net::SocketAddr;
 use std::process::Command;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -52,6 +56,21 @@ struct DashboardState {
     app: AppState,
     csrf_token: String,
     origin: String,
+    signing_key: Arc<SigningKey>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyWorkspaceRequest {
+    target: String,
+    selection: ApplyWorkspaceSelection,
+    confirm: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ApplyWorkspaceSelection {
+    Uncommitted,
+    Commits { hashes: Vec<String> },
 }
 
 #[derive(Debug, Deserialize)]
@@ -403,6 +422,12 @@ fn relay_anthropic(
             stream_policy_decision_with_receipt(&decision_policy, &stream_memory, &stream_context, action)
         });
         'relay: loop {
+            if matches!(
+                memory.gateway_session_state(&context.session_id),
+                Ok(Some(state)) if state == "stopped"
+            ) {
+                break 'relay;
+            }
             match upstream.chunk().await {
                 Ok(Some(chunk)) => match gate.feed(&chunk) {
                     Ok(frames) => {
@@ -653,6 +678,15 @@ async fn wait_for_stream_approval(
     let (_, binding) = guard_binding(policy, context, action);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
     loop {
+        if matches!(
+            memory.gateway_session_state(&binding.session_id),
+            Ok(Some(state)) if state == "stopped"
+        ) {
+            let _ = memory.deny_guard_action(&binding);
+            return crate::guard_protocol::GateDecision::Deny {
+                reason: "session stopped from the local dashboard".to_owned(),
+            };
+        }
         let approval_id =
             match memory.guard_approval_for_call(&binding.session_id, &binding.call_id) {
                 Ok(Some(id)) => id,
@@ -784,11 +818,22 @@ pub async fn start_dashboard_server(
         app: state,
         csrf_token: Uuid::new_v4().to_string(),
         origin: format!("http://127.0.0.1:{port}"),
+        signing_key: Arc::new(new_dashboard_signing_key()),
     };
     let app = Router::new()
         .route("/", get(dashboard_page))
         .route("/api/v1/dashboard/overview", get(dashboard_overview))
         .route("/api/v1/dashboard/sessions", get(dashboard_sessions))
+        .route(
+            "/api/v1/dashboard/sessions/:id/stop",
+            post(stop_dashboard_session),
+        )
+        .route("/api/v1/dashboard/workspace", get(dashboard_workspace))
+        .route(
+            "/api/v1/dashboard/workspace/apply",
+            post(apply_dashboard_workspace),
+        )
+        .route("/api/v1/dashboard/evidence", get(dashboard_evidence))
         .route("/api/v1/dashboard/receipts", get(dashboard_receipts))
         .route("/api/v1/dashboard/approvals", get(dashboard_approvals))
         .route("/api/v1/dashboard/containment", get(dashboard_containment))
@@ -829,6 +874,262 @@ async fn dashboard_overview(State(state): State<DashboardState>) -> Json<Value> 
 
 async fn dashboard_sessions(State(state): State<DashboardState>) -> Json<Value> {
     Json(json!({"sessions": state.app.memory.recent_gateway_sessions(100).unwrap_or_default()}))
+}
+
+async fn stop_dashboard_session(
+    State(state): State<DashboardState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if !dashboard_mutation_is_authorized(&state, &headers) {
+        return error_response(StatusCode::FORBIDDEN, "Dashboard CSRF validation failed.");
+    }
+    match state.app.memory.stop_gateway_session(&id) {
+        Ok(true) => Json(json!({"ok": true, "status": "stopped"})).into_response(),
+        Ok(false) => error_response(StatusCode::CONFLICT, "Session is no longer running."),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+async fn dashboard_workspace(State(state): State<DashboardState>) -> axum::response::Response {
+    match workspace_review(&state.app.worktree_baseline) {
+        Ok(review) => Json(review).into_response(),
+        Err(error) => error_response(StatusCode::SERVICE_UNAVAILABLE, error),
+    }
+}
+
+async fn apply_dashboard_workspace(
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+    Json(request): Json<ApplyWorkspaceRequest>,
+) -> axum::response::Response {
+    if !dashboard_mutation_is_authorized(&state, &headers) {
+        return error_response(StatusCode::FORBIDDEN, "Dashboard CSRF validation failed.");
+    }
+    if !request.confirm {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Explicit apply confirmation is required.",
+        );
+    }
+    match apply_workspace_patch(&request.target, &request.selection) {
+        Ok(applied) => Json(json!({"ok": true, "applied": applied})).into_response(),
+        Err(error) => error_response(StatusCode::CONFLICT, error),
+    }
+}
+
+async fn dashboard_evidence(State(state): State<DashboardState>) -> axum::response::Response {
+    let payload = dashboard_snapshot(&state);
+    let payload_bytes = match serde_json::to_vec(&payload) {
+        Ok(bytes) => bytes,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    let signature = state.signing_key.sign(&payload_bytes);
+    let public_key = base64::engine::general_purpose::STANDARD
+        .encode(state.signing_key.verifying_key().to_bytes());
+    let signature = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
+    Json(json!({
+        "algorithm": "Ed25519",
+        "public_key": public_key,
+        "signature": signature,
+        "payload": payload,
+    }))
+    .into_response()
+}
+
+fn new_dashboard_signing_key() -> SigningKey {
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    let mut seed = [0_u8; 32];
+    seed[..16].copy_from_slice(first.as_bytes());
+    seed[16..].copy_from_slice(second.as_bytes());
+    SigningKey::from_bytes(&seed)
+}
+
+fn apply_workspace_patch(
+    target: &str,
+    selection: &ApplyWorkspaceSelection,
+) -> Result<Value, String> {
+    let source = std::env::current_dir()
+        .and_then(|path| path.canonicalize())
+        .map_err(|error| format!("source workspace is unavailable: {error}"))?;
+    let target = std::path::PathBuf::from(target)
+        .canonicalize()
+        .map_err(|error| format!("target workspace is unavailable: {error}"))?;
+    if !target.is_dir() {
+        return Err("target workspace is not a directory".to_owned());
+    }
+    let source_root = git_text_output(&source, &["rev-parse", "--show-toplevel"])?
+        .trim()
+        .to_owned();
+    let target_root = git_text_output(&target, &["rev-parse", "--show-toplevel"])?
+        .trim()
+        .to_owned();
+    if source_root == target_root {
+        return Err("refusing to apply into the source worktree".to_owned());
+    }
+    let target_status = git_text_output(
+        &target,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            ".",
+        ],
+    )?;
+    if !target_status.trim().is_empty() {
+        return Err("target worktree must be clean before apply".to_owned());
+    }
+
+    let patch = match selection {
+        ApplyWorkspaceSelection::Uncommitted => {
+            git_bytes_output(&source, &["diff", "--binary", "HEAD", "--", "."])?
+        }
+        ApplyWorkspaceSelection::Commits { hashes } => {
+            if hashes.is_empty() || hashes.len() > 20 {
+                return Err("select between one and twenty commits".to_owned());
+            }
+            let mut combined = Vec::new();
+            for hash in hashes {
+                if !(7..=64).contains(&hash.len()) || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err("commit selection contains an invalid hash".to_owned());
+                }
+                git_text_output(&source, &["cat-file", "-e", &format!("{hash}^{{commit}}")])?;
+                let commit_patch = git_bytes_output(
+                    &source,
+                    &["diff", "--binary", &format!("{hash}^"), hash, "--", "."],
+                )?;
+                combined.extend_from_slice(&commit_patch);
+            }
+            combined
+        }
+    };
+    if patch.is_empty() {
+        return Err("there are no selected changes to apply".to_owned());
+    }
+
+    let mut child = Command::new("git")
+        .args(["apply", "--whitespace=nowarn", "-"])
+        .current_dir(&target)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not start git apply: {error}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "could not open git apply input".to_owned())?
+        .write_all(&patch)
+        .map_err(|error| format!("could not send patch to git apply: {error}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("git apply did not finish: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "git apply rejected the patch: {}",
+            detail.trim().chars().take(500).collect::<String>()
+        ));
+    }
+    Ok(json!({
+        "target": target_root,
+        "source": source_root,
+        "selection": match selection {
+            ApplyWorkspaceSelection::Uncommitted => "uncommitted",
+            ApplyWorkspaceSelection::Commits { .. } => "commits",
+        },
+    }))
+}
+
+fn workspace_review(worktree_baseline: &str) -> Result<Value, String> {
+    let workspace = std::env::current_dir()
+        .and_then(|path| path.canonicalize())
+        .map_err(|error| format!("workspace is unavailable: {error}"))?;
+    let repo_root = git_text_output(&workspace, &["rev-parse", "--show-toplevel"])?
+        .trim()
+        .to_owned();
+    let head = git_text_output(&workspace, &["rev-parse", "HEAD"])?
+        .trim()
+        .to_owned();
+    let status = git_text_output(
+        &workspace,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            ".",
+        ],
+    )?;
+    let unstaged_diff = git_text_output(
+        &workspace,
+        &["diff", "--no-ext-diff", "--binary", "--", "."],
+    )?;
+    let staged_diff = git_text_output(
+        &workspace,
+        &["diff", "--cached", "--no-ext-diff", "--binary", "--", "."],
+    )?;
+    let log = git_text_output(
+        &workspace,
+        &["log", "-20", "--format=%H%x09%h%x09%aI%x09%s"],
+    )?;
+    let commits = log
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(4, '\t');
+            Some(json!({
+                "hash": fields.next()?,
+                "short": fields.next()?,
+                "authored_at": fields.next()?,
+                "subject": fields.next()?,
+            }))
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "degraded": false,
+        "workspace": workspace.to_string_lossy(),
+        "repo_root": repo_root,
+        "head": head,
+        "baseline": worktree_baseline,
+        "status": status,
+        "unstaged_diff": unstaged_diff,
+        "staged_diff": staged_diff,
+        "commits": commits,
+    }))
+}
+
+fn git_text_output(workspace: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .output()
+        .map_err(|error| format!("git is unavailable: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed with status {}",
+            args.join(" "),
+            output.status
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn git_bytes_output(workspace: &std::path::Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .output()
+        .map_err(|error| format!("git is unavailable: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed with status {}",
+            args.join(" "),
+            output.status
+        ));
+    }
+    Ok(output.stdout)
 }
 
 async fn dashboard_receipts(State(state): State<DashboardState>) -> Json<Value> {
@@ -1059,7 +1360,8 @@ fn dashboard_snapshot(state: &DashboardState) -> Value {
             "window_seconds": 60, "active_sessions": active_sessions,
             "tool_calls": metric_receipts.len(), "completed": completed, "denied": denied,
             "failed": failed, "pending_approvals": approvals.len(),
-            "p50_duration_ms": percentile(0.5), "p95_duration_ms": percentile(0.95)
+            "p50_duration_ms": percentile(0.5), "p95_duration_ms": percentile(0.95),
+            "degraded": state.app.memory.health_check().is_err()
         },
         "sessions": sessions,
         "receipts": receipts,
@@ -1209,6 +1511,7 @@ mod tests {
             },
             csrf_token: "csrf".to_string(),
             origin: "http://127.0.0.1:8765".to_string(),
+            signing_key: Arc::new(new_dashboard_signing_key()),
         };
         let snapshot = dashboard_snapshot(&state);
         assert_eq!(snapshot["metrics"]["tool_calls"], 1);
@@ -1230,6 +1533,7 @@ mod tests {
             },
             csrf_token: "one-time-token".to_string(),
             origin: "http://127.0.0.1:8765".to_string(),
+            signing_key: Arc::new(new_dashboard_signing_key()),
         };
         let mut valid = HeaderMap::new();
         valid.insert("origin", "http://127.0.0.1:8765".parse().unwrap());
@@ -1241,6 +1545,16 @@ mod tests {
         valid.insert("origin", "http://127.0.0.1:8765".parse().unwrap());
         valid.insert("x-kerna-dashboard-csrf", "wrong".parse().unwrap());
         assert!(!dashboard_mutation_is_authorized(&state, &valid));
+    }
+
+    #[test]
+    fn dashboard_evidence_signing_key_verifies_its_payload() {
+        use ed25519_dalek::Verifier;
+
+        let key = new_dashboard_signing_key();
+        let payload = br#"{"evidence":"redacted"}"#;
+        let signature = key.sign(payload);
+        assert!(key.verifying_key().verify(payload, &signature).is_ok());
     }
 
     #[test]

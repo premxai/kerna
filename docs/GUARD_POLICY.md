@@ -66,3 +66,11 @@ Legacy permission conversion retains the prior exact-tool-over-wildcard behavior
 shared Kerna/LocalM fixture continues to test that behavior. A second fixture at
 `benchmarks/policy/guard-policy-conformance.json` checks equivalent path, program, domain, risk,
 unknown, malformed, and secret-path cases through both protocol adapters.
+
+## Local browser workflow
+
+The loopback dashboard provides a stop-session control, degraded SQLite status, and a local
+worktree review containing Git status, recent commits, and staged/unstaged diffs. Applying work
+requires explicit confirmation, a separate clean Git worktree, and the dashboard CSRF token;
+applying back into the source worktree or into a dirty target is refused. **Export signed evidence**
+returns redacted dashboard JSON with an ephemeral Ed25519 signature and its matching public key.

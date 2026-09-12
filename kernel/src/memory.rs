@@ -1177,6 +1177,111 @@ impl MemoryEngine {
         Ok(())
     }
 
+    pub fn gateway_session_state(&self, session_id: &str) -> Result<Option<String>> {
+        let conn = self.get_conn();
+        conn.query_row(
+            "SELECT state FROM gateway_sessions WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn health_check(&self) -> Result<()> {
+        let conn = self.get_conn();
+        conn.query_row("SELECT 1", [], |_| Ok(()))?;
+        Ok(())
+    }
+
+    /// Stop a live Claude session and deny its still-pending guard approvals in
+    /// one transaction. The stream observes the stopped state and fails closed.
+    pub fn stop_gateway_session(&self, session_id: &str) -> Result<bool> {
+        let conn = self.get_conn();
+        let tx = conn.unchecked_transaction()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let changed = tx.execute(
+            "UPDATE gateway_sessions
+             SET state = 'stopped', last_activity_at = ?1, ended_at = ?1
+             WHERE session_id = ?2 AND state = 'running'",
+            params![now, session_id],
+        )?;
+        if changed != 1 {
+            tx.rollback()?;
+            return Ok(false);
+        }
+
+        let mut stmt = tx.prepare(
+            "SELECT id, call_id, task_id, agent, agent_version, protocol, tool,
+                    canonical_action_digest, policy_digest, worktree_baseline, binding_hash
+             FROM pending_approvals
+             WHERE session_id = ?1 AND status = 'pending' AND call_id IS NOT NULL",
+        )?;
+        let pending = stmt
+            .query_map(params![session_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+
+        for (
+            approval_id,
+            call_id,
+            task_id,
+            agent,
+            agent_version,
+            protocol,
+            tool,
+            canonical_action_digest,
+            policy_digest,
+            worktree_baseline,
+            binding_hash,
+        ) in pending
+        {
+            let binding = GuardActionBinding {
+                call_id,
+                session_id: session_id.to_owned(),
+                task_id,
+                agent,
+                agent_version,
+                protocol,
+                tool,
+                canonical_action_digest,
+                policy_digest,
+                worktree_baseline,
+                binding_hash,
+            };
+            tx.execute(
+                "UPDATE pending_approvals
+                 SET status = 'denied', decided_at = CURRENT_TIMESTAMP
+                 WHERE id = ?1 AND status = 'pending'",
+                params![approval_id],
+            )?;
+            append_guard_receipt_event(
+                &tx,
+                &binding,
+                "approval_decided",
+                Some(&approval_id),
+                &now,
+                r#"{"approval_decision":"denied","reason":"session_stopped"}"#,
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn start_tool_call_receipt(
         &self,
@@ -2142,6 +2247,46 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result_class, "result_observed");
+    }
+
+    #[test]
+    fn stopping_a_claude_session_denies_pending_actions() {
+        let mem = setup_test_db("test_stop_claude_session");
+        let task_id = Uuid::new_v4();
+        mem.create_task(task_id, None, "Claude stop test").unwrap();
+        mem.start_gateway_session("stop-session", &task_id.to_string(), "workspace")
+            .unwrap();
+        let binding = GuardActionBinding {
+            call_id: "toolu_stop_1".to_owned(),
+            session_id: "stop-session".to_owned(),
+            task_id: task_id.to_string(),
+            agent: "claude_code".to_owned(),
+            agent_version: "1.2.3".to_owned(),
+            protocol: "anthropic_messages".to_owned(),
+            tool: "Bash".to_owned(),
+            canonical_action_digest: "sha256:stop-action".to_owned(),
+            policy_digest: "sha256:stop-policy".to_owned(),
+            worktree_baseline: "sha256:stop-baseline".to_owned(),
+            binding_hash: "sha256:stop-binding".to_owned(),
+        };
+        let approval_id = mem
+            .create_guard_action(&binding, "ask", "{\"redacted_display\":\"Bash\"}", true)
+            .unwrap()
+            .unwrap();
+
+        assert!(mem.stop_gateway_session(&binding.session_id).unwrap());
+        assert_eq!(
+            mem.gateway_session_state(&binding.session_id).unwrap(),
+            Some("stopped".to_owned())
+        );
+        assert_eq!(
+            mem.guard_approval_for_call(&binding.session_id, &binding.call_id)
+                .unwrap(),
+            None
+        );
+        assert!(!mem.decide_guard_approval(&approval_id, true).unwrap());
+        assert!(mem.deny_guard_action(&binding).unwrap());
+        assert!(!mem.stop_gateway_session(&binding.session_id).unwrap());
     }
 
     #[test]
