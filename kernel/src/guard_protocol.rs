@@ -332,6 +332,7 @@ pub struct AnthropicStreamGate<D> {
     deferred: Vec<Frame>,
     decide: D,
     denied_this_turn: bool,
+    released_this_turn: bool,
 }
 
 impl<D> AnthropicStreamGate<D>
@@ -346,6 +347,7 @@ where
             deferred: Vec::new(),
             decide,
             denied_this_turn: false,
+            released_this_turn: false,
         }
     }
 
@@ -371,7 +373,10 @@ where
             .take()
             .ok_or(ProtocolError::MalformedAction("no approval is pending"))?;
         let mut output = match decision {
-            GateDecision::Allow => held.raw,
+            GateDecision::Allow => {
+                self.released_this_turn = true;
+                held.raw
+            }
             GateDecision::Deny { reason } => {
                 self.denied_this_turn = true;
                 anthropic_denial(index, &candidate.raw_tool_name, &reason)
@@ -443,7 +448,10 @@ where
                         let candidate =
                             complete_action(Protocol::AnthropicMessages, held.action.clone())?;
                         match (self.decide)(&candidate) {
-                            GateDecision::Allow => output.extend(held.raw),
+                            GateDecision::Allow => {
+                                self.released_this_turn = true;
+                                output.extend(held.raw)
+                            }
                             GateDecision::Deny { reason } => {
                                 self.denied_this_turn = true;
                                 output.extend(anthropic_denial(
@@ -463,7 +471,9 @@ where
                     }
                 }
                 Some("message_delta")
-                    if self.denied_this_turn && data["delta"]["stop_reason"] == "tool_use" =>
+                    if self.denied_this_turn
+                        && !self.released_this_turn
+                        && data["delta"]["stop_reason"] == "tool_use" =>
                 {
                     let mut rewritten = data.clone();
                     rewritten["delta"]["stop_reason"] = Value::String("end_turn".to_owned());
@@ -471,6 +481,7 @@ where
                 }
                 Some("message_stop") => {
                     self.denied_this_turn = false;
+                    self.released_this_turn = false;
                     output.push(frame.raw);
                 }
                 _ => output.push(frame.raw),
@@ -764,6 +775,8 @@ mod tests {
     use super::*;
 
     const ANTHROPIC: &[u8] = include_bytes!("../tests/fixtures/anthropic/messages-tool-use.sse");
+    const ANTHROPIC_MULTI: &[u8] =
+        include_bytes!("../tests/fixtures/anthropic/messages-two-tool-use.sse");
     const OPENAI: &[u8] = include_bytes!("../tests/fixtures/openai/responses-actions.sse");
 
     fn parse_every_boundary(protocol: Protocol, fixture: &[u8]) -> Vec<ActionCandidate> {
@@ -801,6 +814,14 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].raw_tool_name, "Bash");
         assert_eq!(actions[0].arguments["command"], "cargo test");
+    }
+
+    #[test]
+    fn anthropic_multi_action_fixture_is_byte_exact_across_every_chunk_size() {
+        let actions = parse_every_boundary(Protocol::AnthropicMessages, ANTHROPIC_MULTI);
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].arguments["command"], "echo first");
+        assert_eq!(actions[1].arguments["command"], "echo second");
     }
 
     #[test]
@@ -979,6 +1000,32 @@ mod tests {
         let mut reconstructed = initial;
         reconstructed.extend(released);
         assert_eq!(reconstructed, ANTHROPIC);
+    }
+
+    #[test]
+    fn anthropic_multi_action_keeps_tool_use_when_one_action_is_released() {
+        let mut decisions = 0;
+        let mut gate = AnthropicStreamGate::new(move |_| {
+            decisions += 1;
+            if decisions == 1 {
+                GateDecision::Allow
+            } else {
+                GateDecision::Deny {
+                    reason: "requires approval".to_owned(),
+                }
+            }
+        });
+        let output = gate
+            .feed(ANTHROPIC_MULTI)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("toolu_redacted_a"));
+        assert!(text.contains("[blocked by Kerna policy] Bash was not released"));
+        assert!(text.contains("\"stop_reason\":\"tool_use\""));
+        assert!(!text.contains("\"stop_reason\":\"end_turn\""));
     }
 
     fn gate_openai(
