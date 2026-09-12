@@ -1,0 +1,54 @@
+# Kerna Guard policy format, version 1.
+# Rules are evaluated top to bottom; the first complete match wins.
+version = 1
+default = "ask"
+
+[[rules]]
+id = "deny-unknown-actions"
+effect = "deny"
+kind = "unknown"
+
+[[rules]]
+id = "deny-external-actions"
+effect = "deny"
+kind = "external"
+
+[[rules]]
+id = "deny-mcp-actions"
+effect = "deny"
+kind = "mcp"
+
+[[rules]]
+id = "ask-before-network"
+effect = "ask"
+kind = "network"
+
+[[rules]]
+id = "ask-before-network-commands"
+effect = "ask"
+risk_tag = "network_access"
+
+[[rules]]
+id = "ask-before-compound-commands"
+effect = "ask"
+risk_tag = "compound_command"
+
+[[rules]]
+id = "ask-before-installs"
+effect = "ask"
+risk_tag = "dependency_install"
+
+[[rules]]
+id = "allow-offline-builds-and-tests"
+effect = "allow"
+risk_tag = "offline_build_or_test"
+
+[[rules]]
+id = "allow-worktree-reads"
+effect = "allow"
+kind = "file_read"
+
+[[rules]]
+id = "allow-worktree-writes"
+effect = "allow"
+kind = "file_write"

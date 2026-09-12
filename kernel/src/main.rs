@@ -8,6 +8,7 @@ pub mod events;
 pub mod folders;
 mod gateway;
 mod gateways;
+mod guard_policy;
 mod guard_protocol;
 mod mcp;
 mod mcp_governance;
@@ -35,10 +36,25 @@ use tokio::sync::Mutex;
 
 use config::Config;
 use cron::CronEngine;
+use guard_policy::{GuardPolicy, PolicyEffect};
 use mcp_registry::McpRegistry;
 use memory::MemoryEngine;
 use scheduler::TaskScheduler;
 use watchdog::WatchdogEngine;
+
+fn load_guard_policy(config: &Config) -> anyhow::Result<GuardPolicy> {
+    let path = std::path::Path::new("kerna.policy.toml");
+    if path.exists() {
+        return GuardPolicy::load(path).map_err(anyhow::Error::from);
+    }
+    if config.permissions.is_empty() {
+        return Ok(GuardPolicy::balanced());
+    }
+    Ok(GuardPolicy::from_legacy_permissions(
+        &config.permissions,
+        PolicyEffect::Deny,
+    ))
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "kerna")]
@@ -1122,6 +1138,7 @@ async fn main() -> Result<()> {
             }
             let state = server::AppState {
                 config: config.clone(),
+                guard_policy: Arc::new(load_guard_policy(&config)?),
                 memory: memory.clone(),
                 mcp_registry: mcp_registry.clone(),
                 auth_token: token,
@@ -1134,6 +1151,7 @@ async fn main() -> Result<()> {
         Some(Commands::Dashboard { port, no_open, .. }) => {
             let state = server::AppState {
                 config: config.clone(),
+                guard_policy: Arc::new(load_guard_policy(&config)?),
                 memory: memory.clone(),
                 mcp_registry: mcp_registry.clone(),
                 auth_token: None,

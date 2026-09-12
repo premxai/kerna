@@ -3,10 +3,12 @@
 //! This module deliberately makes no policy decision. It preserves every upstream SSE
 //! byte while also emitting complete action candidates for the policy/approval layer.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Protocol {
     AnthropicMessages,
     OpenAiResponses,

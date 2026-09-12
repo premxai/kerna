@@ -1,7 +1,7 @@
 use crate::config::Config;
+use crate::guard_policy::{ActionIntent, AgentKind, GuardPolicy, PolicyEffect};
 use crate::mcp_registry::McpRegistry;
 use crate::memory::MemoryEngine;
-use crate::permissions::{PermissionLevel, PermissionManager};
 use crate::scheduler::TaskScheduler;
 use axum::{
     body::{Body, Bytes},
@@ -26,6 +26,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct AppState {
     pub config: Config,
+    pub guard_policy: Arc<GuardPolicy>,
     pub memory: Arc<MemoryEngine>,
     pub mcp_registry: Arc<Mutex<McpRegistry>>,
     /// When set, requests must present `Authorization: Bearer <token>`.
@@ -147,7 +148,7 @@ async fn handle_guard_anthropic(
         }
     }
     match request.send().await {
-        Ok(upstream) => relay_anthropic(upstream, state.config, state.memory),
+        Ok(upstream) => relay_anthropic(upstream, state.guard_policy, state.memory),
         Err(_) => error_response(
             StatusCode::BAD_GATEWAY,
             "Anthropic upstream is unavailable.",
@@ -185,7 +186,7 @@ async fn handle_guard_openai(
         .bearer_auth(key)
         .body(body);
     match request.send().await {
-        Ok(upstream) => relay_openai(upstream, state.config, state.memory),
+        Ok(upstream) => relay_openai(upstream, state.guard_policy, state.memory),
         Err(_) => error_response(StatusCode::BAD_GATEWAY, "OpenAI upstream is unavailable."),
     }
 }
@@ -213,13 +214,13 @@ fn upstream_response(
 
 fn relay_anthropic(
     mut upstream: reqwest::Response,
-    config: Config,
+    policy: Arc<GuardPolicy>,
     memory: Arc<MemoryEngine>,
 ) -> axum::response::Response {
     let status = upstream.status();
     let stream = async_stream::stream! {
         let mut gate = crate::guard_protocol::AnthropicStreamGate::new(move |action| {
-            stream_policy_decision(&config, action)
+            stream_policy_decision(&policy, action)
         });
         'relay: loop {
             match upstream.chunk().await {
@@ -251,13 +252,13 @@ fn relay_anthropic(
 
 fn relay_openai(
     mut upstream: reqwest::Response,
-    config: Config,
+    policy: Arc<GuardPolicy>,
     memory: Arc<MemoryEngine>,
 ) -> axum::response::Response {
     let status = upstream.status();
     let stream = async_stream::stream! {
         let mut gate = crate::guard_protocol::OpenAiResponsesStreamGate::new(move |action| {
-            stream_policy_decision(&config, action)
+            stream_policy_decision(&policy, action)
         });
         'relay: loop {
             match upstream.chunk().await {
@@ -288,16 +289,16 @@ fn relay_openai(
 }
 
 fn stream_policy_decision(
-    config: &Config,
+    policy: &GuardPolicy,
     action: &crate::guard_protocol::ActionCandidate,
 ) -> crate::guard_protocol::GateDecision {
     let smoke_allow = std::env::var("KERNA_WP0_ALLOW_SMOKE_ECHO").ok().as_deref() == Some("1");
     let smoke_hold = std::env::var("KERNA_WP0_HOLD_SMOKE_ECHO").ok().as_deref() == Some("1");
-    stream_policy_decision_with_smoke(config, action, smoke_allow, smoke_hold)
+    stream_policy_decision_with_smoke(policy, action, smoke_allow, smoke_hold)
 }
 
 fn stream_policy_decision_with_smoke(
-    config: &Config,
+    policy: &GuardPolicy,
     action: &crate::guard_protocol::ActionCandidate,
     smoke_allow: bool,
     smoke_hold: bool,
@@ -314,13 +315,15 @@ fn stream_policy_decision_with_smoke(
     if smoke_hold && smoke_command == Some("echo KERNA_ASK_TEST") {
         return crate::guard_protocol::GateDecision::Hold;
     }
-    match PermissionManager::new(config.clone())
-        .decide(&action.raw_tool_name, None)
-        .effective
-    {
-        PermissionLevel::AutoApprove => crate::guard_protocol::GateDecision::Allow,
-        PermissionLevel::RequireConfirmation => crate::guard_protocol::GateDecision::Hold,
-        PermissionLevel::Deny => crate::guard_protocol::GateDecision::Deny {
+    let agent = match action.protocol {
+        crate::guard_protocol::Protocol::AnthropicMessages => AgentKind::ClaudeCode,
+        crate::guard_protocol::Protocol::OpenAiResponses => AgentKind::Codex,
+    };
+    let intent = ActionIntent::from_candidate(action, "wp0-stream", agent, "unbound");
+    match policy.evaluate(&intent).effect {
+        PolicyEffect::Allow => crate::guard_protocol::GateDecision::Allow,
+        PolicyEffect::Ask => crate::guard_protocol::GateDecision::Hold,
+        PolicyEffect::Deny => crate::guard_protocol::GateDecision::Deny {
             reason: "denied by Kerna policy".to_owned(),
         },
     }
@@ -827,6 +830,7 @@ mod tests {
         let state = DashboardState {
             app: AppState {
                 config: Config::default(),
+                guard_policy: Arc::new(GuardPolicy::balanced()),
                 memory,
                 mcp_registry: Arc::new(Mutex::new(McpRegistry::new())),
                 auth_token: None,
@@ -846,6 +850,7 @@ mod tests {
         let state = DashboardState {
             app: AppState {
                 config: Config::default(),
+                guard_policy: Arc::new(GuardPolicy::balanced()),
                 memory: Arc::new(MemoryEngine::new(":memory:").unwrap()),
                 mcp_registry: Arc::new(Mutex::new(McpRegistry::new())),
                 auth_token: None,
@@ -885,8 +890,9 @@ mod tests {
             raw_tool_name: "Bash".to_owned(),
             arguments: serde_json::json!({"command": "echo KERNA_ALLOW_TEST"}),
         };
+        let mut policy = GuardPolicy::from_legacy_permissions(&[], PolicyEffect::Deny);
         assert!(matches!(
-            stream_policy_decision(&Config::default(), &action),
+            stream_policy_decision(&policy, &action),
             crate::guard_protocol::GateDecision::Deny { .. }
         ));
 
@@ -895,20 +901,22 @@ mod tests {
             tool: "Bash".to_owned(),
             action: "auto_approve".to_owned(),
         });
+        policy = GuardPolicy::from_legacy_permissions(&config.permissions, PolicyEffect::Deny);
         assert_eq!(
-            stream_policy_decision(&config, &action),
+            stream_policy_decision(&policy, &action),
             crate::guard_protocol::GateDecision::Allow
         );
         config.permissions[0].action = "require_confirmation".to_owned();
+        policy = GuardPolicy::from_legacy_permissions(&config.permissions, PolicyEffect::Deny);
         assert_eq!(
-            stream_policy_decision(&config, &action),
+            stream_policy_decision(&policy, &action),
             crate::guard_protocol::GateDecision::Hold
         );
     }
 
     #[test]
     fn wp0_smoke_allow_releases_only_the_inert_exact_command() {
-        let config = Config::default();
+        let policy = GuardPolicy::from_legacy_permissions(&[], PolicyEffect::Deny);
         let mut action = crate::guard_protocol::ActionCandidate {
             protocol: crate::guard_protocol::Protocol::AnthropicMessages,
             id: "toolu_test".to_owned(),
@@ -916,18 +924,18 @@ mod tests {
             arguments: serde_json::json!({"command": "echo KERNA_ALLOW_TEST"}),
         };
         assert_eq!(
-            stream_policy_decision_with_smoke(&config, &action, true, false),
+            stream_policy_decision_with_smoke(&policy, &action, true, false),
             crate::guard_protocol::GateDecision::Allow
         );
         action.arguments = serde_json::json!({"command": "echo KERNA_DENY_TEST"});
         assert!(matches!(
-            stream_policy_decision_with_smoke(&config, &action, true, false),
+            stream_policy_decision_with_smoke(&policy, &action, true, false),
             crate::guard_protocol::GateDecision::Deny { .. }
         ));
         action.raw_tool_name = "Write".to_owned();
         action.arguments = serde_json::json!({"command": "echo KERNA_ALLOW_TEST"});
         assert!(matches!(
-            stream_policy_decision_with_smoke(&config, &action, true, false),
+            stream_policy_decision_with_smoke(&policy, &action, true, false),
             crate::guard_protocol::GateDecision::Deny { .. }
         ));
 
@@ -935,25 +943,25 @@ mod tests {
         action.raw_tool_name = "exec_command".to_owned();
         action.arguments = serde_json::json!({"cmd": "echo KERNA_ALLOW_TEST"});
         assert_eq!(
-            stream_policy_decision_with_smoke(&config, &action, true, false),
+            stream_policy_decision_with_smoke(&policy, &action, true, false),
             crate::guard_protocol::GateDecision::Allow
         );
         action.arguments = serde_json::json!({"cmd": "echo KERNA_DENY_TEST"});
         assert!(matches!(
-            stream_policy_decision_with_smoke(&config, &action, true, false),
+            stream_policy_decision_with_smoke(&policy, &action, true, false),
             crate::guard_protocol::GateDecision::Deny { .. }
         ));
         action.raw_tool_name = "apply_patch".to_owned();
         action.arguments = serde_json::Value::String("echo KERNA_ALLOW_TEST".to_owned());
         assert!(matches!(
-            stream_policy_decision_with_smoke(&config, &action, true, false),
+            stream_policy_decision_with_smoke(&policy, &action, true, false),
             crate::guard_protocol::GateDecision::Deny { .. }
         ));
     }
 
     #[test]
     fn wp0_smoke_hold_matches_only_the_inert_approval_command() {
-        let config = Config::default();
+        let policy = GuardPolicy::from_legacy_permissions(&[], PolicyEffect::Deny);
         let mut action = crate::guard_protocol::ActionCandidate {
             protocol: crate::guard_protocol::Protocol::AnthropicMessages,
             id: "toolu_test".to_owned(),
@@ -961,12 +969,12 @@ mod tests {
             arguments: serde_json::json!({"command": "echo KERNA_ASK_TEST"}),
         };
         assert_eq!(
-            stream_policy_decision_with_smoke(&config, &action, false, true),
+            stream_policy_decision_with_smoke(&policy, &action, false, true),
             crate::guard_protocol::GateDecision::Hold
         );
         action.arguments = serde_json::json!({"command": "echo KERNA_ALLOW_TEST"});
         assert!(matches!(
-            stream_policy_decision_with_smoke(&config, &action, false, true),
+            stream_policy_decision_with_smoke(&policy, &action, false, true),
             crate::guard_protocol::GateDecision::Deny { .. }
         ));
 
@@ -974,12 +982,12 @@ mod tests {
         action.raw_tool_name = "exec_command".to_owned();
         action.arguments = serde_json::json!({"cmd": "echo KERNA_ASK_TEST"});
         assert_eq!(
-            stream_policy_decision_with_smoke(&config, &action, false, true),
+            stream_policy_decision_with_smoke(&policy, &action, false, true),
             crate::guard_protocol::GateDecision::Hold
         );
         action.arguments = serde_json::json!({"cmd": "echo KERNA_ALLOW_TEST"});
         assert!(matches!(
-            stream_policy_decision_with_smoke(&config, &action, false, true),
+            stream_policy_decision_with_smoke(&policy, &action, false, true),
             crate::guard_protocol::GateDecision::Deny { .. }
         ));
     }
