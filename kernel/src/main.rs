@@ -8,6 +8,7 @@ pub mod events;
 pub mod folders;
 mod gateway;
 mod gateways;
+mod guard_protocol;
 mod mcp;
 mod mcp_governance;
 mod mcp_registry;
