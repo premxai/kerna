@@ -62,7 +62,14 @@ impl SseDecoder {
         if self.pending.is_empty() {
             return Ok(None);
         }
-        if self.pending.iter().all(u8::is_ascii_whitespace) {
+        if self.pending.iter().all(u8::is_ascii_whitespace)
+            || std::str::from_utf8(&self.pending)
+                .map(|tail| {
+                    tail.lines()
+                        .all(|line| line.is_empty() || line.starts_with(':'))
+                })
+                .unwrap_or(false)
+        {
             return Ok(Some(std::mem::take(&mut self.pending)));
         }
         Err(ProtocolError::TruncatedFrame)
@@ -825,21 +832,17 @@ mod tests {
     }
 
     #[test]
-    fn openai_fixture_extracts_function_shell_and_patch_actions() {
+    fn openai_fixture_extracts_current_codex_function_and_custom_actions() {
         let actions = parse_every_boundary(Protocol::OpenAiResponses, OPENAI);
         assert_eq!(
             actions
                 .iter()
                 .map(|a| a.raw_tool_name.as_str())
                 .collect::<Vec<_>>(),
-            ["read_file", "shell", "apply_patch"]
+            ["exec_command", "write_stdin", "apply_patch"]
         );
-        assert_eq!(actions[0].arguments["path"], "src/lib.rs");
-        assert!(actions[1]
-            .arguments
-            .as_str()
-            .unwrap()
-            .contains("cargo test"));
+        assert_eq!(actions[0].arguments["cmd"], "echo KERNA_ALLOW_TEST");
+        assert_eq!(actions[1].arguments["session_id"], 123);
         assert!(actions[2]
             .arguments
             .as_str()
@@ -1065,8 +1068,8 @@ mod tests {
         .unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("I will inspect and test the project."));
-        assert!(text.contains("[blocked by Kerna policy] read_file was not released"));
-        assert!(text.contains("[blocked by Kerna policy] shell was not released"));
+        assert!(text.contains("[blocked by Kerna policy] exec_command was not released"));
+        assert!(text.contains("[blocked by Kerna policy] write_stdin was not released"));
         assert!(text.contains("[blocked by Kerna policy] apply_patch was not released"));
         assert!(!text.contains("\"type\":\"function_call\""));
         assert!(!text.contains("\"type\":\"custom_tool_call\""));
@@ -1102,7 +1105,10 @@ mod tests {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        assert_eq!(gate.pending_approval().unwrap().raw_tool_name, "read_file");
+        assert_eq!(
+            gate.pending_approval().unwrap().raw_tool_name,
+            "exec_command"
+        );
         assert!(!String::from_utf8_lossy(&initial).contains("\"type\":\"function_call\""));
 
         let released = gate
@@ -1135,7 +1141,10 @@ mod tests {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        assert_eq!(gate.pending_approval().unwrap().raw_tool_name, "read_file");
+        assert_eq!(
+            gate.pending_approval().unwrap().raw_tool_name,
+            "exec_command"
+        );
         let resumed = gate
             .resolve_pending(GateDecision::Deny {
                 reason: "requires approval".to_owned(),

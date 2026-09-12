@@ -302,20 +302,16 @@ fn stream_policy_decision_with_smoke(
     smoke_allow: bool,
     smoke_hold: bool,
 ) -> crate::guard_protocol::GateDecision {
+    let smoke_command = wp0_smoke_command(action);
     // WP0 can prove a real client release without granting a broadly dangerous
-    // name-only `Bash` rule. The opt-in is broker-local and matches one inert command.
-    if smoke_allow
-        && action.raw_tool_name == "Bash"
-        && action.arguments["command"] == "echo KERNA_ALLOW_TEST"
-    {
+    // name-only rule. The opt-in is broker-local and matches one inert command
+    // in either pinned client's wire representation.
+    if smoke_allow && smoke_command == Some("echo KERNA_ALLOW_TEST") {
         return crate::guard_protocol::GateDecision::Allow;
     }
     // This equally narrow opt-in exercises a live dashboard approval without
     // turning a tool-name rule into permission for arbitrary shell commands.
-    if smoke_hold
-        && action.raw_tool_name == "Bash"
-        && action.arguments["command"] == "echo KERNA_ASK_TEST"
-    {
+    if smoke_hold && smoke_command == Some("echo KERNA_ASK_TEST") {
         return crate::guard_protocol::GateDecision::Hold;
     }
     match PermissionManager::new(config.clone())
@@ -327,6 +323,19 @@ fn stream_policy_decision_with_smoke(
         PermissionLevel::Deny => crate::guard_protocol::GateDecision::Deny {
             reason: "denied by Kerna policy".to_owned(),
         },
+    }
+}
+
+fn wp0_smoke_command(action: &crate::guard_protocol::ActionCandidate) -> Option<&str> {
+    match (action.protocol, action.raw_tool_name.as_str()) {
+        (crate::guard_protocol::Protocol::AnthropicMessages, "Bash") => {
+            action.arguments.get("command")?.as_str()
+        }
+        (crate::guard_protocol::Protocol::OpenAiResponses, "exec_command") => {
+            action.arguments.get("cmd")?.as_str()
+        }
+        (crate::guard_protocol::Protocol::OpenAiResponses, "shell") => action.arguments.as_str(),
+        _ => None,
     }
 }
 
@@ -921,6 +930,25 @@ mod tests {
             stream_policy_decision_with_smoke(&config, &action, true, false),
             crate::guard_protocol::GateDecision::Deny { .. }
         ));
+
+        action.protocol = crate::guard_protocol::Protocol::OpenAiResponses;
+        action.raw_tool_name = "exec_command".to_owned();
+        action.arguments = serde_json::json!({"cmd": "echo KERNA_ALLOW_TEST"});
+        assert_eq!(
+            stream_policy_decision_with_smoke(&config, &action, true, false),
+            crate::guard_protocol::GateDecision::Allow
+        );
+        action.arguments = serde_json::json!({"cmd": "echo KERNA_DENY_TEST"});
+        assert!(matches!(
+            stream_policy_decision_with_smoke(&config, &action, true, false),
+            crate::guard_protocol::GateDecision::Deny { .. }
+        ));
+        action.raw_tool_name = "apply_patch".to_owned();
+        action.arguments = serde_json::Value::String("echo KERNA_ALLOW_TEST".to_owned());
+        assert!(matches!(
+            stream_policy_decision_with_smoke(&config, &action, true, false),
+            crate::guard_protocol::GateDecision::Deny { .. }
+        ));
     }
 
     #[test]
@@ -937,6 +965,19 @@ mod tests {
             crate::guard_protocol::GateDecision::Hold
         );
         action.arguments = serde_json::json!({"command": "echo KERNA_ALLOW_TEST"});
+        assert!(matches!(
+            stream_policy_decision_with_smoke(&config, &action, false, true),
+            crate::guard_protocol::GateDecision::Deny { .. }
+        ));
+
+        action.protocol = crate::guard_protocol::Protocol::OpenAiResponses;
+        action.raw_tool_name = "exec_command".to_owned();
+        action.arguments = serde_json::json!({"cmd": "echo KERNA_ASK_TEST"});
+        assert_eq!(
+            stream_policy_decision_with_smoke(&config, &action, false, true),
+            crate::guard_protocol::GateDecision::Hold
+        );
+        action.arguments = serde_json::json!({"cmd": "echo KERNA_ALLOW_TEST"});
         assert!(matches!(
             stream_policy_decision_with_smoke(&config, &action, false, true),
             crate::guard_protocol::GateDecision::Deny { .. }
