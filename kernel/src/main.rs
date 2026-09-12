@@ -1141,6 +1141,7 @@ async fn main() -> Result<()> {
                 guard_policy: Arc::new(load_guard_policy(&config)?),
                 memory: memory.clone(),
                 mcp_registry: mcp_registry.clone(),
+                worktree_baseline: server::capture_worktree_baseline()?,
                 auth_token: token,
             };
             if let Err(e) = server::start_server(state, &bind, port).await {
@@ -1154,6 +1155,7 @@ async fn main() -> Result<()> {
                 guard_policy: Arc::new(load_guard_policy(&config)?),
                 memory: memory.clone(),
                 mcp_registry: mcp_registry.clone(),
+                worktree_baseline: server::capture_worktree_baseline()?,
                 auth_token: None,
             };
             if let Err(e) = server::start_dashboard_server(state, port, !no_open).await {

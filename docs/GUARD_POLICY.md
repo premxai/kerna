@@ -40,6 +40,14 @@ The balanced classifier asks before shell network clients, compound shell expres
 installation, destructive commands, or new network domains. It recognizes only a small set of
 offline build, test, inspection, and repository-status commands as automatically releasable.
 
+For Claude Code's Anthropic Messages path, the broker captures a SHA-256 digest of the starting
+Git repository/worktree state when `kerna serve` starts. That trusted digest is reused for every
+Claude action binding; `KERNA_WORKTREE_BASELINE` is not accepted as an override. The server refuses
+to start the guarded protocol path when the launch directory is not inside a Git repository.
+Claude approvals expire after five minutes and are committed as one-time receipt events before
+held protocol bytes can be released. A later `tool_result` records only `result_observed`; its
+content is not persisted.
+
 ## Built-in safety floor
 
 Policy cannot allow access to known secret paths, the Docker control plane, or parent-path host

@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -30,6 +31,9 @@ pub struct AppState {
     pub guard_policy: Arc<GuardPolicy>,
     pub memory: Arc<MemoryEngine>,
     pub mcp_registry: Arc<Mutex<McpRegistry>>,
+    /// Hashed repository/worktree state captured by the trusted broker at startup.
+    /// Agent-controlled environment variables must not be able to redefine it.
+    pub worktree_baseline: String,
     /// When set, requests must present `Authorization: Bearer <token>`.
     pub auth_token: Option<String>,
 }
@@ -220,6 +224,79 @@ fn provider_url(base: &str, path: &str) -> String {
     format!("{}/{}", base.trim_end_matches('/'), path)
 }
 
+/// Capture only a digest of the broker's starting Git/worktree state. The raw Git
+/// output is transient and is never written to the database or returned to the
+/// client. A missing Git repository is a startup error for the guarded protocol
+/// server because approvals must not carry an unbound baseline.
+pub fn capture_worktree_baseline() -> anyhow::Result<String> {
+    let workspace = std::env::current_dir()?.canonicalize()?;
+    let repo_root = git_output(&workspace, &["rev-parse", "--show-toplevel"])?;
+    let head = git_output(&workspace, &["rev-parse", "HEAD"])?;
+    let index_diff = git_output(
+        &workspace,
+        &["diff", "--binary", "--no-ext-diff", "--cached", "--", "."],
+    )?;
+    let worktree_diff = git_output(
+        &workspace,
+        &["diff", "--binary", "--no-ext-diff", "--", "."],
+    )?;
+    let status = git_output(
+        &workspace,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            ".",
+        ],
+    )?;
+    Ok(worktree_baseline_digest(
+        &workspace,
+        &repo_root,
+        &head,
+        &index_diff,
+        &worktree_diff,
+        &status,
+    ))
+}
+
+fn worktree_baseline_digest(
+    workspace: &std::path::Path,
+    repo_root: &str,
+    head: &str,
+    index_diff: &str,
+    worktree_diff: &str,
+    status: &str,
+) -> String {
+    let material = json!({
+        "workspace": workspace.to_string_lossy(),
+        "repo_root": repo_root,
+        "head": head,
+        "index_diff": index_diff,
+        "worktree_diff": worktree_diff,
+        "status": status,
+    });
+    format!(
+        "sha256:{:x}",
+        Sha256::digest(serde_json::to_vec(&material).expect("baseline material is serializable"))
+    )
+}
+
+fn git_output(workspace: &std::path::Path, args: &[&str]) -> anyhow::Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "git {} failed with status {}",
+            args.join(" "),
+            output.status
+        ));
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
 fn start_guard_stream(
     state: &AppState,
     agent: AgentKind,
@@ -237,8 +314,7 @@ fn start_guard_stream(
     };
     let agent_version =
         std::env::var("KERNA_GUARD_AGENT_VERSION").unwrap_or_else(|_| "unknown".to_owned());
-    let worktree_baseline =
-        std::env::var("KERNA_WORKTREE_BASELINE").unwrap_or_else(|_| "unbound".to_owned());
+    let worktree_baseline = state.worktree_baseline.clone();
     state
         .memory
         .create_task(task_id, Some(&session_id), "Kerna Guard protocol session")
@@ -1128,6 +1204,7 @@ mod tests {
                 guard_policy: Arc::new(GuardPolicy::balanced()),
                 memory,
                 mcp_registry: Arc::new(Mutex::new(McpRegistry::new())),
+                worktree_baseline: "sha256:test-baseline".to_owned(),
                 auth_token: None,
             },
             csrf_token: "csrf".to_string(),
@@ -1148,6 +1225,7 @@ mod tests {
                 guard_policy: Arc::new(GuardPolicy::balanced()),
                 memory: Arc::new(MemoryEngine::new(":memory:").unwrap()),
                 mcp_registry: Arc::new(Mutex::new(McpRegistry::new())),
+                worktree_baseline: "sha256:test-baseline".to_owned(),
                 auth_token: None,
             },
             csrf_token: "one-time-token".to_string(),
@@ -1175,6 +1253,18 @@ mod tests {
             provider_url("http://127.0.0.1:8081/v1/", "responses"),
             "http://127.0.0.1:8081/v1/responses"
         );
+    }
+
+    #[test]
+    fn worktree_baseline_digest_is_nonempty_and_state_bound() {
+        let root = std::path::Path::new("C:/workspace");
+        let baseline = worktree_baseline_digest(root, "C:/workspace", "abc123", "", "", "");
+        let changed =
+            worktree_baseline_digest(root, "C:/workspace", "abc123", "", "", " M src/main.rs");
+        assert!(baseline.starts_with("sha256:"));
+        assert_eq!(baseline.len(), "sha256:".len() + 64);
+        assert_ne!(baseline, "sha256:unbound");
+        assert_ne!(baseline, changed);
     }
 
     #[test]
