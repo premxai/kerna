@@ -4,7 +4,7 @@ WP0 remains in progress. These are the locally available clients, not yet a supp
 
 | Client | Version | Intended launch seam | Live gate status |
 |---|---:|---|---|
-| Claude Code | 2.1.251 | `ANTHROPIC_BASE_URL` to `/anthropic` | Text, deny, and a narrowly bounded allow exercised; dashboard hold/release pending live validation |
+| Claude Code | 2.1.251 | `ANTHROPIC_BASE_URL` to `/anthropic` | Text, deny, bounded allow, and dashboard hold/release exercised |
 | Codex CLI | 0.154.0-alpha.6.2 | isolated `CODEX_HOME`, custom provider with `wire_api = "responses"` | Not yet exercised against the Rust broker |
 
 The fixtures under `kernel/tests/fixtures` are redacted protocol-development fixtures. They are
