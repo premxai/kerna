@@ -4,7 +4,7 @@
 //! byte while also emitting complete action candidates for the policy/approval layer.
 
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Protocol {
@@ -101,7 +101,7 @@ fn parse_frame(raw: Vec<u8>) -> Result<Frame, ProtocolError> {
     Ok(Frame { raw, event, data })
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct PendingAction {
     id: String,
     name: String,
@@ -307,6 +307,458 @@ fn complete_action(
     })
 }
 
+/// The decision supplied by the broker after an action's complete arguments are known.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GateDecision {
+    Allow,
+    Deny { reason: String },
+    Hold,
+}
+
+struct HeldAnthropicAction {
+    action: PendingAction,
+    raw: Vec<Vec<u8>>,
+}
+
+/// A byte-preserving Anthropic Messages stream gate.
+///
+/// Ordinary frames leave immediately. `tool_use` frames are held only until their final
+/// `content_block_stop`, when the caller can make a decision with complete arguments.
+/// A denial is a valid text replacement and changes `stop_reason: tool_use` to `end_turn`.
+pub struct AnthropicStreamGate<D> {
+    decoder: SseDecoder,
+    pending: HashMap<u64, HeldAnthropicAction>,
+    approval: Option<(u64, HeldAnthropicAction, ActionCandidate)>,
+    deferred: Vec<Frame>,
+    decide: D,
+    denied_this_turn: bool,
+}
+
+impl<D> AnthropicStreamGate<D>
+where
+    D: FnMut(&ActionCandidate) -> GateDecision,
+{
+    pub fn new(decide: D) -> Self {
+        Self {
+            decoder: SseDecoder::default(),
+            pending: HashMap::new(),
+            approval: None,
+            deferred: Vec::new(),
+            decide,
+            denied_this_turn: false,
+        }
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, ProtocolError> {
+        let frames = self.decoder.feed(bytes)?;
+        if self.approval.is_some() {
+            self.deferred.extend(frames);
+            return Ok(Vec::new());
+        }
+        self.process_frames(frames)
+    }
+
+    pub fn pending_approval(&self) -> Option<&ActionCandidate> {
+        self.approval.as_ref().map(|(_, _, action)| action)
+    }
+
+    pub fn resolve_pending(
+        &mut self,
+        decision: GateDecision,
+    ) -> Result<Vec<Vec<u8>>, ProtocolError> {
+        let (index, held, candidate) = self
+            .approval
+            .take()
+            .ok_or(ProtocolError::MalformedAction("no approval is pending"))?;
+        let mut output = match decision {
+            GateDecision::Allow => held.raw,
+            GateDecision::Deny { reason } => {
+                self.denied_this_turn = true;
+                anthropic_denial(index, &candidate.raw_tool_name, &reason)
+            }
+            GateDecision::Hold => {
+                self.approval = Some((index, held, candidate));
+                return Err(ProtocolError::MalformedAction(
+                    "approval must resolve to allow or deny",
+                ));
+            }
+        };
+        let deferred = std::mem::take(&mut self.deferred);
+        output.extend(self.process_frames(deferred)?);
+        Ok(output)
+    }
+
+    fn process_frames(&mut self, frames: Vec<Frame>) -> Result<Vec<Vec<u8>>, ProtocolError> {
+        let mut output = Vec::new();
+        let mut frames = frames.into_iter();
+        while let Some(frame) = frames.next() {
+            let Some(data) = &frame.data else {
+                output.push(frame.raw);
+                continue;
+            };
+            match frame.event.as_deref() {
+                Some("content_block_start") if data["content_block"]["type"] == "tool_use" => {
+                    let index = required_u64(data, "index")?;
+                    let block = &data["content_block"];
+                    self.pending.insert(
+                        index,
+                        HeldAnthropicAction {
+                            action: PendingAction {
+                                id: required_str(block, "id")?.to_owned(),
+                                name: required_str(block, "name")?.to_owned(),
+                                input: String::new(),
+                                custom: false,
+                            },
+                            raw: vec![frame.raw],
+                        },
+                    );
+                }
+                Some("content_block_start")
+                    if data["content_block"]["type"] == "server_tool_use" =>
+                {
+                    return Err(ProtocolError::UnknownActionType(
+                        "server_tool_use".to_owned(),
+                    ));
+                }
+                Some("content_block_delta") => {
+                    let index = required_u64(data, "index")?;
+                    if let Some(held) = self.pending.get_mut(&index) {
+                        if data["delta"]["type"] != "input_json_delta" {
+                            return Err(ProtocolError::MalformedAction(
+                                "unexpected Anthropic tool delta",
+                            ));
+                        }
+                        held.action
+                            .input
+                            .push_str(required_str(&data["delta"], "partial_json")?);
+                        held.raw.push(frame.raw);
+                    } else {
+                        output.push(frame.raw);
+                    }
+                }
+                Some("content_block_stop") => {
+                    let index = required_u64(data, "index")?;
+                    if let Some(mut held) = self.pending.remove(&index) {
+                        held.raw.push(frame.raw);
+                        let candidate =
+                            complete_action(Protocol::AnthropicMessages, held.action.clone())?;
+                        match (self.decide)(&candidate) {
+                            GateDecision::Allow => output.extend(held.raw),
+                            GateDecision::Deny { reason } => {
+                                self.denied_this_turn = true;
+                                output.extend(anthropic_denial(
+                                    index,
+                                    &candidate.raw_tool_name,
+                                    &reason,
+                                ));
+                            }
+                            GateDecision::Hold => {
+                                self.approval = Some((index, held, candidate));
+                                self.deferred.extend(frames);
+                                break;
+                            }
+                        }
+                    } else {
+                        output.push(frame.raw);
+                    }
+                }
+                Some("message_delta")
+                    if self.denied_this_turn && data["delta"]["stop_reason"] == "tool_use" =>
+                {
+                    let mut rewritten = data.clone();
+                    rewritten["delta"]["stop_reason"] = Value::String("end_turn".to_owned());
+                    output.push(sse("message_delta", &rewritten));
+                }
+                Some("message_stop") => {
+                    self.denied_this_turn = false;
+                    output.push(frame.raw);
+                }
+                _ => output.push(frame.raw),
+            }
+        }
+        Ok(output)
+    }
+
+    pub fn finish(&mut self) -> Result<Vec<Vec<u8>>, ProtocolError> {
+        if self.approval.is_some() || !self.pending.is_empty() {
+            return Err(ProtocolError::TruncatedAction);
+        }
+        self.decoder
+            .finish()?
+            .map_or_else(|| Ok(Vec::new()), |tail| Ok(vec![tail]))
+    }
+}
+
+fn sse(event: &str, data: &Value) -> Vec<u8> {
+    format!(
+        "event: {event}\ndata: {}\n\n",
+        serde_json::to_string(data).expect("JSON value")
+    )
+    .into_bytes()
+}
+
+fn anthropic_denial(index: u64, tool: &str, reason: &str) -> Vec<Vec<u8>> {
+    let message = format!("[blocked by Kerna policy] {tool} was not released: {reason}");
+    vec![
+        sse(
+            "content_block_start",
+            &serde_json::json!({
+                "type": "content_block_start", "index": index,
+                "content_block": {"type": "text", "text": ""}
+            }),
+        ),
+        sse(
+            "content_block_delta",
+            &serde_json::json!({
+                "type": "content_block_delta", "index": index,
+                "delta": {"type": "text_delta", "text": message}
+            }),
+        ),
+        sse(
+            "content_block_stop",
+            &serde_json::json!({"type": "content_block_stop", "index": index}),
+        ),
+    ]
+}
+
+struct HeldOpenAiAction {
+    action: PendingAction,
+    raw: Vec<Vec<u8>>,
+}
+
+/// A byte-preserving OpenAI Responses stream gate for function and custom tool calls.
+///
+/// Tool frames remain buffered until their complete arguments arrive. A denied call is
+/// replaced with a normal assistant message item, so no executable call reaches Codex.
+pub struct OpenAiResponsesStreamGate<D> {
+    decoder: SseDecoder,
+    pending: HashMap<u64, HeldOpenAiAction>,
+    approval: Option<(u64, HeldOpenAiAction, ActionCandidate)>,
+    deferred: Vec<Frame>,
+    denied_indexes: HashSet<u64>,
+    decide: D,
+}
+
+impl<D> OpenAiResponsesStreamGate<D>
+where
+    D: FnMut(&ActionCandidate) -> GateDecision,
+{
+    pub fn new(decide: D) -> Self {
+        Self {
+            decoder: SseDecoder::default(),
+            pending: HashMap::new(),
+            approval: None,
+            deferred: Vec::new(),
+            denied_indexes: HashSet::new(),
+            decide,
+        }
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, ProtocolError> {
+        let frames = self.decoder.feed(bytes)?;
+        if self.approval.is_some() {
+            self.deferred.extend(frames);
+            return Ok(Vec::new());
+        }
+        self.process_frames(frames)
+    }
+
+    pub fn pending_approval(&self) -> Option<&ActionCandidate> {
+        self.approval.as_ref().map(|(_, _, action)| action)
+    }
+
+    pub fn resolve_pending(
+        &mut self,
+        decision: GateDecision,
+    ) -> Result<Vec<Vec<u8>>, ProtocolError> {
+        let (index, held, candidate) = self
+            .approval
+            .take()
+            .ok_or(ProtocolError::MalformedAction("no approval is pending"))?;
+        let mut output = match decision {
+            GateDecision::Allow => held.raw,
+            GateDecision::Deny { reason } => {
+                self.denied_indexes.insert(index);
+                openai_denial(index, &candidate.id, &candidate.raw_tool_name, &reason)
+            }
+            GateDecision::Hold => {
+                self.approval = Some((index, held, candidate));
+                return Err(ProtocolError::MalformedAction(
+                    "approval must resolve to allow or deny",
+                ));
+            }
+        };
+        let deferred = std::mem::take(&mut self.deferred);
+        output.extend(self.process_frames(deferred)?);
+        Ok(output)
+    }
+
+    fn process_frames(&mut self, frames: Vec<Frame>) -> Result<Vec<Vec<u8>>, ProtocolError> {
+        let mut output = Vec::new();
+        let mut frames = frames.into_iter();
+        while let Some(frame) = frames.next() {
+            let Some(data) = &frame.data else {
+                output.push(frame.raw);
+                continue;
+            };
+            match frame.event.as_deref() {
+                Some("response.output_item.added") => {
+                    let item = &data["item"];
+                    let item_type = item["type"].as_str().unwrap_or_default();
+                    let custom = match item_type {
+                        "function_call" => false,
+                        "custom_tool_call" => true,
+                        "message" | "reasoning" => {
+                            output.push(frame.raw);
+                            continue;
+                        }
+                        other
+                            if other.contains("call")
+                                || other.contains("tool")
+                                || other.contains("action") =>
+                        {
+                            return Err(ProtocolError::UnknownActionType(other.to_owned()));
+                        }
+                        _ => {
+                            output.push(frame.raw);
+                            continue;
+                        }
+                    };
+                    let index = required_u64(data, "output_index")?;
+                    self.pending.insert(
+                        index,
+                        HeldOpenAiAction {
+                            action: PendingAction {
+                                id: item
+                                    .get("call_id")
+                                    .or_else(|| item.get("id"))
+                                    .and_then(Value::as_str)
+                                    .ok_or(ProtocolError::MalformedAction(
+                                        "missing OpenAI call id",
+                                    ))?
+                                    .to_owned(),
+                                name: required_str(item, "name")?.to_owned(),
+                                input: item
+                                    .get(if custom { "input" } else { "arguments" })
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                custom,
+                            },
+                            raw: vec![frame.raw],
+                        },
+                    );
+                }
+                Some("response.function_call_arguments.delta")
+                | Some("response.custom_tool_call_input.delta") => {
+                    let index = required_u64(data, "output_index")?;
+                    let held =
+                        self.pending
+                            .get_mut(&index)
+                            .ok_or(ProtocolError::MalformedAction(
+                                "OpenAI delta without action",
+                            ))?;
+                    held.action.input.push_str(required_str(data, "delta")?);
+                    held.raw.push(frame.raw);
+                }
+                Some("response.function_call_arguments.done")
+                | Some("response.custom_tool_call_input.done") => {
+                    let index = required_u64(data, "output_index")?;
+                    let mut held =
+                        self.pending
+                            .remove(&index)
+                            .ok_or(ProtocolError::MalformedAction(
+                                "OpenAI completion without action",
+                            ))?;
+                    held.raw.push(frame.raw);
+                    if let Some(input) = data
+                        .get(if held.action.custom {
+                            "input"
+                        } else {
+                            "arguments"
+                        })
+                        .and_then(Value::as_str)
+                    {
+                        held.action.input = input.to_owned();
+                    }
+                    let candidate =
+                        complete_action(Protocol::OpenAiResponses, held.action.clone())?;
+                    match (self.decide)(&candidate) {
+                        GateDecision::Allow => output.extend(held.raw),
+                        GateDecision::Deny { reason } => {
+                            self.denied_indexes.insert(index);
+                            output.extend(openai_denial(
+                                index,
+                                &candidate.id,
+                                &candidate.raw_tool_name,
+                                &reason,
+                            ));
+                        }
+                        GateDecision::Hold => {
+                            self.approval = Some((index, held, candidate));
+                            self.deferred.extend(frames);
+                            break;
+                        }
+                    }
+                }
+                Some("response.output_item.done") => {
+                    let index = required_u64(data, "output_index")?;
+                    if !self.denied_indexes.remove(&index) {
+                        output.push(frame.raw);
+                    }
+                }
+                _ => output.push(frame.raw),
+            }
+        }
+        Ok(output)
+    }
+
+    pub fn finish(&mut self) -> Result<Vec<Vec<u8>>, ProtocolError> {
+        if self.approval.is_some() || !self.pending.is_empty() {
+            return Err(ProtocolError::TruncatedAction);
+        }
+        self.decoder
+            .finish()?
+            .map_or_else(|| Ok(Vec::new()), |tail| Ok(vec![tail]))
+    }
+}
+
+fn openai_denial(index: u64, call_id: &str, tool: &str, reason: &str) -> Vec<Vec<u8>> {
+    let id = format!("kerna_denied_{call_id}");
+    let message = format!("[blocked by Kerna policy] {tool} was not released: {reason}");
+    let item = serde_json::json!({
+        "id": id, "status": "completed", "type": "message", "role": "assistant",
+        "content": [{"type": "output_text", "text": message, "annotations": []}]
+    });
+    vec![
+        sse(
+            "response.output_item.added",
+            &serde_json::json!({
+                "type": "response.output_item.added", "output_index": index,
+                "item": {"id": id, "status": "in_progress", "type": "message", "role": "assistant", "content": []}
+            }),
+        ),
+        sse(
+            "response.output_text.delta",
+            &serde_json::json!({
+                "type": "response.output_text.delta", "item_id": id, "output_index": index,
+                "content_index": 0, "delta": message
+            }),
+        ),
+        sse(
+            "response.output_text.done",
+            &serde_json::json!({
+                "type": "response.output_text.done", "item_id": id, "output_index": index,
+                "content_index": 0, "text": message
+            }),
+        ),
+        sse(
+            "response.output_item.done",
+            &serde_json::json!({"type": "response.output_item.done", "output_index": index, "item": item}),
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +851,259 @@ mod tests {
         let mut parser = ActionStreamParser::new(Protocol::OpenAiResponses);
         parser.feed(stream).unwrap();
         assert_eq!(parser.finish(), Err(ProtocolError::TruncatedAction));
+    }
+
+    fn gate_anthropic(
+        fixture: &[u8],
+        decision: GateDecision,
+        chunk_size: usize,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        let mut gate = AnthropicStreamGate::new(move |_| decision.clone());
+        let mut output = Vec::new();
+        for chunk in fixture.chunks(chunk_size) {
+            output.extend(gate.feed(chunk)?.into_iter().flatten());
+        }
+        output.extend(gate.finish()?.into_iter().flatten());
+        Ok(output)
+    }
+
+    #[test]
+    fn anthropic_gate_releases_allowed_tool_bytes_unchanged() {
+        for size in 1..=ANTHROPIC.len() {
+            assert_eq!(
+                gate_anthropic(ANTHROPIC, GateDecision::Allow, size).unwrap(),
+                ANTHROPIC,
+                "bytes changed at chunk size {size}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_gate_denial_replaces_tool_and_ends_cleanly() {
+        let output = gate_anthropic(
+            ANTHROPIC,
+            GateDecision::Deny {
+                reason: "shell commands require approval".to_owned(),
+            },
+            1,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("I will run the project tests."));
+        assert!(text.contains("[blocked by Kerna policy] Bash was not released"));
+        assert!(!text.contains("\"type\":\"tool_use\""));
+        assert!(text.contains("\"stop_reason\":\"end_turn\""));
+        assert!(!text.contains("\"stop_reason\":\"tool_use\""));
+    }
+
+    #[test]
+    fn anthropic_gate_holds_tool_until_arguments_are_complete() {
+        let tool_start = ANTHROPIC
+            .windows(b"\"type\":\"tool_use\"".len())
+            .position(|window| window == b"\"type\":\"tool_use\"")
+            .unwrap();
+        let tool_stop = tool_start
+            + ANTHROPIC[tool_start..]
+                .windows(b"event: content_block_stop".len())
+                .position(|window| window == b"event: content_block_stop")
+                .unwrap();
+        let mut gate = AnthropicStreamGate::new(|_| GateDecision::Allow);
+        let output = gate.feed(&ANTHROPIC[..tool_stop]).unwrap();
+        let joined = output.into_iter().flatten().collect::<Vec<_>>();
+        assert!(!joined
+            .windows(b"tool_use".len())
+            .any(|window| window == b"tool_use"));
+        assert_eq!(gate.finish(), Err(ProtocolError::TruncatedAction));
+    }
+
+    #[test]
+    fn anthropic_gate_fails_closed_on_disconnect_mid_tool() {
+        let marker = b"event: content_block_stop";
+        let tool_start = ANTHROPIC
+            .windows(b"\"type\":\"tool_use\"".len())
+            .position(|window| window == b"\"type\":\"tool_use\"")
+            .unwrap();
+        let end = tool_start
+            + ANTHROPIC[tool_start..]
+                .windows(marker.len())
+                .position(|window| window == marker)
+                .unwrap();
+        let mut gate = AnthropicStreamGate::new(|_| GateDecision::Allow);
+        gate.feed(&ANTHROPIC[..end]).unwrap();
+        assert_eq!(gate.finish(), Err(ProtocolError::TruncatedAction));
+    }
+
+    #[test]
+    fn anthropic_gate_holds_then_denies_without_leaking_a_tool_call() {
+        let mut gate = AnthropicStreamGate::new(|_| GateDecision::Hold);
+        let initial = gate
+            .feed(ANTHROPIC)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(String::from_utf8_lossy(&initial).contains("I will run the project tests."));
+        assert!(!String::from_utf8_lossy(&initial).contains("\"type\":\"tool_use\""));
+        assert_eq!(gate.pending_approval().unwrap().raw_tool_name, "Bash");
+        assert_eq!(gate.finish(), Err(ProtocolError::TruncatedAction));
+
+        let output = gate
+            .resolve_pending(GateDecision::Deny {
+                reason: "shell commands require approval".to_owned(),
+            })
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("[blocked by Kerna policy] Bash was not released"));
+        assert!(text.contains("\"stop_reason\":\"end_turn\""));
+        assert!(!text.contains("\"type\":\"tool_use\""));
+    }
+
+    #[test]
+    fn anthropic_gate_holds_then_releases_the_original_tool_bytes() {
+        let mut gate = AnthropicStreamGate::new(|_| GateDecision::Hold);
+        let initial = gate
+            .feed(ANTHROPIC)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let released = gate
+            .resolve_pending(GateDecision::Allow)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let mut reconstructed = initial;
+        reconstructed.extend(released);
+        assert_eq!(reconstructed, ANTHROPIC);
+    }
+
+    fn gate_openai(
+        fixture: &[u8],
+        decision: GateDecision,
+        chunk_size: usize,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        let mut gate = OpenAiResponsesStreamGate::new(move |_| decision.clone());
+        let mut output = Vec::new();
+        for chunk in fixture.chunks(chunk_size) {
+            output.extend(gate.feed(chunk)?.into_iter().flatten());
+        }
+        output.extend(gate.finish()?.into_iter().flatten());
+        Ok(output)
+    }
+
+    #[test]
+    fn openai_gate_releases_allowed_actions_unchanged() {
+        for size in 1..=OPENAI.len() {
+            assert_eq!(
+                gate_openai(OPENAI, GateDecision::Allow, size).unwrap(),
+                OPENAI,
+                "bytes changed at chunk size {size}"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_gate_denial_replaces_function_and_custom_actions() {
+        let output = gate_openai(
+            OPENAI,
+            GateDecision::Deny {
+                reason: "requires approval".to_owned(),
+            },
+            1,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("I will inspect and test the project."));
+        assert!(text.contains("[blocked by Kerna policy] read_file was not released"));
+        assert!(text.contains("[blocked by Kerna policy] shell was not released"));
+        assert!(text.contains("[blocked by Kerna policy] apply_patch was not released"));
+        assert!(!text.contains("\"type\":\"function_call\""));
+        assert!(!text.contains("\"type\":\"custom_tool_call\""));
+        assert!(text.contains("event: response.completed"));
+    }
+
+    #[test]
+    fn openai_gate_fails_closed_on_disconnect_mid_tool() {
+        let marker = b"event: response.function_call_arguments.done";
+        let end = OPENAI
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .unwrap();
+        let mut gate = OpenAiResponsesStreamGate::new(|_| GateDecision::Allow);
+        gate.feed(&OPENAI[..end]).unwrap();
+        assert_eq!(gate.finish(), Err(ProtocolError::TruncatedAction));
+    }
+
+    #[test]
+    fn openai_gate_holds_then_releases_original_function_call_bytes() {
+        let done = b"event: response.function_call_arguments.done";
+        let start = OPENAI
+            .windows(done.len())
+            .position(|window| window == done)
+            .unwrap();
+        let end = start + frame_end(&OPENAI[start..]).unwrap();
+        let first_action = &OPENAI[..end];
+
+        let mut gate = OpenAiResponsesStreamGate::new(|_| GateDecision::Hold);
+        let initial = gate
+            .feed(first_action)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(gate.pending_approval().unwrap().raw_tool_name, "read_file");
+        assert!(!String::from_utf8_lossy(&initial).contains("\"type\":\"function_call\""));
+
+        let released = gate
+            .resolve_pending(GateDecision::Allow)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let mut reconstructed = initial;
+        reconstructed.extend(released);
+        assert_eq!(reconstructed, first_action);
+    }
+
+    #[test]
+    fn openai_gate_holds_then_denies_all_actions_without_leaking_calls() {
+        let mut decisions = 0;
+        let mut gate = OpenAiResponsesStreamGate::new(move |_| {
+            decisions += 1;
+            if decisions == 1 {
+                GateDecision::Hold
+            } else {
+                GateDecision::Deny {
+                    reason: "requires approval".to_owned(),
+                }
+            }
+        });
+        let initial = gate
+            .feed(OPENAI)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(gate.pending_approval().unwrap().raw_tool_name, "read_file");
+        let resumed = gate
+            .resolve_pending(GateDecision::Deny {
+                reason: "requires approval".to_owned(),
+            })
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let mut output = initial;
+        output.extend(resumed);
+        let text = String::from_utf8(output).unwrap();
+        assert!(!text.contains("\"type\":\"function_call\""));
+        assert!(!text.contains("\"type\":\"custom_tool_call\""));
+        // Each denial appears in the text delta, text completion, and completed item.
+        assert_eq!(text.matches("[blocked by Kerna policy]").count(), 9);
+        assert!(text.contains("event: response.completed"));
     }
 }
