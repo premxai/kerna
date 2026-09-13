@@ -9,7 +9,7 @@ use crate::scheduler::TaskScheduler;
 use axum::{
     body::{Body, Bytes},
     extract::{Path, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         Html, IntoResponse,
@@ -253,6 +253,10 @@ async fn handle_guard_anthropic(
     }
     let base = decision.upstream_base_url();
     let primary_started = std::time::Instant::now();
+    let stream_requested = serde_json::from_slice::<Value>(&routed_body)
+        .ok()
+        .and_then(|payload| payload.get("stream").and_then(Value::as_bool))
+        .unwrap_or(false);
     let mut request = reqwest::Client::new()
         .post(provider_url(&base, "v1/messages"))
         .header(header::CONTENT_TYPE, "application/json")
@@ -265,15 +269,19 @@ async fn handle_guard_anthropic(
         }
     }
     match request.send().await {
-        Ok(upstream) => relay_anthropic(
-            upstream,
-            state.guard_policy,
-            state.memory,
-            context,
-            decision,
-            request_sha256,
-            primary_started,
-        ),
+        Ok(upstream) => {
+            relay_anthropic(
+                upstream,
+                state.guard_policy,
+                state.memory,
+                context,
+                decision,
+                request_sha256,
+                primary_started,
+                stream_requested,
+            )
+            .await
+        }
         Err(_) => {
             let _ = record_primary_runtime(
                 &state.memory,
@@ -663,6 +671,7 @@ fn observe_anthropic_results(
 fn upstream_response(
     status: reqwest::StatusCode,
     stream: impl futures_core::Stream<Item = Result<Bytes, std::convert::Infallible>> + Send + 'static,
+    request_id: Option<HeaderValue>,
 ) -> axum::response::Response {
     let mut response = axum::response::Response::new(Body::from_stream(stream));
     *response.status_mut() =
@@ -674,10 +683,15 @@ fn upstream_response(
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    if let Some(request_id) = request_id {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static("request-id"), request_id);
+    }
     response
 }
 
-fn relay_anthropic(
+async fn relay_anthropic(
     mut upstream: reqwest::Response,
     policy: Arc<GuardPolicy>,
     memory: Arc<MemoryEngine>,
@@ -685,8 +699,22 @@ fn relay_anthropic(
     decision: RouteDecision,
     request_sha256: String,
     started: std::time::Instant,
+    stream_requested: bool,
 ) -> axum::response::Response {
     let status = upstream.status();
+    let request_id = upstream.headers().get("request-id").cloned();
+    if !stream_requested {
+        return relay_anthropic_json(
+            upstream,
+            memory,
+            context,
+            decision,
+            request_sha256,
+            started,
+            request_id,
+        )
+        .await;
+    }
     let stream = async_stream::stream! {
         let stream_context = context.clone();
         let stream_memory = memory.clone();
@@ -746,7 +774,91 @@ fn relay_anthropic(
         );
         let _ = memory.finish_gateway_session(&context.session_id);
     };
-    upstream_response(status, stream)
+    upstream_response(status, stream, request_id)
+}
+
+/// Claude Code retries a broken Messages SSE connection once with a normal JSON
+/// response. Preserve that retry shape exactly for ordinary text responses.
+/// A non-streaming tool action cannot be paused for an approval, so it fails
+/// closed rather than ever reaching the agent client.
+async fn relay_anthropic_json(
+    upstream: reqwest::Response,
+    memory: Arc<MemoryEngine>,
+    context: GuardStreamContext,
+    decision: RouteDecision,
+    request_sha256: String,
+    started: std::time::Instant,
+    request_id: Option<HeaderValue>,
+) -> axum::response::Response {
+    let status = upstream.status();
+    let content_type = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from_static("application/json"));
+    let body = match upstream.bytes().await {
+        Ok(body) => body,
+        Err(_) => {
+            let _ = record_primary_runtime(
+                &memory,
+                &context,
+                &decision,
+                &request_sha256,
+                "failed",
+                started.elapsed().as_millis(),
+                "",
+                0,
+            );
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "Anthropic upstream body was unavailable.",
+            );
+        }
+    };
+    let contains_tool_use = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|payload| payload.get("content").and_then(Value::as_array).cloned())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+        })
+        .unwrap_or(false);
+    let output_sha256 = format!("{:x}", Sha256::digest(&body));
+    let runtime_status = if status.is_success() && !contains_tool_use {
+        "completed"
+    } else {
+        "failed"
+    };
+    let _ = record_primary_runtime(
+        &memory,
+        &context,
+        &decision,
+        &request_sha256,
+        runtime_status,
+        started.elapsed().as_millis(),
+        &output_sha256,
+        body.len(),
+    );
+    let _ = memory.finish_gateway_session(&context.session_id);
+    if contains_tool_use {
+        return error_response(
+            StatusCode::CONFLICT,
+            "Kerna requires streaming for a tool-capable Anthropic response; the action was not released.",
+        );
+    }
+    let mut response = axum::response::Response::new(Body::from(body));
+    *response.status_mut() =
+        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, content_type);
+    if let Some(request_id) = request_id {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static("request-id"), request_id);
+    }
+    response
 }
 
 fn relay_openai(
@@ -784,7 +896,7 @@ fn relay_openai(
             }
         }
     };
-    upstream_response(status, stream)
+    upstream_response(status, stream, None)
 }
 
 fn stream_policy_decision(
