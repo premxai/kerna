@@ -7,6 +7,7 @@ disposable clone and is **not** fully containerized; the dashboard repeats that 
 ## Shortest path
 
 ```text
+kerna init --demo  # choose local/cloud/sandbox readiness; stores no keys
 kerna doctor   # scan hardware, runtimes, models, storage, and provider readiness
 kerna          # start governed Claude with automatic routing and local shadow
 ```
@@ -15,22 +16,25 @@ The longer `kerna guard ...` and `kerna demo ...` forms remain as compatibility 
 are hidden from the primary help. Useful explicit overrides are `kerna claude --route local`,
 `kerna claude --route cloud`, `kerna sandbox`, and `kerna replay <evidence.json>`.
 
-## One-time setup
+## Windows setup
 
 Run from the Kerna checkout on Windows. All large artifacts remain on the local SSD.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install-hackathon.ps1
+kerna init --demo
 kerna doctor
 ```
 
 The bootstrap installs the pinned Node bridge at `C:\KernaData\kerna-demo`, configures Ollama
 models at `C:\KernaData\ollama-models`, pulls `qwen3.5:9b`, prewarms Claude Code 2.1.270,
-and leaves Cargo/session data on `C:`.
+and leaves Cargo/session data on `C:`. `kerna init --demo` records only the selected non-secret
+profile, checks Docker/Wasmer/Tenki readiness, and opens the dashboard when ready. Provider keys
+are requested later by the operation that uses them.
 
 ## Guided sequence
 
-1. Run `kerna doctor`. Show the routing policy first, then the system card: GPU/VRAM, Ollama, local model,
+1. Run `kerna init --demo` once, then `kerna doctor`. Show the routing policy first, then the system card: GPU/VRAM, Ollama, local model,
    Claude Code, Wasmer, Docker, and amber Tenki authentication state.
 2. Prove a local-only session with a read-only task:
 
@@ -78,19 +82,27 @@ and leaves Cargo/session data on `C:`.
 
 ## Tenki
 
-Tenki is intentionally outside the live critical path. Until its API key is supplied through the
+Tenki is a required live segment for this rehearsal. Until its API key is supplied through the
 hidden `kerna sandbox --backend tenki` prompt, doctor and the dashboard must say
 `configured — authentication required`. Kerna explicitly asks Tenki for both inbound and outbound
-networking to be disabled and closes the admitted VM in `finally`.
+networking to be disabled and closes the admitted VM in `finally`. If Tenki authentication fails,
+use the signed replay bundle and keep Wasmer as the live containment proof; do not claim a successful
+Tenki run that did not happen.
+
+## CI proof
+
+The existing GitHub workflow remains backstage proof. On Windows it runs
+`scripts/verify-demo.ps1`, which checks the built CLI/help surfaces and packaging bridge without
+provider keys or customer prompts, then uploads `reports/demo-readiness/ci.json`. Only the commit,
+checks, timestamps, and pass/fail status belong in the evidence story.
 
 ## Install and distribution status
 
 - **Windows demo checkout:** `powershell -ExecutionPolicy Bypass -File .\scripts\install-hackathon.ps1`
   installs requirements, builds on `C:`, places `kerna.exe` in `C:\KernaData\bin`, and updates the
   user PATH.
-- **macOS/Linux/remote checkout:** `sh ./scripts/install-hackathon.sh` installs the pinned runtime
-  beside the user data directory and places `kerna` in `~/.local/bin`. Docker, Ollama, Node, Git,
-  and Rust must already be present; the script refuses clearly when one is missing.
+- **macOS/Linux/remote checkout:** source installers remain available but are outside this Windows
+  venue rehearsal and are not a live support claim for this event.
 - **Published stable release:** the existing `install.ps1`, `install.sh`, npm launcher, and GitHub
   release workflow are real, but the public `v0.2.5` artifacts predate this hackathon branch. Do not
   tell judges the short CLI or shadow comparison is in the public release until a new signed tag is

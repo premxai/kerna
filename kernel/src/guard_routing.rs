@@ -2,10 +2,79 @@ use anyhow::{anyhow, Result};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::PathBuf;
 
 pub const DEFAULT_CLOUD_MODEL: &str = "claude-sonnet-5";
 pub const DEFAULT_LOCAL_MODEL: &str = "qwen3.5:9b";
 pub const DEFAULT_LOCAL_BASE_URL: &str = "http://127.0.0.1:11434";
+
+const DEMO_PROFILE_FILE: &str = "demo-profile.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DemoProfile {
+    pub local_model: Option<String>,
+    pub cloud_enabled: bool,
+    pub wasmer_enabled: bool,
+    pub tenki_enabled: bool,
+}
+
+impl Default for DemoProfile {
+    fn default() -> Self {
+        Self {
+            local_model: Some(DEFAULT_LOCAL_MODEL.to_string()),
+            cloud_enabled: true,
+            wasmer_enabled: true,
+            tenki_enabled: true,
+        }
+    }
+}
+
+pub fn demo_profile_path() -> PathBuf {
+    if let Some(root) = std::env::var_os("KERNA_DEMO_DATA_DIR") {
+        return PathBuf::from(root).join(DEMO_PROFILE_FILE);
+    }
+    if cfg!(windows) {
+        PathBuf::from(r"C:\KernaData\kerna-demo").join(DEMO_PROFILE_FILE)
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            })
+            .unwrap_or_else(std::env::temp_dir)
+            .join("kerna-demo")
+            .join(DEMO_PROFILE_FILE)
+    }
+}
+
+pub fn load_demo_profile() -> DemoProfile {
+    std::fs::read_to_string(demo_profile_path())
+        .ok()
+        .and_then(|text| serde_json::from_str::<DemoProfile>(&text).ok())
+        .map(|mut profile| {
+            if !matches!(
+                profile.local_model.as_deref(),
+                None | Some("qwen3.5:9b") | Some("qwen3:4b")
+            ) {
+                profile.local_model = Some(DEFAULT_LOCAL_MODEL.to_string());
+            }
+            profile
+        })
+        .unwrap_or_default()
+}
+
+pub fn save_demo_profile(profile: &DemoProfile) -> anyhow::Result<()> {
+    let path = demo_profile_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_vec_pretty(profile)?)?;
+    Ok(())
+}
+
+pub fn active_local_model() -> Option<String> {
+    load_demo_profile().local_model
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -48,6 +117,24 @@ pub fn decide_route(
     local_available: bool,
     shadow_requested: bool,
 ) -> Result<RouteDecision> {
+    decide_route_with_model(
+        session_id,
+        requested_mode,
+        initial_task,
+        local_available,
+        Some(DEFAULT_LOCAL_MODEL),
+        shadow_requested,
+    )
+}
+
+pub fn decide_route_with_model(
+    session_id: impl Into<String>,
+    requested_mode: RouteMode,
+    initial_task: &str,
+    local_available: bool,
+    local_model: Option<&str>,
+    shadow_requested: bool,
+) -> Result<RouteDecision> {
     let session_id = session_id.into();
     let (provider, model, reason, privacy) = match requested_mode {
         RouteMode::Local => {
@@ -58,7 +145,7 @@ pub fn decide_route(
             }
             (
                 "ollama",
-                DEFAULT_LOCAL_MODEL,
+                local_model.unwrap_or(DEFAULT_LOCAL_MODEL),
                 "explicit_local",
                 "local_only",
             )
@@ -71,7 +158,7 @@ pub fn decide_route(
         ),
         RouteMode::Auto if local_available && is_small_read_only_task(initial_task) => (
             "ollama",
-            DEFAULT_LOCAL_MODEL,
+            local_model.unwrap_or(DEFAULT_LOCAL_MODEL),
             "auto_small_read_only",
             "local_preferred",
         ),
@@ -88,8 +175,9 @@ pub fn decide_route(
             "cloud_allowed",
         ),
     };
-    let shadow_provider = (shadow_requested && provider == "anthropic" && local_available)
-        .then(|| "ollama".to_string());
+    let shadow_provider =
+        (shadow_requested && provider == "anthropic" && local_available && local_model.is_some())
+            .then(|| "ollama".to_string());
     Ok(RouteDecision {
         session_id,
         requested_mode,
@@ -227,6 +315,42 @@ mod tests {
         .unwrap();
         assert_eq!(decision.provider, "anthropic");
         assert_eq!(decision.shadow_provider.as_deref(), Some("ollama"));
+    }
+
+    #[test]
+    fn selected_local_model_is_used_for_route_and_shadow() {
+        let decision = decide_route_with_model(
+            "s",
+            RouteMode::Auto,
+            "Fix the parser and run tests.",
+            true,
+            Some("qwen3:4b"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(decision.model, "claude-sonnet-5");
+        assert_eq!(decision.shadow_provider.as_deref(), Some("ollama"));
+
+        let local = decide_route_with_model(
+            "s",
+            RouteMode::Local,
+            "Explain this file.",
+            true,
+            Some("qwen3:4b"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(local.model, "qwen3:4b");
+        assert_eq!(local.provider, "ollama");
+    }
+
+    #[test]
+    fn missing_local_model_disables_shadow_without_changing_cloud_route() {
+        let decision =
+            decide_route_with_model("s", RouteMode::Auto, "Fix the parser.", false, None, true)
+                .unwrap();
+        assert_eq!(decision.provider, "anthropic");
+        assert_eq!(decision.shadow_provider, None);
     }
 
     #[test]

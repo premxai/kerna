@@ -1105,6 +1105,13 @@ fn command_needs_mcp(command: &Option<Commands>) -> bool {
 }
 
 fn run_sponsor_sandbox(backend: &str, code: &str, timeout_ms: u64) -> Result<()> {
+    let profile = guard_routing::load_demo_profile();
+    if backend == "wasmer" && !profile.wasmer_enabled {
+        anyhow::bail!("Wasmer is disabled in the demo profile; rerun `kerna init --demo`");
+    }
+    if backend == "tenki" && !profile.tenki_enabled {
+        anyhow::bail!("Tenki is disabled in the demo profile; rerun `kerna init --demo`");
+    }
     let backend = if backend == "tenki" {
         sponsor_runtime::ExecutionBackend::Tenki
     } else {
@@ -1420,12 +1427,10 @@ async fn async_main() -> Result<()> {
             model,
             demo,
         }) => {
-            onboarding::run_onboarding(quick, ci, yes, no_setup, provider, model);
             if demo {
-                let ready = guard_launcher::print_doctor(true, None).await;
-                if !ready {
-                    eprintln!("[-] Demo prerequisites are incomplete. Run `kerna guard doctor --demo` after installation.");
-                }
+                guard_launcher::run_demo_setup().await?;
+            } else {
+                onboarding::run_onboarding(quick, ci, yes, no_setup, provider, model);
             }
         }
         // Handled before runtime initialization above. Keeping this arm makes

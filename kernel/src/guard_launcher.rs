@@ -1,6 +1,6 @@
 use crate::guard_routing::RouteMode;
 use anyhow::{anyhow, Context, Result};
-use dialoguer::Password;
+use dialoguer::{Confirm, Password, Select};
 use serde::Serialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -81,8 +81,11 @@ pub async fn print_doctor(demo: bool, repo: Option<&Path>) -> bool {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "unknown".to_string())
     );
+    let local_route = crate::guard_routing::active_local_model()
+        .map(|model| format!("local {model}"))
+        .unwrap_or_else(|| "local disabled".to_string());
     println!(
-        "[i] Routing            auto · local for private/read-only · cloud for complex changes"
+        "[i] Routing            auto · {local_route} for private/read-only · cloud for complex changes"
     );
     for check in &checks {
         let marker = match check.status.as_str() {
@@ -127,19 +130,26 @@ pub async fn doctor_checks(demo: bool, repo: Option<&Path>) -> Vec<DoctorCheck> 
         &[r"C:\Users\ptula\AppData\Local\Programs\Ollama\ollama.exe"],
         demo,
     ));
-    let model_ready = ollama_model_ready().await;
+    let selected_model = crate::guard_routing::active_local_model();
+    let model_ready = match selected_model.as_deref() {
+        Some(model) => ollama_model_ready_for(model).await,
+        None => false,
+    };
     checks.push(DoctorCheck {
         name: "Local model".to_string(),
-        status: if model_ready { "ready" } else { "missing" }.to_string(),
-        detail: if model_ready {
-            crate::guard_routing::DEFAULT_LOCAL_MODEL.to_string()
+        status: if selected_model.is_none() {
+            "optional".to_string()
+        } else if model_ready {
+            "ready".to_string()
         } else {
-            format!(
-                "{} is not installed",
-                crate::guard_routing::DEFAULT_LOCAL_MODEL
-            )
+            "missing".to_string()
         },
-        required: demo,
+        detail: match selected_model.as_deref() {
+            Some(model) if model_ready => model.to_string(),
+            Some(model) => format!("{model} is not installed"),
+            None => "not selected; local routing and shadow disabled".to_string(),
+        },
+        required: demo && selected_model.is_some(),
     });
     checks.push(DoctorCheck {
         name: "Claude Code".to_string(),
@@ -212,6 +222,12 @@ pub async fn launch_claude(
     shadow: bool,
     prompt: Option<&str>,
 ) -> Result<()> {
+    let demo_profile = crate::guard_routing::load_demo_profile();
+    if route != RouteMode::Local && !demo_profile.cloud_enabled {
+        return Err(anyhow!(
+            "cloud routing is disabled in the demo profile; rerun `kerna init --demo` or use --route local"
+        ));
+    }
     if !print_doctor(false, Some(repo)).await {
         return Err(anyhow!("Kerna Guard readiness checks failed"));
     }
@@ -288,6 +304,153 @@ pub async fn launch_claude(
     terminate_child(&mut dashboard);
     terminate_child(&mut broker);
     result
+}
+
+/// Guided setup for the hackathon surface. It stores only non-secret choices;
+/// provider credentials are intentionally collected at the operation that uses them.
+pub async fn run_demo_setup() -> Result<()> {
+    println!("Kerna demo setup\n");
+    println!("Choose the local model used for private routing and cloud shadows.");
+    let local_choices = [
+        "qwen3.5:9b — recommended, strongest local demo",
+        "qwen3:4b — faster fallback",
+        "Skip local model — cloud only, no shadow",
+    ];
+    let local_selection = Select::new()
+        .with_prompt("Local model")
+        .items(local_choices)
+        .default(0)
+        .interact()?;
+    let mut profile = crate::guard_routing::DemoProfile {
+        local_model: match local_selection {
+            0 => Some("qwen3.5:9b".to_string()),
+            1 => Some("qwen3:4b".to_string()),
+            _ => None,
+        },
+        ..crate::guard_routing::load_demo_profile()
+    };
+
+    if let Some(model) = profile.local_model.as_deref() {
+        if !ollama_model_ready_for(model).await {
+            let should_pull = Confirm::new()
+                .with_prompt(format!("{model} is not installed. Pull it now?"))
+                .default(true)
+                .interact()?;
+            if should_pull {
+                if let Some(ollama) = ollama_executable() {
+                    println!("[i] Pulling {model}; this may take a few minutes...");
+                    let status = Command::new(ollama).args(["pull", model]).status()?;
+                    if !status.success() {
+                        eprintln!(
+                            "[!] Ollama could not pull {model}; local routing remains unavailable."
+                        );
+                    }
+                } else {
+                    eprintln!("[!] Ollama is unavailable. Run `kerna doctor` after installing it.");
+                }
+            }
+        }
+    }
+
+    let cloud_selection = Select::new()
+        .with_prompt("Cloud route")
+        .items([
+            "Anthropic claude-sonnet-5 — key requested only at cloud launch",
+            "Skip cloud for now",
+        ])
+        .default(0)
+        .interact()?;
+    profile.cloud_enabled = cloud_selection == 0;
+    profile.wasmer_enabled = Confirm::new()
+        .with_prompt("Enable Wasmer local sandbox? (required for the demo)")
+        .default(true)
+        .interact()?;
+    profile.tenki_enabled = Confirm::new()
+        .with_prompt("Enable Tenki remote sandbox? Its key is requested only at first use")
+        .default(true)
+        .interact()?;
+    crate::guard_routing::save_demo_profile(&profile)?;
+
+    std::fs::create_dir_all(demo_data_root())?;
+    std::fs::create_dir_all(session_root())?;
+    std::fs::create_dir_all(demo_data_root().join("wasmer-cache"))?;
+    std::fs::create_dir_all(demo_data_root().join("npm-cache"))?;
+    println!(
+        "\n[+] Non-secret demo profile saved at {}",
+        crate::guard_routing::demo_profile_path().display()
+    );
+
+    let workspace = std::env::current_dir()?;
+    let ready = print_doctor(true, Some(&workspace)).await;
+    if !ready {
+        eprintln!("[-] Demo setup is incomplete. Start Docker Desktop and rerun `kerna doctor`.");
+        return Ok(());
+    }
+
+    let port = available_loopback_port(DASHBOARD_PORT)?;
+    let executable = std::env::current_exe()?;
+    let mut dashboard_command = if cfg!(windows) {
+        let quote_powershell = |value: &str| format!("'{}'", value.replace('\'', "''"));
+        let arguments = format!(
+            "dashboard --workspace \"{}\" --port {} --route auto --shadow --no-open",
+            workspace.display(),
+            port
+        );
+        let dashboard_log = demo_data_root().join("dashboard.log");
+        let dashboard_error_log = demo_data_root().join("dashboard.error.log");
+        let script = format!(
+            "Start-Process -WindowStyle Hidden -FilePath {} -ArgumentList {} -WorkingDirectory {} -RedirectStandardOutput {} -RedirectStandardError {}",
+            quote_powershell(&executable.display().to_string()),
+            quote_powershell(&arguments),
+            quote_powershell(&workspace.display().to_string()),
+            quote_powershell(&dashboard_log.display().to_string()),
+            quote_powershell(&dashboard_error_log.display().to_string())
+        );
+        let mut command = Command::new("powershell.exe");
+        command.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script]);
+        command
+    } else {
+        let mut command = Command::new(&executable);
+        command
+            .arg("dashboard")
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--route")
+            .arg("auto")
+            .arg("--shadow")
+            .arg("--no-open");
+        command
+    };
+    dashboard_command
+        .current_dir(&workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    dashboard_command
+        .spawn()
+        .context("could not start the demo dashboard")?;
+    let url = format!("http://127.0.0.1:{port}/");
+    let ready = (0..20).any(|_| {
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        if std::net::TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+            true
+        } else {
+            std::thread::sleep(Duration::from_millis(100));
+            false
+        }
+    });
+    if !ready {
+        return Err(anyhow!("demo dashboard did not become ready at {url}"));
+    }
+    println!("[+] Dashboard: {url}");
+    let _ = webbrowser::open(&url);
+    println!("\nYour next commands:");
+    println!("  kerna claude --route local --prompt \"Summarize the security invariants. Do not modify files.\"");
+    println!("  kerna");
+    println!("  kerna sandbox");
+    Ok(())
 }
 
 fn run_claude(
@@ -590,7 +753,7 @@ fn command_check_with_candidates(
     }
 }
 
-async fn ollama_model_ready() -> bool {
+async fn ollama_model_ready_for(model: &str) -> bool {
     let Ok(response) = reqwest::Client::new()
         .get(format!(
             "{}/api/tags",
@@ -611,7 +774,27 @@ async fn ollama_model_ready() -> bool {
         .into_iter()
         .flatten()
         .filter_map(|entry| entry.get("name").and_then(serde_json::Value::as_str))
-        .any(|name| name == crate::guard_routing::DEFAULT_LOCAL_MODEL)
+        .any(|name| name == model || name.strip_suffix(":latest") == model.strip_suffix(":latest"))
+}
+
+fn ollama_executable() -> Option<PathBuf> {
+    let candidates = if cfg!(windows) {
+        vec![
+            PathBuf::from("ollama"),
+            PathBuf::from(r"C:\Users\ptula\AppData\Local\Programs\Ollama\ollama.exe"),
+        ]
+    } else {
+        vec![PathBuf::from("ollama")]
+    };
+    candidates.into_iter().find(|candidate| {
+        Command::new(candidate)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(test)]

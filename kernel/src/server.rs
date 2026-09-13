@@ -186,18 +186,23 @@ async fn handle_guard_anthropic(
             "Kerna could not persist the Claude tool result receipt.",
         );
     }
-    let local_available = ollama_model_available(crate::guard_routing::DEFAULT_LOCAL_MODEL).await;
+    let local_model = crate::guard_routing::active_local_model();
+    let local_available = match local_model.as_deref() {
+        Some(model) => ollama_model_available(model).await,
+        None => false,
+    };
     let decision = {
         let mut decisions = state.route_decisions.lock().await;
         if let Some(existing) = decisions.get(&context.session_id) {
             existing.clone()
         } else {
             let initial_task = crate::guard_routing::initial_user_task(&body);
-            let decision = match crate::guard_routing::decide_route(
+            let decision = match crate::guard_routing::decide_route_with_model(
                 context.session_id.clone(),
                 state.route_mode,
                 &initial_task,
                 local_available,
+                local_model.as_deref(),
                 state.shadow_enabled,
             ) {
                 Ok(decision) => decision,
@@ -346,11 +351,10 @@ fn spawn_local_shadow(
 ) {
     tokio::spawn(async move {
         let started = std::time::Instant::now();
-        let shadow_body = match crate::guard_routing::rewrite_model(
-            &body,
-            crate::guard_routing::DEFAULT_LOCAL_MODEL,
-            true,
-        ) {
+        let Some(shadow_model) = crate::guard_routing::active_local_model() else {
+            return;
+        };
+        let shadow_body = match crate::guard_routing::rewrite_model(&body, &shadow_model, true) {
             Ok(body) => body,
             Err(_) => return,
         };
@@ -391,7 +395,7 @@ fn spawn_local_shadow(
                 "warning"
             }
             .to_string(),
-            model: Some(crate::guard_routing::DEFAULT_LOCAL_MODEL.to_string()),
+            model: Some(shadow_model.clone()),
             tool: None,
             policy_decision: Some("non_executing".to_string()),
             risk_score: None,
@@ -401,7 +405,7 @@ fn spawn_local_shadow(
             budget_snapshot_json: None,
             payload_json: json!({
                 "provider": "ollama",
-                "model": crate::guard_routing::DEFAULT_LOCAL_MODEL,
+                "model": shadow_model,
                 "tools_removed": true,
                 "user_impact": "none",
                 "duration_ms": started.elapsed().as_millis(),
@@ -559,14 +563,21 @@ fn worktree_baseline_digest(
 
 fn git_output(workspace: &std::path::Path, args: &[&str]) -> anyhow::Result<String> {
     let output = Command::new("git")
+        .args(["-c", "safe.directory=*"])
         .args(args)
         .current_dir(workspace)
         .output()?;
     if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         return Err(anyhow::anyhow!(
-            "git {} failed with status {}",
+            "git {} failed with status {}{}",
             args.join(" "),
-            output.status
+            output.status,
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
         ));
     }
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
@@ -1468,6 +1479,7 @@ fn workspace_review(worktree_baseline: &str) -> Result<Value, String> {
 
 fn git_text_output(workspace: &std::path::Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
+        .args(["-c", "safe.directory=*"])
         .args(args)
         .current_dir(workspace)
         .output()
@@ -1484,6 +1496,7 @@ fn git_text_output(workspace: &std::path::Path, args: &[&str]) -> Result<String,
 
 fn git_bytes_output(workspace: &std::path::Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
+        .args(["-c", "safe.directory=*"])
         .args(args)
         .current_dir(workspace)
         .output()
@@ -1664,6 +1677,10 @@ fn dashboard_mutation_is_authorized(state: &DashboardState, headers: &HeaderMap)
 }
 
 fn dashboard_snapshot(state: &DashboardState) -> Value {
+    let configured_local_model = crate::guard_routing::active_local_model();
+    let local_model = configured_local_model
+        .as_deref()
+        .unwrap_or("not configured");
     let sessions = state
         .app
         .memory
@@ -1771,7 +1788,7 @@ fn dashboard_snapshot(state: &DashboardState) -> Value {
             "requested_mode": format!("{:?}", state.app.route_mode).to_ascii_lowercase(),
             "shadow_enabled": state.app.shadow_enabled,
             "sticky_after_first_task": true,
-            "local_model": crate::guard_routing::DEFAULT_LOCAL_MODEL,
+            "local_model": local_model,
             "cloud_model": crate::guard_routing::DEFAULT_CLOUD_MODEL,
         },
         "capabilities": [
@@ -1785,7 +1802,7 @@ fn dashboard_snapshot(state: &DashboardState) -> Value {
             {"name": "Orchestration", "state": "scoped", "detail": "Session lifecycle and runtime supervision"}
         ],
         "model_registry": [
-            {"provider": "Ollama", "model": crate::guard_routing::DEFAULT_LOCAL_MODEL, "location": "Local GPU", "status": "configured", "best_for": "Private inspection, summaries, repository search, bounded analysis"},
+            {"provider": "Ollama", "model": local_model, "location": "Local GPU", "status": if configured_local_model.is_some() { "configured" } else { "not selected" }, "best_for": "Private inspection, summaries, repository search, bounded analysis"},
             {"provider": "Anthropic", "model": crate::guard_routing::DEFAULT_CLOUD_MODEL, "location": "Cloud", "status": "key at launch", "best_for": "Edits, dependencies, multi-file fixes, long context, ambiguous work"}
         ],
         "rehearsal": demo_rehearsal_history(),
