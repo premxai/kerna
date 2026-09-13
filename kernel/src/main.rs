@@ -34,11 +34,13 @@ mod watchdog;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use sha2::{Digest, Sha256};
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
 use config::Config;
 use cron::CronEngine;
+use events::{Event, EventSink};
 use guard_policy::{GuardPolicy, PolicyEffect};
 use mcp_registry::McpRegistry;
 use memory::MemoryEngine;
@@ -1123,6 +1125,7 @@ fn run_sponsor_sandbox(backend: &str, code: &str, timeout_ms: u64) -> Result<()>
     } else {
         sponsor_runtime::ExecutionBackend::Wasmer
     };
+    let backend_name = format!("{backend:?}").to_ascii_lowercase();
     let auth_token = if backend == sponsor_runtime::ExecutionBackend::Tenki {
         Some(
             dialoguer::Password::new()
@@ -1132,23 +1135,147 @@ fn run_sponsor_sandbox(backend: &str, code: &str, timeout_ms: u64) -> Result<()>
     } else {
         None
     };
-    let outcome = sponsor_runtime::run(sponsor_runtime::SandboxRequest {
+    let request = sponsor_runtime::SandboxRequest {
         backend,
         language: "python".to_string(),
         code: code.to_string(),
         timeout_ms,
         auth_token,
+    };
+
+    // Standalone sandbox runs must use the same durable receipt path as MCP
+    // calls. Commit the requested receipt before entering the sponsor runtime,
+    // then close it on both success and safe containment failure.
+    let config = Config::load();
+    let memory = MemoryEngine::new(&config.db_path)?;
+    let session_id = format!("sandbox-{}", uuid::Uuid::new_v4());
+    let task_id = uuid::Uuid::new_v4().to_string();
+    let call_id = uuid::Uuid::new_v4().to_string();
+    memory.start_gateway_session(
+        &session_id,
+        &task_id,
+        &std::env::current_dir()?.display().to_string(),
+    )?;
+    memory.identify_gateway_session(
+        &session_id,
+        Some("Kerna CLI"),
+        Some(env!("CARGO_PKG_VERSION")),
+        "sandbox-v1",
+    )?;
+    memory.start_tool_call_receipt(
+        &call_id,
+        &session_id,
+        &task_id,
+        Some("Kerna CLI"),
+        Some(&backend_name),
+        None,
+        "kerna_sandbox_run",
+        "allow_contained",
+    )?;
+
+    let started = std::time::Instant::now();
+    let result = sponsor_runtime::run(request);
+    let (status, exit_code, duration_ms, output_digest, output, result_class, payload) =
+        match result {
+            Ok(outcome) => {
+                let payload = serde_json::json!({
+                    "outcome": {
+                        "backend": backend_name.clone(),
+                        "status": outcome.status.clone(),
+                        "exit_code": outcome.exit_code,
+                        "duration_ms": outcome.duration_ms,
+                    "package": outcome.package.clone(),
+                    "network": outcome.network.clone(),
+                    "containment": if outcome.status == "completed" && outcome.exit_code == 0 {
+                        "isolated"
+                    } else {
+                        "held at sandbox boundary"
+                    },
+                    "output_sha256": outcome.output_sha256.clone(),
+                    }
+                });
+                let result_class = if outcome.status == "completed" && outcome.exit_code == 0 {
+                    "completed"
+                } else {
+                    "failed"
+                };
+                (
+                    outcome.status,
+                    outcome.exit_code,
+                    outcome.duration_ms,
+                    outcome.output_sha256,
+                    outcome.output,
+                    result_class,
+                    payload,
+                )
+            }
+            Err(error) => {
+                let digest = format!("{:x}", Sha256::digest(error.to_string().as_bytes()));
+                let elapsed = started.elapsed().as_millis();
+                (
+                    "failed".to_string(),
+                    1,
+                    elapsed,
+                    digest.clone(),
+                    String::new(),
+                    "failed",
+                    serde_json::json!({
+                        "outcome": {
+                            "backend": backend_name.clone(),
+                            "status": "failed",
+                            "exit_code": 1,
+                        "duration_ms": elapsed,
+                        "error": "[REDACTED]",
+                        "containment": "held before unsafe execution",
+                        "error_sha256": digest,
+                        }
+                    }),
+                )
+            }
+        };
+    let trace_id = uuid::Uuid::new_v4().to_string();
+    let output_preview = format!("[REDACTED] sha256:{output_digest}");
+    memory.finish_tool_call_receipt(
+        &call_id,
+        None,
+        duration_ms as i64,
+        result_class,
+        Some(&trace_id),
+        Some(&output_preview),
+    )?;
+    memory.record(Event {
+        event_id: trace_id,
+        task_id: task_id.clone(),
+        session_id: Some(session_id.clone()),
+        sequence: chrono::Utc::now().timestamp_millis(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        event_type: format!("sandbox.{result_class}"),
+        actor: "kerna".to_string(),
+        severity: if result_class == "completed" {
+            "info"
+        } else {
+            "warn"
+        }
+        .to_string(),
+        model: None,
+        tool: Some("kerna_sandbox_run".to_string()),
+        policy_decision: Some("allow_contained".to_string()),
+        risk_score: None,
+        parent_event_id: None,
+        correlation_id: Some(call_id.clone()),
+        redaction_status: Some("output_digest_only".to_string()),
+        budget_snapshot_json: None,
+        payload_json: payload,
     })?;
-    println!("{}", outcome.output);
+    memory.finish_gateway_session(&session_id)?;
+
+    println!("{}", output);
     eprintln!(
-        "[+] {:?} · {} · {} ms · sha256:{}",
-        outcome.backend, outcome.status, outcome.duration_ms, outcome.output_sha256
+        "[+] {} · {} · {} ms · sha256:{} · receipt:{}",
+        backend_name, status, duration_ms, output_digest, call_id
     );
-    if outcome.status != "completed" || outcome.exit_code != 0 {
-        anyhow::bail!(
-            "sandbox program failed safely with exit code {}",
-            outcome.exit_code
-        );
+    if status != "completed" || exit_code != 0 {
+        anyhow::bail!("sandbox program failed safely with exit code {exit_code}; receipt recorded");
     }
     Ok(())
 }
