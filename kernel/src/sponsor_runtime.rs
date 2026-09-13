@@ -207,7 +207,15 @@ fn cache_root() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             if cfg!(windows) {
-                PathBuf::from(r"C:\KernaData\kerna-demo\wasmer-cache")
+                // The SDK's prewarmed registry lives beside the installed
+                // bridge. Keep the older fallback for machines bootstrapped
+                // before the runtime cache was colocated there.
+                let runtime_cache = PathBuf::from(r"C:\KernaData\kerna-demo\runtime\.wasmer");
+                if runtime_cache.exists() {
+                    runtime_cache
+                } else {
+                    PathBuf::from(r"C:\KernaData\kerna-demo\wasmer-cache")
+                }
             } else {
                 std::env::temp_dir().join("kerna-wasmer-cache")
             }
