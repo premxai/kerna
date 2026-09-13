@@ -3,16 +3,25 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$targetRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $projectRoot 'kernel\target' }
-$binary = @(
-    (Join-Path $targetRoot 'debug\kerna.exe'),
-    (Join-Path $targetRoot 'release\kerna.exe')
-) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+$targetRoots = @()
+if ($env:CARGO_TARGET_DIR) { $targetRoots += $env:CARGO_TARGET_DIR }
+$targetRoots += @(
+    (Join-Path $projectRoot 'kernel\target'),
+    'C:\Temp\kerna-target',
+    'C:\Temp\kerna-demo-impl-target'
+)
+$binary = $targetRoots |
+    ForEach-Object {
+        Join-Path $_ 'debug\kerna.exe'
+        Join-Path $_ 'release\kerna.exe'
+    } |
+    Where-Object { Test-Path -LiteralPath $_ } |
+    Select-Object -First 1
 $reportDirectory = Join-Path $projectRoot 'reports\demo-readiness'
 $reportPath = Join-Path $reportDirectory 'ci.json'
 
-if (-not (Test-Path -LiteralPath $binary)) {
-    throw "Expected built Kerna binary at $binary"
+if (-not $binary) {
+    throw "Expected a built Kerna binary in: $($targetRoots -join ', ')"
 }
 
 function Run-KernaCheck {
