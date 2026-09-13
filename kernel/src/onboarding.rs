@@ -55,7 +55,7 @@ pub fn run_onboarding(
     } else {
         let choices = vec![
             "OpenAI            (gpt-4o-mini)",
-            "Anthropic         (claude-sonnet-4)",
+            "Anthropic         (claude-sonnet-5)",
             "Ollama            (local, no API key needed)",
             "OpenRouter        (one key, 300+ models)",
             "Groq              (fast llama inference)",

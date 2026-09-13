@@ -467,6 +467,15 @@ impl MemoryEngine {
         Ok(())
     }
 
+    pub fn ensure_task(&self, id: Uuid, goal: &str) -> Result<()> {
+        let conn = self.get_conn();
+        conn.execute(
+            "INSERT OR IGNORE INTO tasks (id, session_id, goal, status) VALUES (?1, NULL, ?2, ?3)",
+            params![id.to_string(), goal, "pending"],
+        )?;
+        Ok(())
+    }
+
     pub fn update_task_status(&self, id: Uuid, status: &str) -> Result<()> {
         let conn = self.get_conn();
         if status == "completed" || status == "failed" {
@@ -2027,6 +2036,43 @@ impl MemoryEngine {
             events.push(r?);
         }
         Ok(events)
+    }
+
+    pub fn recent_events(&self, limit: usize) -> Result<Vec<Event>> {
+        let conn = self.get_conn();
+        let mut stmt = conn.prepare(
+            "SELECT event_id, task_id, session_id, sequence, timestamp, event_type, actor, severity,
+                    model, tool, policy_decision, risk_score, parent_event_id, correlation_id,
+                    redaction_status, budget_snapshot_json, payload_json
+             FROM events ORDER BY timestamp DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            let budget_str: Option<String> = row.get(15)?;
+            let payload_str: String = row.get(16)?;
+            Ok(Event {
+                event_id: row.get(0)?,
+                task_id: row.get(1)?,
+                session_id: row.get(2)?,
+                sequence: row.get(3)?,
+                timestamp: row.get(4)?,
+                event_type: row.get(5)?,
+                actor: row.get(6)?,
+                severity: row.get(7)?,
+                model: row.get(8)?,
+                tool: row.get(9)?,
+                policy_decision: row.get(10)?,
+                risk_score: row.get(11)?,
+                parent_event_id: row.get(12)?,
+                correlation_id: row.get(13)?,
+                redaction_status: row.get(14)?,
+                budget_snapshot_json: budget_str
+                    .and_then(|value| serde_json::from_str(&value).ok()),
+                payload_json: serde_json::from_str(&payload_str)
+                    .unwrap_or_else(|_| serde_json::json!({})),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 }
 

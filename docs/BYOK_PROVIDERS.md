@@ -21,7 +21,7 @@ Model routes allow you to define semantic aliases for your models. Instead of ha
 
 ```bash
 kerna provider route set cheap my-openai/gpt-4o-mini
-kerna provider route set smart anthropic/claude-sonnet-4-20250514
+kerna provider route set smart anthropic/claude-sonnet-5
 ```
 
 Routes are selected by an explicit privacy label in `kerna.toml`; there is no

@@ -8,8 +8,10 @@ pub mod events;
 pub mod folders;
 mod gateway;
 mod gateways;
+mod guard_launcher;
 mod guard_policy;
 mod guard_protocol;
+mod guard_routing;
 mod mcp;
 mod mcp_governance;
 mod mcp_registry;
@@ -26,6 +28,7 @@ mod sandbox;
 mod scheduler;
 mod security;
 mod server;
+mod sponsor_runtime;
 mod tool_packs;
 mod watchdog;
 
@@ -84,6 +87,21 @@ enum Commands {
         provider: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// Prepare and diagnose the Claude-first hackathon demo runtime.
+        #[arg(long)]
+        demo: bool,
+    },
+
+    /// Launch and inspect governed coding-agent sessions.
+    Guard {
+        #[command(subcommand)]
+        action: GuardCommands,
+    },
+
+    /// Run or replay deterministic hackathon demo evidence.
+    Demo {
+        #[command(subcommand)]
+        action: DemoCommands,
     },
 
     /// Create a deterministic, reviewable governed-MCP starter contract
@@ -114,6 +132,18 @@ enum Commands {
         /// Bearer token required on requests. Mandatory when binding a non-loopback address.
         #[arg(long)]
         token: Option<String>,
+
+        /// Sticky upstream selection for guarded Claude sessions.
+        #[arg(long, value_enum, default_value_t = guard_routing::RouteMode::Cloud)]
+        route: guard_routing::RouteMode,
+
+        /// Run a non-executing local shadow beside cloud sessions.
+        #[arg(long)]
+        shadow: bool,
+
+        /// Read the provider key from stdin into trusted broker memory.
+        #[arg(long)]
+        provider_key_stdin: bool,
     },
 
     /// Open a local live dashboard for governed MCP sessions and model routing
@@ -670,7 +700,7 @@ pub enum RouteCommands {
         route_name: String,
 
         #[arg(index = 2)]
-        target: String, // e.g. "anthropic/claude-3-5-sonnet-latest"
+        target: String, // e.g. "anthropic/claude-sonnet-5"
     },
     /// Resolve and display the exact model selected by a privacy label
     Resolve {
@@ -697,6 +727,50 @@ pub enum ModelCommands {
     Verify {
         #[arg(long, default_value = "ollama")]
         provider: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GuardCommands {
+    /// Check Claude-first demo prerequisites without changing the machine.
+    Doctor {
+        #[arg(long)]
+        demo: bool,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// Launch pinned Claude Code through Kerna from a disposable SSD clone.
+    Claude {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, value_enum, default_value_t = guard_routing::RouteMode::Auto)]
+        route: guard_routing::RouteMode,
+        #[arg(long)]
+        shadow: bool,
+        /// Optional non-interactive prompt for a repeatable demo run.
+        #[arg(long)]
+        prompt: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DemoCommands {
+    /// Execute a bounded Python program through the live sponsor sandbox adapter.
+    Sandbox {
+        #[arg(long, default_value = "wasmer", value_parser = ["wasmer", "tenki"])]
+        backend: String,
+        #[arg(long, default_value = "print(sum(i * i for i in range(10)))")]
+        code: String,
+        #[arg(long, default_value_t = 10_000)]
+        timeout_ms: u64,
+    },
+    /// Verify and serve an immutable signed dashboard rehearsal.
+    Replay {
+        evidence: PathBuf,
+        #[arg(long, default_value_t = 8877)]
+        port: u16,
+        #[arg(long)]
+        no_open: bool,
     },
 }
 
@@ -1001,6 +1075,73 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
         },
+        Some(Commands::Guard { action }) => {
+            match action {
+                GuardCommands::Doctor { demo, repo } => {
+                    let ready = guard_launcher::print_doctor(*demo, repo.as_deref()).await;
+                    if !ready {
+                        std::process::exit(1);
+                    }
+                }
+                GuardCommands::Claude {
+                    repo,
+                    route,
+                    shadow,
+                    prompt,
+                } => {
+                    guard_launcher::launch_claude(repo, *route, *shadow, prompt.as_deref()).await?;
+                }
+            }
+            return Ok(());
+        }
+        Some(Commands::Demo { action }) => {
+            match action {
+                DemoCommands::Sandbox {
+                    backend,
+                    code,
+                    timeout_ms,
+                } => {
+                    let backend = if backend == "tenki" {
+                        sponsor_runtime::ExecutionBackend::Tenki
+                    } else {
+                        sponsor_runtime::ExecutionBackend::Wasmer
+                    };
+                    let auth_token = if backend == sponsor_runtime::ExecutionBackend::Tenki {
+                        Some(
+                            dialoguer::Password::new()
+                                .with_prompt("Tenki API key (kept only in adapter memory)")
+                                .interact()?,
+                        )
+                    } else {
+                        None
+                    };
+                    let outcome = sponsor_runtime::run(sponsor_runtime::SandboxRequest {
+                        backend,
+                        language: "python".to_string(),
+                        code: code.clone(),
+                        timeout_ms: *timeout_ms,
+                        auth_token,
+                    })?;
+                    println!("{}", outcome.output);
+                    eprintln!(
+                        "[+] {:?} · {} · {} ms · sha256:{}",
+                        outcome.backend, outcome.status, outcome.duration_ms, outcome.output_sha256
+                    );
+                    if outcome.status != "completed" || outcome.exit_code != 0 {
+                        anyhow::bail!(
+                            "sandbox program failed safely with exit code {}",
+                            outcome.exit_code
+                        );
+                    }
+                }
+                DemoCommands::Replay {
+                    evidence,
+                    port,
+                    no_open,
+                } => server::start_replay_server(evidence, *port, !no_open).await?,
+            }
+            return Ok(());
+        }
         _ => {}
     }
     // IDE MCP launchers do not consistently support a per-server working
@@ -1062,8 +1203,15 @@ async fn main() -> Result<()> {
             no_setup,
             provider,
             model,
+            demo,
         }) => {
             onboarding::run_onboarding(quick, ci, yes, no_setup, provider, model);
+            if demo {
+                let ready = guard_launcher::print_doctor(true, None).await;
+                if !ready {
+                    eprintln!("[-] Demo prerequisites are incomplete. Run `kerna guard doctor --demo` after installation.");
+                }
+            }
         }
         // Handled before runtime initialization above. Keeping this arm makes
         // the exhaustive command dispatch explicit if that early return is
@@ -1073,6 +1221,12 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Client { .. }) => {
             unreachable!("client command returns before runtime setup")
+        }
+        Some(Commands::Guard { .. }) => {
+            unreachable!("guard command returns before runtime setup")
+        }
+        Some(Commands::Demo { .. }) => {
+            unreachable!("demo command returns before runtime setup")
         }
         Some(Commands::Daemon) => {
             let watchdog = WatchdogEngine::new(memory.clone(), config.clone());
@@ -1124,7 +1278,14 @@ async fn main() -> Result<()> {
             println!("\n[+] Daemon stopped cleanly.");
         }
 
-        Some(Commands::Serve { port, bind, token }) => {
+        Some(Commands::Serve {
+            port,
+            bind,
+            token,
+            route,
+            shadow,
+            provider_key_stdin,
+        }) => {
             let is_loopback = bind == "127.0.0.1" || bind == "localhost" || bind == "::1";
             if !is_loopback && token.is_none() {
                 eprintln!(
@@ -1136,6 +1297,14 @@ async fn main() -> Result<()> {
             if token.is_none() {
                 println!("[i] No --token set: this server is loopback-only and unauthenticated.");
             }
+            let anthropic_api_key = if provider_key_stdin {
+                let mut key = String::new();
+                std::io::stdin().read_line(&mut key)?;
+                let key = key.trim_end().to_string();
+                (!key.is_empty()).then(|| Arc::new(key))
+            } else {
+                std::env::var("ANTHROPIC_API_KEY").ok().map(Arc::new)
+            };
             let state = server::AppState {
                 config: config.clone(),
                 guard_policy: Arc::new(load_guard_policy(&config)?),
@@ -1143,6 +1312,10 @@ async fn main() -> Result<()> {
                 mcp_registry: mcp_registry.clone(),
                 worktree_baseline: server::capture_worktree_baseline()?,
                 auth_token: token,
+                route_mode: route,
+                shadow_enabled: shadow,
+                anthropic_api_key,
+                route_decisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             };
             if let Err(e) = server::start_server(state, &bind, port).await {
                 eprintln!("[-] Server failed: {}", e);
@@ -1157,6 +1330,10 @@ async fn main() -> Result<()> {
                 mcp_registry: mcp_registry.clone(),
                 worktree_baseline: server::capture_worktree_baseline()?,
                 auth_token: None,
+                route_mode: guard_routing::RouteMode::Cloud,
+                shadow_enabled: false,
+                anthropic_api_key: None,
+                route_decisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             };
             if let Err(e) = server::start_dashboard_server(state, port, !no_open).await {
                 eprintln!("[-] Dashboard failed: {}", e);

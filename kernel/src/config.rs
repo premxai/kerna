@@ -646,7 +646,7 @@ impl Config {
         if config.llm_model.is_empty() {
             config.llm_model = env::var("KERNA_LLM_MODEL").unwrap_or_else(|_| {
                 match config.llm_provider.as_str() {
-                    "anthropic" => "claude-sonnet-4-20250514".to_string(),
+                    "anthropic" => crate::guard_routing::DEFAULT_CLOUD_MODEL.to_string(),
                     _ => "gpt-4o-mini".to_string(),
                 }
             });

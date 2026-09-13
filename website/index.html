@@ -3,66 +3,361 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Kerna is the local-first trust layer for useful AI work. Connect MCP tools, govern each action, and keep a receipt." />
+    <meta name="description" content="Kerna is the runtime for governed AI agents. One task, six layers — inspect, route, govern, execute, observe — with a receipt for every decision." />
     <link rel="canonical" href="https://kerna.run/" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Kerna" />
-    <meta property="og:title" content="Kerna | Give AI work. Keep the keys." />
-    <meta property="og:description" content="A local-first trust layer for AI agents. Govern MCP actions and keep a readable receipt for every run." />
+    <meta property="og:title" content="Kerna | Run agents anywhere. Control everything they do." />
+    <meta property="og:description" content="One task. One governed runtime. Inspect, route, govern, execute, observe — and keep a receipt for every decision." />
     <meta property="og:url" content="https://kerna.run/" />
     <meta property="og:image" content="https://kerna.run/assets/kerna-og.png" />
     <meta property="og:image:secure_url" content="https://kerna.run/assets/kerna-og.png" />
-    <meta property="og:image:type" content="image/png" />
-    <meta property="og:image:width" content="1200" />
-    <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="Kerna — Give AI work. Keep the keys." />
+    <meta property="og:image:alt" content="Kerna — the governed runtime for AI agents." />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Kerna | Give AI work. Keep the keys." />
-    <meta name="twitter:description" content="A local-first trust layer for AI agents." />
+    <meta name="twitter:title" content="Kerna | Run agents anywhere. Control everything they do." />
+    <meta name="twitter:description" content="One task. One governed runtime." />
     <meta name="twitter:image" content="https://kerna.run/assets/kerna-og.png" />
-    <title>Kerna</title>
-    <link rel="icon" type="image/svg+xml" href="assets/kerna-favicon.svg" />
-    <link rel="stylesheet" href="styles.css?v=4" />
+    <title>Kerna — Run agents anywhere. Control everything they do.</title>
+    <link rel="icon" type="image/svg+xml" href="assets/kerna-favicon-ink.svg" />
+    <link rel="stylesheet" href="runtime.css?v=1" />
   </head>
   <body>
-    <a class="skip" href="#main">Skip to content</a>
+    <a class="skip" href="#after-story">Skip to content</a>
     <header class="site-header">
       <a class="brand" href="index.html" aria-label="Kerna home"><span class="brand-mark" aria-hidden="true"></span>Kerna</a>
       <button class="menu-toggle" type="button" aria-controls="site-nav" aria-expanded="false">Menu</button>
       <nav class="site-nav" id="site-nav" aria-label="Primary navigation">
-        <a href="how-it-works.html">How it works</a><a href="workflows.html">Workflows</a><a href="privacy.html">No account</a><a class="nav-download" href="download.html">Download</a><a class="github-link" href="https://github.com/premxai/kerna" target="_blank" rel="noreferrer" aria-label="View Kerna on GitHub"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 .5A11.5 11.5 0 0 0 8.36 22.91c.58.1.79-.25.79-.56v-2.15c-3.22.7-3.9-1.37-3.9-1.37-.52-1.35-1.29-1.7-1.29-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.76 2.7 1.25 3.36.96.1-.76.4-1.26.73-1.55-2.57-.29-5.27-1.29-5.27-5.72 0-1.26.45-2.3 1.19-3.11-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.17 1.19A11.06 11.06 0 0 1 12 4.79c.98 0 1.97.13 2.9.39 2.2-1.5 3.17-1.19 3.17-1.19.63 1.59.23 2.77.11 3.06.74.81 1.19 1.85 1.19 3.11 0 4.44-2.7 5.42-5.28 5.71.41.35.78 1.04.78 2.1v3.12c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z" /></svg><span class="github-label">GitHub</span><span class="github-stars" aria-live="polite"><span aria-hidden="true">★</span><span data-github-stars>…</span></span></a>
+        <a href="how-it-works.html">How it works</a><a href="benchmarks.html">Benchmarks</a><a class="github-link" href="https://github.com/premxai/kerna" target="_blank" rel="noreferrer" aria-label="View Kerna on GitHub"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 .5A11.5 11.5 0 0 0 8.36 22.91c.58.1.79-.25.79-.56v-2.15c-3.22.7-3.9-1.37-3.9-1.37-.52-1.35-1.29-1.7-1.29-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.76 2.7 1.25 3.36.96.1-.76.4-1.26.73-1.55-2.57-.29-5.27-1.29-5.27-5.72 0-1.26.45-2.3 1.19-3.11-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.17 1.19A11.06 11.06 0 0 1 12 4.79c.98 0 1.97.13 2.9.39 2.2-1.5 3.17-1.19 3.17-1.19.63 1.59.23 2.77.11 3.06.74.81 1.19 1.85 1.19 3.11 0 4.44-2.7 5.42-5.28 5.71.41.35.78 1.04.78 2.1v3.12c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z" /></svg><span class="github-label">GitHub</span><span class="github-stars" aria-live="polite"><span aria-hidden="true">★</span><span data-github-stars>…</span></span></a><a class="nav-download" href="download.html">Download</a>
       </nav>
     </header>
-    <main id="main" class="page-shell">
-      <section class="hero rail">
-        <div class="hero-grid">
-          <div class="hero-copy">
-            <p class="eyebrow">A trust layer for AI agents</p>
-            <h1 class="display">Give AI work.<br />Keep the <em>keys.</em></h1>
-            <p class="intro">Kerna connects your models and MCP tools, stops unreviewed actions, and leaves a readable receipt for every run.</p>
-            <div class="actions"><a class="button" href="download.html">Download Kerna</a><a class="button ghost" href="how-it-works.html">See the control loop</a></div>
+
+    <main id="main">
+      <div class="story" id="story" aria-label="The Kerna runtime story">
+        <div class="stage">
+          <div class="stage-copy" aria-live="off">
+            <div class="copy-block" data-scene="intro">
+              <h1>Run agents anywhere.<br />Control <em>everything</em> they do.</h1>
+              <p>Give any AI agent a task. Kerna runs it through one governed runtime.</p>
+              <p class="mono" style="font-size:.68rem; color:var(--ink-muted); letter-spacing:.12em; margin-top:1.6rem;">SCROLL TO SEE WHAT HAPPENS UNDERNEATH ↓</p>
+            </div>
+            <div class="copy-block" data-scene="explode">
+              <p class="eyebrow">One task. An entire runtime.</p>
+              <h2>What happens <em>underneath</em> matters.</h2>
+              <p>Every task separates into layers. Each one observable, governed, and accountable.</p>
+            </div>
+            <div class="copy-block" data-scene="inspect">
+              <p class="eyebrow">Layer 01 · Inspect</p>
+              <h2>Understand before execution.</h2>
+              <p>Kerna inspects intent, tools, context and risk before the agent starts acting.</p>
+            </div>
+            <div class="copy-block" data-scene="route">
+              <p class="eyebrow">Layer 02 · Route</p>
+              <h2>The right intelligence for every task.</h2>
+              <p>Route work across local and cloud models based on capability, cost, privacy, latency and policy.</p>
+              <p class="sub-note"><b>SHADOW MODE</b> — test local models against production workloads without giving them execution authority.</p>
+            </div>
+            <div class="copy-block" data-scene="govern">
+              <p class="eyebrow">Layer 03 · Govern</p>
+              <h2>Every action has a <em>boundary.</em></h2>
+              <p>Define what agents can read, write, execute, access or spend — and require humans when the risk demands it.</p>
+            </div>
+            <div class="copy-block" data-scene="execute">
+              <p class="eyebrow">Layer 04 · Execute</p>
+              <h2>Give agents room to work. Not unlimited access.</h2>
+              <p>Execute tools and workflows inside controlled environments with explicit permissions and runtime limits.</p>
+            </div>
+            <div class="copy-block" data-scene="observe">
+              <p class="eyebrow">Layer 05 · Observe</p>
+              <h2>See what the agent <em>did.</em><br />Not just what it <em>said.</em></h2>
+              <p>Every action leaves a trace — decisions, approvals, results, cost.</p>
+            </div>
+            <div class="copy-block" data-scene="end">
+              <h2>One task.<br />One governed <em>runtime.</em></h2>
+              <p>The same simple agent screen — now you know what's underneath it.</p>
+            </div>
           </div>
-          <figure class="hero-art"><img src="assets/onboarding-terminal.png" alt="Kerna terminal output showing workspace initialization and installation of the productivity pack." /><figcaption>Actual first-run output: a fail-closed workspace and curated productivity tools.</figcaption></figure>
+
+          <div class="world">
+            <div class="stack" id="stack">
+              <div class="signal" id="signal" aria-hidden="true"></div>
+              <div class="packet" id="packet" aria-hidden="true"></div>
+
+              <section class="plate task" data-layer="task" aria-label="Agent task">
+                <div class="plate-head"><span class="dot" aria-hidden="true"></span><span class="title">Agent</span><span class="tag">you already use it</span></div>
+                <div class="plate-body">
+                  <p class="agent-line">What would you like me to work on?</p>
+                  <div class="task-input">
+                    <span class="text"><span id="typed">Fix the authentication bug, run the tests and prepare a PR.</span><span class="cursor" aria-hidden="true"></span></span>
+                    <span class="send" aria-hidden="true">→</span>
+                  </div>
+                  <div class="task-complete">
+                    <p class="banner">TASK COMPLETE</p>
+                    <ul>
+                      <li>Authentication fixed</li>
+                      <li>42 / 42 tests passed</li>
+                      <li>PR ready</li>
+                    </ul>
+                  </div>
+                </div>
+              </section>
+
+              <section class="plate inspect" data-layer="inspect" aria-label="Task inspection">
+                <div class="plate-head"><span class="dot" aria-hidden="true"></span><span class="title">Task inspection</span><span class="tag">before execution</span></div>
+                <div class="plate-body">
+                  <p class="inspect-task">"Fix authentication bug, run tests and prepare PR."</p>
+                  <dl class="inspect-rows">
+                    <div class="scanlit inspect-row"><dt>Intent</dt><dd>Code modification</dd></div>
+                    <div class="scanlit inspect-row"><dt>Capabilities</dt><dd><span class="cap-chips"><span class="cap-chip">Filesystem</span><span class="cap-chip">Terminal</span><span class="cap-chip">Git</span></span></dd></div>
+                    <div class="scanlit inspect-row"><dt>Risk</dt><dd><span class="risk-pill">MEDIUM</span></dd></div>
+                    <div class="scanlit inspect-row"><dt>Sensitive</dt><dd class="sens"><b>.env</b> <i>detected</i><br />/prod <i>protected</i></dd></div>
+                    <div class="scanlit inspect-row"><dt>Workload</dt><dd>Coding / reasoning</dd></div>
+                  </dl>
+                  <div class="scanline" id="scanline" aria-hidden="true"></div>
+                </div>
+              </section>
+
+              <section class="plate route" data-layer="route" aria-label="Model routing" id="route-plate">
+                <div class="plate-head"><span class="dot" aria-hidden="true"></span><span class="title">Kerna router</span><span class="tag">local · cloud · hybrid</span></div>
+                <div class="plate-body">
+                  <svg class="junction" id="junction" viewBox="0 0 480 190" role="img" aria-label="One task routes to local, cloud, or hybrid models. The cloud lane is active.">
+                    <path class="track t-local" d="M240 22 C240 52 120 58 120 96 C120 122 128 132 136 142" />
+                    <path class="track t-cloud" d="M240 22 C240 60 240 84 240 142" />
+                    <path class="track t-hybrid" d="M240 22 C240 52 360 58 360 96 C360 122 352 132 344 142" />
+                    <rect class="hub" x="192" y="86" width="96" height="26" rx="7" />
+                    <text class="hub-label" x="240" y="103" text-anchor="middle">KERNA</text>
+                    <text class="lane-label" x="120" y="163" text-anchor="middle">LOCAL</text>
+                    <text class="lane-sub" x="120" y="177" text-anchor="middle">Qwen · Llama · Mistral</text>
+                    <text class="lane-label" x="240" y="163" text-anchor="middle">CLOUD</text>
+                    <text class="lane-sub" x="240" y="177" text-anchor="middle">Claude · GPT · Gemini</text>
+                    <text class="lane-label" x="360" y="163" text-anchor="middle">HYBRID</text>
+                    <text class="lane-sub" x="360" y="177" text-anchor="middle">Primary + Shadow</text>
+                    <circle class="packet-dot" id="junction-packet" cx="240" cy="22" r="6" />
+                    <circle class="shadow-dot" id="junction-shadow" cx="240" cy="22" r="6" />
+                  </svg>
+                  <div class="route-eval">
+                    <div>PRIVACY<b>LOW</b></div>
+                    <div>COMPLEXITY<b>HIGH</b></div>
+                    <div>LATENCY<b>NORMAL</b></div>
+                    <div>LOCAL MODEL<b>7B</b></div>
+                  </div>
+                  <div class="route-toggle">
+                    <button type="button" data-lane="cloud" class="on">Cloud</button>
+                    <button type="button" data-lane="local">Prefer local</button>
+                    <span class="hint">the track physically switches</span>
+                  </div>
+                </div>
+              </section>
+
+              <section class="plate govern" data-layer="govern" aria-label="Policy gate and approval">
+                <div class="plate-head"><span class="dot" aria-hidden="true"></span><span class="title">Policy gate</span><span class="tag">enforce mode</span></div>
+                <div class="plate-body">
+                  <div class="gov-lane" id="gov-lane">
+                    <div class="gov-row allow" data-gov="0"><span class="verb">READ</span><span class="target">src/auth.ts</span><span class="verdict">ALLOW</span></div>
+                    <div class="gov-row allow" data-gov="1"><span class="verb">WRITE</span><span class="target">src/auth.ts</span><span class="verdict">ALLOW</span></div>
+                    <div class="gov-row hold" data-gov="2"><span class="verb">READ</span><span class="target">.env</span><span class="verdict">HOLD</span></div>
+                    <div class="gate" id="gate" aria-hidden="true"></div>
+                    <div class="approval-card" id="approval-card" role="img" aria-label="Approval required: agent requested access to protected credentials .env.production.">
+                      <div class="ac-head">APPROVAL REQUIRED</div>
+                      <dl>
+                        <div><dt>reason</dt><dd>protected credentials</dd></div>
+                        <div><dt>resource</dt><dd class="danger">.env.production</dd></div>
+                        <div><dt>requested by</dt><dd>coding-agent</dd></div>
+                      </dl>
+                      <div class="approval-actions">
+                        <span class="decide deny">Deny</span>
+                        <span class="decide approve" id="approve-btn">Approve</span>
+                      </div>
+                    </div>
+                    <p class="gov-cleared" id="gov-cleared">APPROVED · GATE OPEN · SIGNAL RELEASED</p>
+                  </div>
+                </div>
+              </section>
+
+              <section class="plate execute" data-layer="execute" aria-label="Execution sandbox">
+                <div class="plate-head"><span class="dot" aria-hidden="true"></span><span class="title">Kerna sandbox</span><span class="tag">contained</span></div>
+                <div class="plate-body">
+                  <div class="chamber" id="chamber">
+                    <div class="chamber-door" aria-hidden="true"></div>
+                    <div class="chamber-door lower" aria-hidden="true"></div>
+                    <div class="chamber-tools">
+                      <span>FILES</span><span>TERMINAL</span><span>BROWSER</span><span>APIs</span><span>GIT</span><span>NETWORK</span>
+                    </div>
+                    <div class="chamber-run">
+                      <div class="run-step" data-run="0"><span class="n">01</span>read auth.ts</div>
+                      <div class="run-step" data-run="1"><span class="n">02</span>edit function</div>
+                      <div class="run-step" data-run="2"><span class="n">03</span>npm test</div>
+                      <div class="run-step pass" data-run="3"><span class="n">04</span>42 tests passed ✓</div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="plate observe" data-layer="observe" aria-label="Observation timeline">
+                <div class="plate-head"><span class="dot" aria-hidden="true"></span><span class="title">Receipt timeline</span><span class="tag">append-only</span></div>
+                <div class="plate-body">
+                  <div class="observe-grid">
+                    <div class="tl" id="timeline">
+                      <p class="tl-row" data-tl="0"><span class="t">10:42:01</span><span class="e">Task received</span></p>
+                      <p class="tl-row" data-tl="1"><span class="t">10:42:02</span><span class="e">Intent inspected</span></p>
+                      <p class="tl-row" data-tl="2"><span class="t">10:42:04</span><span class="e">Routed</span><span class="d">Cloud · Claude</span></p>
+                      <p class="tl-row" data-tl="3"><span class="t">10:42:08</span><span class="e">file.read</span><span class="d">src/auth.ts</span></p>
+                      <p class="tl-row" data-tl="4"><span class="t">10:42:12</span><span class="e">file.write</span><span class="d">src/auth.ts</span></p>
+                      <p class="tl-row" data-tl="5"><span class="t">10:42:14</span><span class="e">policy.check</span><span class="d">PASSED</span></p>
+                      <p class="tl-row warn" data-tl="6"><span class="t">10:42:17</span><span class="e">secret.read</span><span class="d">APPROVAL REQUIRED</span></p>
+                      <p class="tl-row" data-tl="7"><span class="t">10:42:26</span><span class="e">Human approved</span></p>
+                      <p class="tl-row" data-tl="8"><span class="t">10:42:33</span><span class="e">terminal.exec</span><span class="d">npm test</span></p>
+                      <p class="tl-row ok" data-tl="9"><span class="t">10:42:51</span><span class="e">TASK COMPLETE</span></p>
+                    </div>
+                    <div class="stats">
+                      <p class="big">42 / 42 tests passed</p>
+                      <dl>
+                        <div><dt>Files changed</dt><dd>2</dd></div>
+                        <div><dt>Tool calls</dt><dd>9</dd></div>
+                        <div><dt>Policy checks</dt><dd>7</dd></div>
+                        <div><dt>Approvals</dt><dd>1</dd></div>
+                      </dl>
+                      <div class="divider" aria-hidden="true"></div>
+                      <dl>
+                        <div><dt>Model</dt><dd>Claude</dd></div>
+                        <div><dt>Shadow</dt><dd>Qwen 7B</dd></div>
+                        <div><dt>Cost</dt><dd>$0.038</dd></div>
+                        <div><dt>Duration</dt><dd>50.4s</dd></div>
+                      </dl>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
         </div>
-      </section>
-      <section class="install-deck" aria-labelledby="install-title">
-        <div class="install-deck-heading"><p class="eyebrow">Install Kerna</p><h2 id="install-title" class="display">Choose the path that fits your machine.</h2><p>Every option installs the same verified runtime. Copy a command, then initialize a local workspace.</p></div>
-        <div class="install-command-grid">
-          <article><p class="command-label">npm</p><div class="command-row"><code>npm install -g @premxai/kerna</code><button class="copy" type="button" aria-label="Copy npm install command" title="Copy command">Copy</button></div><p>Node.js 16+ on Windows, macOS, or Linux.</p></article>
-          <article><p class="command-label">macOS / Linux</p><div class="command-row"><code>curl -fsSL https://raw.githubusercontent.com/premxai/kerna/main/install.sh | sh</code><button class="copy" type="button" aria-label="Copy macOS and Linux install command" title="Copy command">Copy</button></div><p>Downloads the matching release binary and plugins.</p></article>
-          <article><p class="command-label">Windows PowerShell</p><div class="command-row"><code>irm https://raw.githubusercontent.com/premxai/kerna/main/install.ps1 | iex</code><button class="copy" type="button" aria-label="Copy Windows install command" title="Copy command">Copy</button></div><p>Installs into your user location and adds a PATH hint.</p></article>
-          <article><p class="command-label">Source fallback</p><div class="command-row"><code>cargo install --git https://github.com/premxai/kerna --bin kerna</code><button class="copy" type="button" aria-label="Copy source install command" title="Copy command">Copy</button></div><p>For unsupported platforms or source-based development.</p></article>
-          <article><p class="command-label">Create your workspace</p><div class="command-row"><code>kerna init --ci --provider mock</code><button class="copy" type="button" aria-label="Copy workspace initialization command" title="Copy command">Copy</button></div><p>Start with a deterministic demo provider and fail-closed policy.</p></article>
-          <article><p class="command-label">Install productivity tools</p><div class="command-row"><code>kerna pack install productivity</code><button class="copy" type="button" aria-label="Copy productivity pack command" title="Copy command">Copy</button></div><p>Add local notes, calendar, weather, web reading, and optional search.</p></article>
-        </div>
-      </section>
-      <section class="proof-line" aria-label="Kerna principles"><div class="proof-label">THE<br />CONTROL<br />PLANE</div><div><strong>Local-first</strong><p>Policies, receipts, and workspace data are yours to inspect locally.</p></div><div><strong>Fail-closed</strong><p>Ungoverned tools do not run. Consequential actions pause for review.</p></div><div><strong>Model-flexible</strong><p>Use the provider and MCP tools that fit the work, without giving up the guardrails.</p></div></section>
-      <section class="section rail"><div class="section-title"><p class="eyebrow">One loop, made visible</p><h2 class="display">Useful work should not require a leap of faith.</h2><p class="intro">Kerna is not another chat window. It is the narrow control plane between an agent and the tools that can change your world.</p></div><div class="workflow-ribbon"><article><span class="number">01</span><h3>Ask</h3><p>Describe an outcome. Kerna discovers only the tools your workspace has explicitly allowed.</p></article><article><span class="number">02</span><h3>Check</h3><p>Policy, scope, and budget are evaluated before an MCP tool ever runs.</p></article><article><span class="number">03</span><h3>Decide</h3><p>Writes and external actions can stop in a local approval queue for a human choice.</p></article><article><span class="number">04</span><h3>Receipt</h3><p>Review the outcome, decisions, and trace without treating an agent as a black box.</p></article></div></section>
-      <section class="approval-stage"><div class="vertical">THE MOMENT THAT MATTERS</div><div class="approval-copy"><p class="eyebrow">Approval is a feature</p><h2 class="display">When work becomes consequential, the machine should ask.</h2><p>Writing a note, creating a calendar event, or reaching an external service can be queued for a clear, one-time decision. If the answer is no, nothing happens.</p><a class="button" href="how-it-works.html">Follow one run</a></div><div class="approval-receipt"><figure class="real-capture"><img src="assets/connector-risk-card.png" alt="Kerna notes connector risk card showing read-only tools and an approval-required add note tool." /><figcaption>Actual connector review: reads are visible, writes explicitly require approval.</figcaption></figure></div></section>
-      <section class="section rail"><div class="section-title"><p class="eyebrow">First useful run</p><h2 class="display">From install to a governed task.</h2><p class="intro">Start in demo mode or bring your own provider. Curated packs keep local productivity tools close to hand.</p></div><div class="onboarding"><div>ONBOARDING<br />IN THREE MOVES</div><article><span class="step-num">01 / INSTALL</span><h3>Put the runtime on your machine.</h3><div class="code">npm install -g @premxai/kerna</div></article><article><span class="step-num">02 / CONNECT</span><h3>Choose a pack, then inspect its risk.</h3><div class="code">kerna pack install productivity<br /><span>kerna mcp risk google-calendar</span></div></article><article><span class="step-num">03 / REVIEW</span><h3>Run work and keep the receipt.</h3><div class="code">kerna run "Prepare my morning brief"<br /><span>kerna trace last</span></div></article></div></section>
-      <section class="quiet-cta"><div><p class="eyebrow">Start with a bounded job</p><h2>Make your first routine useful before making it automatic.</h2></div><div><p>Explore read-first workflows for meeting preparation, research, and a calm daily brief.</p><a class="button ghost" href="workflows.html">Explore workflows</a></div></section>
+      </div>
+
+      <div id="after-story">
+        <section class="section proof" aria-label="Kerna in the real world">
+          <div class="section-inner">
+            <p class="eyebrow reveal">Not a concept</p>
+            <h2 class="reveal" style="--reveal-delay:.06s">Kerna running in the <em>real world.</em></h2>
+            <p class="reveal" style="--reveal-delay:.12s">The runtime is live today. This is what governed work looks like in the actual product.</p>
+            <div class="proof-mock reveal" style="--reveal-delay:.18s">
+              <div class="mock-head"><span class="live" aria-hidden="true"></span><span class="live-word">LIVE</span><span>· KERNA GATEWAY SESSION</span></div>
+              <div class="mock-run">
+                <p class="label">RUN</p>
+                <p class="agent-name">qoder-agent</p>
+                <p class="mock-kv">Status <b>Active</b><br />Mode <b>Enforce</b><br />Policy <b>fail-closed</b></p>
+              </div>
+              <div class="mock-trace">
+                <p class="label" style="color:#7c7668; font-family:var(--mono); font-size:.58rem; letter-spacing:.16em; margin:0 0 .5rem;">TRACE</p>
+                <div class="trace-row"><span class="tick">0ms</span>task.created</div>
+                <div class="trace-row"><span class="tick">+2ms</span>policy.evaluate</div>
+                <div class="trace-row hot"><span class="tick">+2ms</span>approval.request</div>
+                <div class="trace-row"><span class="tick">+9s</span>tool.execute</div>
+                <div class="trace-row"><span class="tick">+9s</span>receipt.commit</div>
+                <div class="trace-row"><span class="tick">+9s</span>task.complete</div>
+              </div>
+            </div>
+            <div class="proof-chips reveal" style="--reveal-delay:.24s">
+              <span class="proof-chip">MCP gateway mode</span>
+              <span class="proof-chip">Policy + approval enforcement</span>
+              <span class="proof-chip">Hash-chained receipts</span>
+              <span class="proof-chip">Qoder demo walkthrough</span>
+              <span class="proof-chip">Published benchmarks</span>
+            </div>
+            <p class="proof-note reveal" style="--reveal-delay:.3s">From the governed Qoder MCP demo and the live Kerna Runtime v0.2.8. Routing and shadow evaluation enter through the Guard pilot.</p>
+          </div>
+        </section>
+
+        <section class="section products" aria-label="Products">
+          <div class="section-inner">
+            <p class="eyebrow reveal">Two products · one boundary</p>
+            <h2 class="reveal" style="--reveal-delay:.06s">The runtime is live. <em>The guard is coming.</em></h2>
+            <div class="products-grid">
+              <article class="product reveal">
+                <div class="product-top"><span class="tagline">Contained coding agents</span><span class="status-chip dev">In development</span></div>
+                <h3>Kerna Guard</h3>
+                <p>Run Claude Code and Codex on real repositories inside a disposable worktree. Every model-issued action stands before the gate — allow, ask, deny. Review the diff, then apply. Or walk away.</p>
+                <div class="code">kerna guard claude --repo . <span># the task begins</span></div>
+              </article>
+              <article class="product reveal" style="--reveal-delay:.12s">
+                <div class="product-top"><span class="tagline">The local trust layer</span><span class="status-chip live">Live · v0.2.8</span></div>
+                <h3>Kerna Runtime</h3>
+                <p>The fail-closed trust layer for MCP tools: explicit permissions, human approvals, hard budgets, and a local receipt for every run. No account, no cloud, no keys leaving your machine.</p>
+                <div class="code">kerna run "Prepare my morning brief" <span>→ receipt</span></div>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section class="section integrations" aria-label="Integrations">
+          <div class="section-inner">
+            <p class="eyebrow reveal">Integrations</p>
+            <h2 class="reveal" style="--reveal-delay:.06s">Keep your agents.<br />Add <em>Kerna.</em></h2>
+            <div class="int-map reveal" style="--reveal-delay:.14s">
+              <div class="int-agents">
+                <span>Claude Code</span><span>Codex</span><span>Qoder</span><span>Cursor</span><span>Custom agents</span><span>CI agents</span>
+              </div>
+              <div class="int-hub">
+                <span class="int-connector">───▶</span>
+                <div class="kerna-box"><span class="brand-mark" aria-hidden="true"></span>Kerna</div>
+                <ul><li>Inspect</li><li>Route</li><li>Govern</li><li>Execute</li><li>Observe</li></ul>
+              </div>
+              <div class="int-out">
+                <span class="int-connector">───▶</span>
+                <span>LOCAL</span><span>CLOUD</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section arch" aria-label="Architecture">
+          <div class="section-inner">
+            <p class="eyebrow reveal">Architecture</p>
+            <h2 class="reveal" style="--reveal-delay:.06s">Built to sit <em>in the middle.</em></h2>
+            <div class="arch-diagram reveal" style="--reveal-delay:.14s">
+              <div class="arch-box"><span class="a-label">YOUR AGENT</span></div>
+              <div class="arch-arrow">│</div>
+              <div class="arch-box"><span class="a-label">KERNA GATEWAY</span><p class="a-sub">Identity · Context</p></div>
+              <div class="arch-arrow">▼</div>
+              <div class="arch-box core">
+                <span class="a-label">KERNA RUNTIME</span>
+                <div class="cells">
+                  <span class="cell">ROUTER</span><span class="cell">POLICY ENGINE</span><span class="cell">APPROVAL ENGINE</span><span class="cell">SANDBOX</span><span class="cell">BUDGETS</span><span class="cell">TELEMETRY</span>
+                </div>
+              </div>
+              <div class="arch-arrow">▼</div>
+              <div class="arch-splits">
+                <div class="arch-box"><span class="a-label">MODELS</span></div>
+                <div class="arch-box"><span class="a-label">TOOLS</span></div>
+                <div class="arch-box"><span class="a-label">INFRA</span></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section final-cta" aria-label="Get started">
+          <div class="cta-line reveal" aria-hidden="true"></div>
+          <img class="cta-mark reveal" src="assets/kerna-mark-ink.svg" alt="Kerna mark" style="--reveal-delay:.06s" />
+          <h2 class="reveal" style="--reveal-delay:.1s">Your agents are ready to act.<br /><em>Make sure you're in control.</em></h2>
+          <p class="reveal" style="--reveal-delay:.16s">One task. One governed runtime. Local-first, receipt for every decision.</p>
+          <div class="cta-actions reveal" style="--reveal-delay:.22s">
+            <a class="button primary" href="download.html">Start with Kerna</a>
+            <a class="button ghost" href="https://github.com/premxai/kerna">Read the docs</a>
+          </div>
+        </section>
+      </div>
     </main>
-    <footer class="site-footer"><div class="footer-inner"><div><a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true"></span>Kerna</a><p>A local-first trust layer for AI work.<br />MIT OR Apache-2.0.</p></div><nav class="footer-links" aria-label="Footer navigation"><a href="how-it-works.html">How it works</a><a href="workflows.html">Workflows</a><a href="download.html">Download</a><a href="privacy.html">No account</a><a href="https://github.com/premxai/kerna">GitHub</a></nav></div></footer>
-    <script src="site.js"></script>
+
+    <footer class="site-footer">
+      <div class="footer-inner">
+        <div>
+          <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true"></span>Kerna</a>
+          <p>The governed runtime for AI agents.<br />MIT OR Apache-2.0.</p>
+        </div>
+        <nav class="footer-links" aria-label="Footer navigation">
+          <a href="how-it-works.html">How it works</a><a href="workflows.html">Workflows</a><a href="benchmarks.html">Benchmarks</a><a href="download.html">Download</a><a href="privacy.html">No account</a><a href="https://github.com/premxai/kerna">GitHub</a>
+        </nav>
+      </div>
+    </footer>
+
+    <script src="runtime.js" defer></script>
   </body>
 </html>

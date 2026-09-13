@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Kerna command mark</title>
+  <desc id="desc">A precise terminal prompt inside a circular control reticle.</desc>
+  <g stroke="#201D17" stroke-linecap="square" stroke-linejoin="miter">
+    <circle cx="256" cy="256" r="178" stroke-width="10"/>
+    <circle cx="256" cy="256" r="128" stroke-width="10" stroke-dasharray="149 52"/>
+    <circle cx="256" cy="256" r="86" stroke-width="9"/>
+    <path d="M256 37v43M256 432v43M37 256h43M432 256h43" stroke-width="10"/>
+    <path d="M256 95v36M256 381v36M95 256h36M381 256h36" stroke-width="10"/>
+    <path d="M202 221l54 35-54 35M280 292h51" stroke-width="13"/>
+  </g>
+  <g fill="#D8753C">
+    <circle cx="256" cy="103" r="8"/>
+    <circle cx="409" cy="256" r="8"/>
+    <circle cx="256" cy="409" r="8"/>
+    <circle cx="103" cy="256" r="8"/>
+  </g>
+</svg>

@@ -456,6 +456,7 @@ impl Gateway {
             .unwrap_or("")
             .to_string();
         let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+        let is_sandbox_call = tool_name == "kerna_sandbox_run";
 
         if tool_name.is_empty() {
             return error_result("Missing tool name in tools/call request.");
@@ -491,7 +492,7 @@ impl Gateway {
                     "container": self.container_metadata(None)
                 }),
             );
-            self.start_receipt(&call_id, None, &tool_name, "UnknownTool");
+            let _ = self.start_receipt(&call_id, None, &tool_name, "UnknownTool");
             self.finish_receipt(
                 &call_id,
                 None,
@@ -512,7 +513,11 @@ impl Gateway {
             "info",
             None,
             json!({
-                "arguments": arguments,
+                "arguments": if is_sandbox_call {
+                    sandbox_request_evidence(&arguments)
+                } else {
+                    arguments.clone()
+                },
                 "server": server_name,
                 "container": self.container_metadata(server_name.as_deref())
             }),
@@ -521,12 +526,23 @@ impl Gateway {
         // Fail-closed policy check. Confirmation requests are durable and bound
         // to the exact retry; the downstream plugin never sees the first call.
         let level = self.permissions.check(&tool_name, server_name.as_deref());
-        self.start_receipt(
+        if let Err(error) = self.start_receipt(
             &call_id,
             server_name.as_deref(),
             &tool_name,
             &format!("{:?}", level),
-        );
+        ) {
+            self.record(
+                "tool.call.blocked",
+                Some(&tool_name),
+                "error",
+                Some("ReceiptCommitFailed"),
+                json!({"reason": error.to_string()}),
+            );
+            return error_result(
+                "Kerna failed closed because the pre-release receipt could not commit.",
+            );
+        }
         self.record(
             "tool.policy.checked",
             Some(&tool_name),
@@ -674,22 +690,51 @@ impl Gateway {
                         error,
                     );
                 }
-                let result_preview = redacted_preview(&result);
+                let downstream_error = result
+                    .get("isError")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let sandbox_evidence = is_sandbox_call.then(|| sandbox_result_evidence(&result));
+                let result_preview = sandbox_evidence
+                    .as_ref()
+                    .and_then(|value| serde_json::to_string(value).ok())
+                    .unwrap_or_else(|| redacted_preview(&result));
                 let trace_id = self.record(
-                    "tool.call.completed",
+                    if downstream_error {
+                        "tool.call.failed"
+                    } else {
+                        "tool.call.completed"
+                    },
                     Some(&tool_name),
-                    "info",
+                    if downstream_error { "error" } else { "info" },
                     Some("AutoApprove"),
                     json!({
                         "result_preview": result_preview,
                         "container": self.container_metadata(server_name.as_deref())
                     }),
                 );
+                if let Some(evidence) = sandbox_evidence {
+                    self.record(
+                        if downstream_error {
+                            "sandbox.failed"
+                        } else {
+                            "sandbox.completed"
+                        },
+                        Some(&tool_name),
+                        if downstream_error { "error" } else { "info" },
+                        Some("AutoApprove"),
+                        evidence,
+                    );
+                }
                 self.finish_receipt(
                     &call_id,
                     None,
                     started.elapsed(),
-                    "completed",
+                    if downstream_error {
+                        "failed"
+                    } else {
+                        "completed"
+                    },
                     trace_id.as_deref(),
                     Some(&result_preview),
                 );
@@ -797,14 +842,14 @@ impl Gateway {
         server_name: Option<&str>,
         tool: &str,
         policy_decision: &str,
-    ) {
+    ) -> Result<()> {
         let server = server_name.and_then(|name| {
             self.config
                 .mcp_servers
                 .iter()
                 .find(|server| server.name == name)
         });
-        let _ = self.memory.start_tool_call_receipt(
+        self.memory.start_tool_call_receipt(
             call_id,
             &self.session_id,
             &self.task_id.to_string(),
@@ -813,7 +858,7 @@ impl Gateway {
             server.and_then(|server| (!server.image.is_empty()).then_some(server.image.as_str())),
             tool,
             policy_decision,
-        );
+        )
     }
 
     fn finish_receipt(
@@ -872,7 +917,7 @@ impl Gateway {
         // A receipt may not have been opened yet -- the runtime check runs
         // before the tool is even resolved -- so open one now if needed. A
         // refusal with no receipt is a refusal the dashboard cannot show.
-        self.start_receipt(call_id, server_name, tool_name, "BudgetExceeded");
+        let _ = self.start_receipt(call_id, server_name, tool_name, "BudgetExceeded");
         self.finish_receipt(
             call_id,
             None,
@@ -969,6 +1014,33 @@ fn canonical_json(value: &serde_json::Value) -> String {
         ),
         _ => value.to_string(),
     }
+}
+
+fn sandbox_request_evidence(arguments: &serde_json::Value) -> serde_json::Value {
+    let code = arguments
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    json!({
+        "backend": arguments.get("backend"),
+        "language": arguments.get("language"),
+        "timeout_ms": arguments.get("timeout_ms"),
+        "code_bytes": code.len(),
+        "code_sha256": format!("{:x}", Sha256::digest(code.as_bytes())),
+        "source_persisted": false,
+        "capabilities": {"host_mounts": false, "environment": false, "network": false}
+    })
+}
+
+fn sandbox_result_evidence(result: &serde_json::Value) -> serde_json::Value {
+    let metadata = result
+        .get("structuredContent")
+        .cloned()
+        .unwrap_or_else(|| json!({"status": "failed", "details_persisted": false}));
+    json!({
+        "outcome": metadata,
+        "raw_output_persisted": false
+    })
 }
 
 fn session_card(
@@ -1245,6 +1317,88 @@ mod tests {
             && e.policy_decision.as_deref() == Some("Deny")));
 
         let _ = fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn wasmer_tool_is_governed_and_persists_only_digests() {
+        if !crate::sponsor_runtime::bridge_available() {
+            eprintln!("skipping Wasmer acceptance test: demo bridge is unavailable");
+            return;
+        }
+        let db_path = format!("test_gateway_wasmer_{}.db", Uuid::new_v4());
+        let memory = Arc::new(MemoryEngine::new(&db_path).unwrap());
+        let mut config = Config {
+            db_path: db_path.clone(),
+            ..Config::default()
+        };
+        config.mcp_servers.push(McpServerConfig {
+            name: "mockmcp".to_string(),
+            command: kerna_bin(),
+            args: vec!["mockmcp".to_string()],
+            enabled: true,
+            runtime_mode: "local".to_string(),
+            docker_image: String::new(),
+            image: String::new(),
+            manifest_path: String::new(),
+            manifest_sha256: String::new(),
+            signing_public_key: String::new(),
+            read_roots: vec![],
+            write_roots: vec![],
+            capabilities: vec![],
+            allowed_paths: vec![],
+            approval_required: vec![],
+            allow_tools: vec![],
+            deny_tools: vec![],
+            secrets: vec![],
+        });
+        config.permissions.push(PermissionRule {
+            tool: "kerna_sandbox_run".to_string(),
+            action: "auto_approve".to_string(),
+        });
+        config.permissions.push(PermissionRule {
+            tool: "*".to_string(),
+            action: "deny".to_string(),
+        });
+        let registry = Arc::new(Mutex::new(McpRegistry::new()));
+        registry
+            .lock()
+            .await
+            .initialize(&config.mcp_servers)
+            .await
+            .unwrap();
+        let mut gateway = Gateway::new(config, registry, memory.clone());
+        memory
+            .create_task(gateway.task_id, None, "Wasmer evidence test")
+            .unwrap();
+
+        let result = gateway
+            .handle_tool_call(json!({
+                "name": "kerna_sandbox_run",
+                "arguments": {
+                    "backend": "wasmer",
+                    "language": "python",
+                    "code": "print('KERNA_OUTPUT_MUST_NOT_PERSIST') # KERNA_SOURCE_MUST_NOT_PERSIST",
+                    "timeout_ms": 10000
+                }
+            }))
+            .await;
+        assert_eq!(result["isError"], json!(false));
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("KERNA_OUTPUT_MUST_NOT_PERSIST"));
+
+        let persisted =
+            serde_json::to_string(&memory.get_events(&gateway.task_id.to_string()).unwrap())
+                .unwrap();
+        assert!(!persisted.contains("KERNA_SOURCE_MUST_NOT_PERSIST"));
+        assert!(!persisted.contains("KERNA_OUTPUT_MUST_NOT_PERSIST"));
+        assert!(persisted.contains("sandbox.completed"));
+        let receipts = memory.recent_tool_call_receipts(10).unwrap();
+        let receipt_json = serde_json::to_string(&receipts).unwrap();
+        assert!(!receipt_json.contains("KERNA_SOURCE_MUST_NOT_PERSIST"));
+        assert!(!receipt_json.contains("KERNA_OUTPUT_MUST_NOT_PERSIST"));
+        let _ = fs::remove_file(db_path);
     }
 
     #[tokio::test]

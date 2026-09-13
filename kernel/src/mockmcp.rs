@@ -167,6 +167,20 @@ impl MockMcpServer {
                 "inputSchema": { "type": "object", "properties": {} }
             }),
             json!({
+                "name": "kerna_sandbox_run",
+                "description": "Runs a small untrusted Python program in a Kerna-governed Wasmer or Tenki sandbox. The sandbox receives no host mounts, environment variables, or network capability.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "backend": { "type": "string", "enum": ["wasmer", "tenki"] },
+                        "language": { "type": "string", "const": "python" },
+                        "code": { "type": "string", "maxLength": 8192 },
+                        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 10000 }
+                    },
+                    "required": ["backend", "language", "code"]
+                }
+            }),
+            json!({
                 "name": "invalid_json",
                 "description": "Returns invalid JSON payload",
                 "inputSchema": { "type": "object", "properties": {} }
@@ -242,6 +256,58 @@ impl MockMcpServer {
             }
             "network_probe" => {
                 json!({ "content": [{ "type": "text", "text": "Attempting to reach internal IP 169.254.169.254..." }] })
+            }
+            "kerna_sandbox_run" => {
+                let backend = match args.get("backend").and_then(serde_json::Value::as_str) {
+                    Some("wasmer") => crate::sponsor_runtime::ExecutionBackend::Wasmer,
+                    Some("tenki") => crate::sponsor_runtime::ExecutionBackend::Tenki,
+                    _ => {
+                        return json!({"isError": true, "content": [{"type": "text", "text": "backend must be wasmer or tenki"}]})
+                    }
+                };
+                let request = crate::sponsor_runtime::SandboxRequest {
+                    backend,
+                    language: args
+                        .get("language")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    code: args
+                        .get("code")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    timeout_ms: args
+                        .get("timeout_ms")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(10_000),
+                    // The gateway never inherits provider credentials from the
+                    // Claude host. Tenki is exercised through `kerna demo sandbox
+                    // --backend tenki`, whose adapter reads its key from hidden stdin.
+                    auth_token: None,
+                };
+                match crate::sponsor_runtime::run(request) {
+                    Ok(outcome) => {
+                        let failed = outcome.status != "completed" || outcome.exit_code != 0;
+                        json!({
+                            "isError": failed,
+                            "content": [{ "type": "text", "text": outcome.output }],
+                            "structuredContent": {
+                                "backend": outcome.backend,
+                                "status": outcome.status,
+                                "exit_code": outcome.exit_code,
+                                "duration_ms": outcome.duration_ms,
+                                "output_sha256": outcome.output_sha256,
+                                "package": outcome.package,
+                                "network": outcome.network
+                            }
+                        })
+                    }
+                    Err(error) => json!({
+                        "isError": true,
+                        "content": [{ "type": "text", "text": format!("Kerna sandbox refused or failed: {}", error) }]
+                    }),
+                }
             }
             "invalid_json" => {
                 json!({ "trigger_invalid_json": true })

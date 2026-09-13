@@ -1,5 +1,7 @@
 use crate::config::Config;
+use crate::events::{Event, EventSink};
 use crate::guard_policy::{ActionIntent, AgentKind, GuardPolicy, PolicyEffect};
+use crate::guard_routing::{RouteDecision, RouteMode};
 use crate::mcp_registry::McpRegistry;
 use crate::memory::GuardActionBinding;
 use crate::memory::MemoryEngine;
@@ -16,10 +18,11 @@ use axum::{
     Json, Router,
 };
 use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::process::Command;
@@ -40,6 +43,10 @@ pub struct AppState {
     pub worktree_baseline: String,
     /// When set, requests must present `Authorization: Bearer <token>`.
     pub auth_token: Option<String>,
+    pub route_mode: RouteMode,
+    pub shadow_enabled: bool,
+    pub anthropic_api_key: Option<Arc<String>>,
+    pub route_decisions: Arc<Mutex<HashMap<String, RouteDecision>>>,
 }
 
 #[derive(Clone)]
@@ -57,6 +64,12 @@ struct DashboardState {
     csrf_token: String,
     origin: String,
     signing_key: Arc<SigningKey>,
+}
+
+#[derive(Clone)]
+struct ReplayState {
+    bundle: Arc<Value>,
+    payload: Arc<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,15 +171,6 @@ async fn handle_guard_anthropic(
             "Missing or invalid session token.",
         );
     }
-    let key = match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(value) if !value.is_empty() => value,
-        _ => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Anthropic broker key is unavailable.",
-            )
-        }
-    };
     let context = match start_guard_stream(&state, AgentKind::ClaudeCode, "anthropic_messages") {
         Ok(context) => context,
         Err(_) => {
@@ -182,14 +186,67 @@ async fn handle_guard_anthropic(
             "Kerna could not persist the Claude tool result receipt.",
         );
     }
-    let base = std::env::var("KERNA_ANTHROPIC_UPSTREAM")
-        .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
+    let local_available = ollama_model_available(crate::guard_routing::DEFAULT_LOCAL_MODEL).await;
+    let decision = {
+        let mut decisions = state.route_decisions.lock().await;
+        if let Some(existing) = decisions.get(&context.session_id) {
+            existing.clone()
+        } else {
+            let initial_task = crate::guard_routing::initial_user_task(&body);
+            let decision = match crate::guard_routing::decide_route(
+                context.session_id.clone(),
+                state.route_mode,
+                &initial_task,
+                local_available,
+                state.shadow_enabled,
+            ) {
+                Ok(decision) => decision,
+                Err(error) => {
+                    return error_response(StatusCode::SERVICE_UNAVAILABLE, error.to_string())
+                }
+            };
+            if record_route_decision(&state.memory, &context, &decision).is_err() {
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Kerna could not persist the routing decision.",
+                );
+            }
+            decisions.insert(context.session_id.clone(), decision.clone());
+            decision
+        }
+    };
+    let key = if decision.is_local() {
+        "ollama".to_string()
+    } else {
+        match state.anthropic_api_key.as_ref() {
+            Some(value) if !value.is_empty() => value.as_str().to_string(),
+            _ => {
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Anthropic broker key is unavailable.",
+                )
+            }
+        }
+    };
+    let routed_body = match crate::guard_routing::rewrite_model(&body, &decision.model, false) {
+        Ok(body) => body,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "Kerna could not parse the Anthropic request for routing.",
+            )
+        }
+    };
+    if decision.shadow_provider.is_some() {
+        spawn_local_shadow(state.memory.clone(), context.clone(), body.clone());
+    }
+    let base = decision.upstream_base_url();
     let mut request = reqwest::Client::new()
         .post(provider_url(&base, "v1/messages"))
         .header(header::CONTENT_TYPE, "application/json")
         .header("x-api-key", key)
         .header("anthropic-version", "2023-06-01")
-        .body(body);
+        .body(routed_body);
     for name in ["anthropic-version", "anthropic-beta"] {
         if let Some(value) = headers.get(name) {
             request = request.header(name, value);
@@ -202,6 +259,126 @@ async fn handle_guard_anthropic(
             "Anthropic upstream is unavailable.",
         ),
     }
+}
+
+async fn ollama_model_available(model: &str) -> bool {
+    let Ok(response) = reqwest::Client::new()
+        .get(format!(
+            "{}/api/tags",
+            crate::guard_routing::DEFAULT_LOCAL_BASE_URL
+        ))
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+    else {
+        return false;
+    };
+    let Ok(payload) = response.json::<Value>().await else {
+        return false;
+    };
+    payload
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+        .any(|name| name == model || name.strip_suffix(":latest") == model.strip_suffix(":latest"))
+}
+
+fn record_route_decision(
+    memory: &MemoryEngine,
+    context: &GuardStreamContext,
+    decision: &RouteDecision,
+) -> anyhow::Result<()> {
+    memory.record(Event {
+        event_id: Uuid::new_v4().to_string(),
+        task_id: context.task_id.clone(),
+        session_id: Some(context.session_id.clone()),
+        sequence: 1,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        event_type: "routing.decision".to_string(),
+        actor: "kerna_router".to_string(),
+        severity: "info".to_string(),
+        model: Some(decision.model.clone()),
+        tool: None,
+        policy_decision: Some("selected".to_string()),
+        risk_score: None,
+        parent_event_id: None,
+        correlation_id: Some(context.session_id.clone()),
+        redaction_status: Some("metadata_only".to_string()),
+        budget_snapshot_json: None,
+        payload_json: serde_json::to_value(decision)?,
+    })
+}
+
+fn spawn_local_shadow(memory: Arc<MemoryEngine>, context: GuardStreamContext, body: Bytes) {
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let shadow_body = match crate::guard_routing::rewrite_model(
+            &body,
+            crate::guard_routing::DEFAULT_LOCAL_MODEL,
+            true,
+        ) {
+            Ok(body) => body,
+            Err(_) => return,
+        };
+        let result = reqwest::Client::new()
+            .post(provider_url(
+                crate::guard_routing::DEFAULT_LOCAL_BASE_URL,
+                "v1/messages",
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-api-key", "ollama")
+            .header("anthropic-version", "2023-06-01")
+            .body(shadow_body)
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await;
+        let (status, digest, bytes) = match result {
+            Ok(response) => match response.bytes().await {
+                Ok(output) => (
+                    "completed",
+                    format!("{:x}", Sha256::digest(&output)),
+                    output.len(),
+                ),
+                Err(_) => ("failed", String::new(), 0),
+            },
+            Err(_) => ("failed", String::new(), 0),
+        };
+        let _ = memory.record(Event {
+            event_id: Uuid::new_v4().to_string(),
+            task_id: context.task_id,
+            session_id: Some(context.session_id.clone()),
+            sequence: 2,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            event_type: format!("shadow.{status}"),
+            actor: "kerna_shadow".to_string(),
+            severity: if status == "completed" {
+                "info"
+            } else {
+                "warning"
+            }
+            .to_string(),
+            model: Some(crate::guard_routing::DEFAULT_LOCAL_MODEL.to_string()),
+            tool: None,
+            policy_decision: Some("non_executing".to_string()),
+            risk_score: None,
+            parent_event_id: None,
+            correlation_id: Some(context.session_id),
+            redaction_status: Some("output_digest_only".to_string()),
+            budget_snapshot_json: None,
+            payload_json: json!({
+                "provider": "ollama",
+                "model": crate::guard_routing::DEFAULT_LOCAL_MODEL,
+                "tools_removed": true,
+                "user_impact": "none",
+                "duration_ms": started.elapsed().as_millis(),
+                "output_bytes": bytes,
+                "output_sha256": digest,
+                "status": status,
+            }),
+        });
+    });
 }
 
 /// Relay an OpenAI Responses stream through the protocol gate. The caller's Authorization
@@ -326,7 +503,10 @@ fn start_guard_stream(
         .as_deref()
         .map(|token| format!("guard-{:x}", Sha256::digest(token.as_bytes())))
         .unwrap_or_else(|| format!("guard-{}", Uuid::new_v4()));
-    let task_id = Uuid::new_v4();
+    let task_digest = Sha256::digest(session_id.as_bytes());
+    let mut task_bytes = [0_u8; 16];
+    task_bytes.copy_from_slice(&task_digest[..16]);
+    let task_id = Uuid::from_bytes(task_bytes);
     let agent_name = match agent {
         AgentKind::ClaudeCode => "claude_code",
         AgentKind::Codex => "codex",
@@ -336,7 +516,7 @@ fn start_guard_stream(
     let worktree_baseline = state.worktree_baseline.clone();
     state
         .memory
-        .create_task(task_id, Some(&session_id), "Kerna Guard protocol session")
+        .ensure_task(task_id, "Kerna Guard protocol session")
         .map_err(|error| error.to_string())?;
     state
         .memory
@@ -838,6 +1018,7 @@ pub async fn start_dashboard_server(
         .route("/api/v1/dashboard/approvals", get(dashboard_approvals))
         .route("/api/v1/dashboard/containment", get(dashboard_containment))
         .route("/api/v1/dashboard/models", get(dashboard_models))
+        .route("/api/v1/dashboard/readiness", get(dashboard_readiness))
         .route(
             "/api/v1/dashboard/registry/recommendations",
             get(dashboard_recommendations),
@@ -862,6 +1043,101 @@ pub async fn start_dashboard_server(
     }
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+pub async fn start_replay_server(
+    evidence_path: &std::path::Path,
+    port: u16,
+    open_browser: bool,
+) -> anyhow::Result<()> {
+    let bundle: Value = serde_json::from_slice(&std::fs::read(evidence_path)?)?;
+    if bundle.get("algorithm").and_then(Value::as_str) != Some("Ed25519") {
+        anyhow::bail!("evidence bundle does not declare Ed25519");
+    }
+    let payload = bundle
+        .get("payload")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("evidence bundle is missing payload"))?;
+    let public_key = base64::engine::general_purpose::STANDARD.decode(
+        bundle
+            .get("public_key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("evidence bundle is missing public_key"))?,
+    )?;
+    let signature = base64::engine::general_purpose::STANDARD.decode(
+        bundle
+            .get("signature")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("evidence bundle is missing signature"))?,
+    )?;
+    let public_key: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("evidence public key has the wrong length"))?;
+    let signature: [u8; 64] = signature
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("evidence signature has the wrong length"))?;
+    VerifyingKey::from_bytes(&public_key)?
+        .verify(
+            &serde_json::to_vec(&payload)?,
+            &Signature::from_bytes(&signature),
+        )
+        .map_err(|_| anyhow::anyhow!("evidence signature verification failed"))?;
+
+    let replay = ReplayState {
+        bundle: Arc::new(bundle),
+        payload: Arc::new(payload),
+    };
+    let app = Router::new()
+        .route("/", get(replay_page))
+        .route("/api/v1/dashboard/overview", get(replay_overview))
+        .route("/api/v1/dashboard/evidence", get(replay_evidence))
+        .route("/api/v1/dashboard/workspace", get(replay_workspace))
+        .route("/api/v1/dashboard/events", get(replay_events))
+        .with_state(replay);
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    println!("[+] Verified signed evidence: {}", evidence_path.display());
+    println!("[+] Read-only rehearsal listening on http://{addr}/");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    if open_browser {
+        let _ = webbrowser::open(&format!("http://{addr}/"));
+    }
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn replay_page() -> Html<String> {
+    let watermark = r#"<div style="position:fixed;z-index:99;left:50%;top:10px;transform:translateX(-50%);padding:7px 14px;border:1px solid #e4b56e;border-radius:999px;background:#fff7e8;color:#9b6419;font:700 11px ui-monospace,monospace;box-shadow:0 4px 18px #0001">RECORDED REHEARSAL · SIGNATURE VERIFIED · READ ONLY</div>"#;
+    let script = r#"<script>document.addEventListener('DOMContentLoaded',()=>document.querySelectorAll('button').forEach(button=>{button.disabled=true;button.title='Disabled in signed replay mode';button.style.opacity='.45';button.style.cursor='not-allowed'}));</script>"#;
+    Html(
+        include_str!("../assets/dashboard.html")
+            .replace("{csrf}", "replay-read-only")
+            .replace("<body>", &format!("<body>{watermark}{script}")),
+    )
+}
+
+async fn replay_overview(State(state): State<ReplayState>) -> Json<Value> {
+    Json((*state.payload).clone())
+}
+
+async fn replay_evidence(State(state): State<ReplayState>) -> Json<Value> {
+    Json((*state.bundle).clone())
+}
+
+async fn replay_workspace() -> axum::response::Response {
+    error_response(
+        StatusCode::LOCKED,
+        "Recorded rehearsal is immutable; workspace operations are disabled.",
+    )
+}
+
+async fn replay_events(State(state): State<ReplayState>) -> impl IntoResponse {
+    let encoded = state.payload.to_string();
+    let stream = async_stream::stream! {
+        yield Ok::<SseEvent, std::convert::Infallible>(
+            SseEvent::default().event("snapshot").data(encoded),
+        );
+    };
+    Sse::new(stream)
 }
 
 async fn dashboard_page(State(state): State<DashboardState>) -> Html<String> {
@@ -1188,6 +1464,19 @@ async fn dashboard_models(State(state): State<DashboardState>) -> Json<Value> {
     }))
 }
 
+async fn dashboard_readiness(State(_state): State<DashboardState>) -> Json<Value> {
+    Json(json!({
+        "checks": crate::guard_launcher::doctor_checks(true, None).await,
+        "hardware": crate::models::detect_hardware(),
+        "storage": {
+            "cargo_target": r"C:\Temp\kerna-target",
+            "sessions": r"C:\Temp\kerna-sessions",
+            "ollama_models": r"C:\KernaData\ollama-models",
+            "demo_runtime": r"C:\KernaData\kerna-demo"
+        }
+    }))
+}
+
 async fn dashboard_recommendations(State(_state): State<DashboardState>) -> Json<Value> {
     let hardware = crate::models::detect_hardware();
     Json(json!({
@@ -1354,6 +1643,22 @@ fn dashboard_snapshot(state: &DashboardState) -> Value {
         "write_roots": plugin.write_roots,
         "tools": if plugin.allow_tools.is_empty() { plugin.capabilities.clone() } else { plugin.allow_tools.clone() }
     })).collect::<Vec<_>>();
+    let runtime_events = state.app.memory.recent_events(200).unwrap_or_default();
+    let routing = runtime_events
+        .iter()
+        .filter(|event| event.event_type == "routing.decision")
+        .cloned()
+        .collect::<Vec<_>>();
+    let shadow = runtime_events
+        .iter()
+        .filter(|event| event.event_type.starts_with("shadow."))
+        .cloned()
+        .collect::<Vec<_>>();
+    let sandbox_events = runtime_events
+        .iter()
+        .filter(|event| event.event_type.starts_with("sandbox."))
+        .cloned()
+        .collect::<Vec<_>>();
     json!({
         "generated_at": chrono::Utc::now().to_rfc3339(),
         "metrics": {
@@ -1367,7 +1672,16 @@ fn dashboard_snapshot(state: &DashboardState) -> Value {
         "receipts": receipts,
         "approvals": approvals,
         "containment": plugins,
-        "models": {"external_clients": "Model selection remains client-controlled", "routes": state.app.config.model_routes, "privacy_routes": state.app.config.privacy_routes}
+        "routing": routing,
+        "shadow": shadow,
+        "sandbox_events": sandbox_events,
+        "runtime_boundaries": [
+            {"name": "Claude host process", "runtime_mode": "disposable clone", "network": "brokered model traffic", "status": "governed; not fully containerized"},
+            {"name": "Delegated MCP tools", "runtime_mode": "Docker", "network": "disabled by default", "status": "contained"},
+            {"name": "Untrusted code", "runtime_mode": "Wasmer", "network": "disabled", "status": if sandbox_events.iter().any(|event| event.payload_json.pointer("/outcome/backend").and_then(Value::as_str) == Some("wasmer")) { "verified this session" } else { "awaiting smoke run" }},
+            {"name": "Remote sandbox", "runtime_mode": "Tenki", "network": "disabled by Kerna", "status": if std::env::var("TENKI_API_KEY").map(|value| !value.is_empty()).unwrap_or(false) { "configured" } else { "authentication required" }},
+        ],
+        "models": {"external_clients": "Kerna selects one sticky upstream for guarded Claude sessions", "routes": state.app.config.model_routes, "privacy_routes": state.app.config.privacy_routes}
     })
 }
 
@@ -1508,6 +1822,10 @@ mod tests {
                 mcp_registry: Arc::new(Mutex::new(McpRegistry::new())),
                 worktree_baseline: "sha256:test-baseline".to_owned(),
                 auth_token: None,
+                route_mode: RouteMode::Cloud,
+                shadow_enabled: false,
+                anthropic_api_key: None,
+                route_decisions: Arc::new(Mutex::new(HashMap::new())),
             },
             csrf_token: "csrf".to_string(),
             origin: "http://127.0.0.1:8765".to_string(),
@@ -1530,6 +1848,10 @@ mod tests {
                 mcp_registry: Arc::new(Mutex::new(McpRegistry::new())),
                 worktree_baseline: "sha256:test-baseline".to_owned(),
                 auth_token: None,
+                route_mode: RouteMode::Cloud,
+                shadow_enabled: false,
+                anthropic_api_key: None,
+                route_decisions: Arc::new(Mutex::new(HashMap::new())),
             },
             csrf_token: "one-time-token".to_string(),
             origin: "http://127.0.0.1:8765".to_string(),
