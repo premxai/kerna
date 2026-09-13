@@ -115,6 +115,7 @@ struct RmcpGateway {
 impl RmcpGateway {
     async fn exposed_tools(&self) -> Result<Vec<Tool>, McpError> {
         let gateway = self.inner.lock().await;
+        let demo_policy_probe = is_demo_policy_probe(&gateway, "network_probe");
         let mut tools = {
             let registry = gateway.registry.lock().await;
             registry
@@ -126,10 +127,11 @@ impl RmcpGateway {
                         .and_then(|value| value.as_str())
                         .unwrap_or_default();
                     registry.tool_is_callable(name)
-                        && gateway
+                        && (gateway
                             .permissions
                             .check(name, registry.get_server_for_tool(name).as_deref())
                             != PermissionLevel::Deny
+                            || (demo_policy_probe && is_network_probe(name)))
                 })
                 .map(|tool| {
                     serde_json::from_value::<Tool>(tool).map_err(|error| {
@@ -394,10 +396,12 @@ impl Gateway {
                                             .and_then(|value| value.as_str())
                                             .unwrap_or_default();
                                         registry.tool_is_callable(name)
-                                            && self.permissions.check(
+                                            && (self.permissions.check(
                                                 name,
                                                 registry.get_server_for_tool(name).as_deref(),
                                             ) != PermissionLevel::Deny
+                                                || (is_demo_policy_probe(self, "network_probe")
+                                                    && is_network_probe(name)))
                                     })
                                     .collect::<Vec<_>>()
                             };
@@ -1030,6 +1034,22 @@ fn sandbox_request_evidence(arguments: &serde_json::Value) -> serde_json::Value 
         "source_persisted": false,
         "capabilities": {"host_mounts": false, "environment": false, "network": false}
     })
+}
+
+fn is_network_probe(name: &str) -> bool {
+    name == "network_probe" || name.ends_with("__network_probe")
+}
+
+/// The demo intentionally advertises one denied tool so a presenter can show
+/// Kerna rejecting an actual attempted call. Production gateways continue to
+/// hide denied tools from discovery.
+fn is_demo_policy_probe(gateway: &Gateway, tool: &str) -> bool {
+    tool == "network_probe"
+        && gateway
+            .config
+            .mcp_servers
+            .iter()
+            .any(|server| server.runtime_mode == "demo")
 }
 
 fn sandbox_result_evidence(result: &serde_json::Value) -> serde_json::Value {

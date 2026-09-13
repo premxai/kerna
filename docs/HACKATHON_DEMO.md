@@ -75,7 +75,9 @@ known-good; otherwise keep the truthful amber readiness card and use recorded re
    duration, output size, output digest, and tool authority. It does not claim a live semantic score
    because raw model prose is not retained.
 4. In the dashboard, show one allowed MCP call, an approval-held `secret_probe`, and denied
-   `network_probe`. Approvals are one-time and bound to the exact session/action/policy/worktree
+   `network_probe`. Demo mode intentionally advertises `network_probe` as a policy trap so Claude
+   can attempt it and Kerna can produce a visible blocked receipt; production discovery hides
+   denied tools. Approvals are one-time and bound to the exact session/action/policy/worktree
    receipt. Native Claude tools outside the MCP path are not claimed as covered.
 5. Ask Claude to call `kerna_sandbox_run` with Wasmer, or use the reliable fallback:
 
