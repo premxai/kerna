@@ -90,6 +90,9 @@ enum QuickCommand {
     Doctor {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
+        /// Keep readiness output to one compact summary.
+        #[arg(long, alias = "compact")]
+        brief: bool,
     },
     /// Start Claude through Kerna. Cloud tasks are shadowed locally by default.
     Claude {
@@ -156,6 +159,9 @@ enum Commands {
         /// Prepare and diagnose the Claude-first hackathon demo runtime.
         #[arg(long)]
         demo: bool,
+        /// Keep demo setup and readiness output compact.
+        #[arg(long, alias = "compact")]
+        brief: bool,
     },
 
     /// Launch and inspect governed coding-agent sessions.
@@ -1219,8 +1225,12 @@ async fn async_main() -> Result<()> {
         && !arguments.iter().any(|arg| arg == "--gateway"));
     if uses_quick_parser {
         match QuickCli::parse().command {
-            QuickCommand::Doctor { repo } => {
-                if !guard_launcher::print_doctor(true, Some(&repo)).await {
+            QuickCommand::Doctor { repo, brief } => {
+                if !(if brief {
+                    guard_launcher::print_doctor_brief(true, Some(&repo)).await
+                } else {
+                    guard_launcher::print_doctor(true, Some(&repo)).await
+                }) {
                     std::process::exit(1);
                 }
             }
@@ -1426,9 +1436,10 @@ async fn async_main() -> Result<()> {
             provider,
             model,
             demo,
+            brief,
         }) => {
             if demo {
-                guard_launcher::run_demo_setup().await?;
+                guard_launcher::run_demo_setup(brief).await?;
             } else {
                 onboarding::run_onboarding(quick, ci, yes, no_setup, provider, model);
             }

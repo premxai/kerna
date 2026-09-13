@@ -63,6 +63,42 @@ pub fn system_profile() -> serde_json::Value {
     })
 }
 
+pub async fn print_doctor_brief(demo: bool, repo: Option<&Path>) -> bool {
+    let checks = doctor_checks(demo, repo).await;
+    let hardware = crate::models::detect_hardware();
+    let local_route = crate::guard_routing::active_local_model()
+        .map(|model| format!("local {model}"))
+        .unwrap_or_else(|| "local disabled".to_string());
+    let ready = checks
+        .iter()
+        .filter(|check| check.status == "ready")
+        .count();
+    let required = checks.iter().filter(|check| check.required).count();
+    println!(
+        "Kerna doctor · {} {} · {} · {} GB VRAM",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        hardware.name,
+        hardware.memory_gb.unwrap_or(0)
+    );
+    println!("[i] Route: auto · {local_route} · cloud on demand");
+    println!("[i] Readiness: {ready}/{required} required checks ready");
+    checks
+        .iter()
+        .filter(|check| check.status != "ready")
+        .for_each(|check| {
+            println!(
+                "[{}] {} · {}",
+                if check.status == "optional" { "~" } else { "-" },
+                check.name,
+                check.detail
+            );
+        });
+    checks
+        .iter()
+        .all(|check| !check.required || check.status == "ready")
+}
+
 pub async fn print_doctor(demo: bool, repo: Option<&Path>) -> bool {
     let checks = doctor_checks(demo, repo).await;
     let hardware = crate::models::detect_hardware();
@@ -308,8 +344,17 @@ pub async fn launch_claude(
 
 /// Guided setup for the hackathon surface. It stores only non-secret choices;
 /// provider credentials are intentionally collected at the operation that uses them.
-pub async fn run_demo_setup() -> Result<()> {
+pub async fn run_demo_setup(brief: bool) -> Result<()> {
     let fast_path = crate::guard_routing::demo_profile_path().is_file();
+    println!("  _  __                     ");
+    println!(" | |/ /___ _ __ _ __   __ _ ");
+    println!(" | ' // _ \\ '__| '_ \\ / _` |");
+    println!(" | . \\  __/ |  | | | | (_| |");
+    println!(" |_|\\_\\___|_|  |_| |_|\\__,_|");
+    println!();
+    println!("Welcome to Kerna — the runtime trust layer for autonomous agents.");
+    println!("✓ routing  ✓ fail-closed permissions  ✓ approvals  ✓ receipts");
+    println!();
     println!("Kerna demo setup\n");
     if fast_path {
         println!("[i] Existing demo profile found; starting the preflighted control room.");
@@ -387,7 +432,11 @@ pub async fn run_demo_setup() -> Result<()> {
     );
 
     let workspace = std::env::current_dir()?;
-    let ready = print_doctor(true, Some(&workspace)).await;
+    let ready = if brief {
+        print_doctor_brief(true, Some(&workspace)).await
+    } else {
+        print_doctor(true, Some(&workspace)).await
+    };
     if !ready {
         eprintln!("[-] Demo setup is incomplete. Start Docker Desktop and rerun `kerna doctor`.");
         return Ok(());

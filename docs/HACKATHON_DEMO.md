@@ -8,7 +8,9 @@ disposable clone and is **not** fully containerized; the dashboard repeats that 
 
 ```text
 kerna init --demo  # first run asks; later runs launch the saved non-secret profile
+kerna init --demo --brief  # same launch with compact terminal output
 kerna doctor   # scan hardware, runtimes, models, storage, and provider readiness
+kerna doctor --brief  # one-line readiness summary for the stage
 kerna          # start governed Claude with automatic routing and local shadow
 ```
 
