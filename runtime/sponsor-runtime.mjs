@@ -4,6 +4,8 @@ const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
 const MAX_OUTPUT_BYTES = 65536;
+const TENKI_ADMISSION_TIMEOUT_MS = 60_000;
+const TENKI_MAX_DURATION_MS = 90_000;
 
 function boundedOutput(value) {
   const output = String(value ?? "");
@@ -51,7 +53,11 @@ async function runWasmer() {
 
 async function runTenki() {
   const { TenkiSandbox, stdoutText } = await import("@tenkicloud/sandbox");
-  const client = new TenkiSandbox({ authToken: request.auth_token });
+  const client = new TenkiSandbox({
+    authToken: request.auth_token,
+    timeoutMs: TENKI_ADMISSION_TIMEOUT_MS,
+    dataPlaneReadyTimeoutMs: TENKI_ADMISSION_TIMEOUT_MS,
+  });
   let session;
   try {
     session = await client.createAndWait({
@@ -60,6 +66,9 @@ async function runTenki() {
       memoryMb: 4096,
       allowInbound: false,
       allowOutbound: false,
+      maxDurationMs: TENKI_MAX_DURATION_MS,
+      waitTimeoutMs: TENKI_ADMISSION_TIMEOUT_MS,
+      timeoutMs: TENKI_ADMISSION_TIMEOUT_MS,
     });
     const result = await session.exec("python3", {
       args: ["-c", request.code],
@@ -75,6 +84,7 @@ async function runTenki() {
     };
   } finally {
     if (session) await session.close();
+    await client[Symbol.asyncDispose]?.();
   }
 }
 

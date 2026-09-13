@@ -9,6 +9,10 @@ use std::time::{Duration, Instant};
 pub const MAX_CODE_BYTES: usize = 8 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 pub const MAX_TIMEOUT_MS: u64 = 10_000;
+/// Remote VM admission is separate from the guest command budget. Tenki can
+/// legitimately take longer than a local Wasmer sandbox to provision a VM.
+pub const TENKI_ADMISSION_TIMEOUT_MS: u64 = 60_000;
+pub const TENKI_CLEANUP_GRACE_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -90,7 +94,12 @@ pub fn run(request: SandboxRequest) -> Result<SandboxOutcome> {
         .take()
         .ok_or_else(|| anyhow!("sponsor runtime stdin is unavailable"))?
         .write_all(&serde_json::to_vec(&request)?)?;
-    let deadline = Instant::now() + Duration::from_millis(request.timeout_ms + 1_000);
+    let bridge_timeout_ms = if request.backend == ExecutionBackend::Tenki {
+        request.timeout_ms + TENKI_ADMISSION_TIMEOUT_MS + TENKI_CLEANUP_GRACE_MS
+    } else {
+        request.timeout_ms + 1_000
+    };
+    let deadline = Instant::now() + Duration::from_millis(bridge_timeout_ms);
     loop {
         if child.try_wait()?.is_some() {
             break;
@@ -98,7 +107,12 @@ pub fn run(request: SandboxRequest) -> Result<SandboxOutcome> {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(anyhow!("sandbox exceeded its bounded timeout"));
+            let boundary = if request.backend == ExecutionBackend::Tenki {
+                "Tenki remote sandbox exceeded its bounded admission/execution window"
+            } else {
+                "sandbox exceeded its bounded timeout"
+            };
+            return Err(anyhow!(boundary));
         }
         std::thread::sleep(Duration::from_millis(20));
     }
