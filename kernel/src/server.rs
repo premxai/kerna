@@ -32,6 +32,8 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Config,
@@ -257,7 +259,12 @@ async fn handle_guard_anthropic(
         .ok()
         .and_then(|payload| payload.get("stream").and_then(Value::as_bool))
         .unwrap_or(false);
-    let mut request = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(PROVIDER_REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let mut request = client
         .post(provider_url(&base, "v1/messages"))
         .header(header::CONTENT_TYPE, "application/json")
         .header("x-api-key", key)
@@ -732,8 +739,8 @@ async fn relay_anthropic(
             ) {
                 break 'relay;
             }
-            match upstream.chunk().await {
-                Ok(Some(chunk)) => {
+            match tokio::time::timeout(PROVIDER_REQUEST_TIMEOUT, upstream.chunk()).await {
+                Ok(Ok(Some(chunk))) => {
                     response_hasher.update(&chunk);
                     response_bytes = response_bytes.saturating_add(chunk.len());
                     match gate.feed(&chunk) {
@@ -750,14 +757,14 @@ async fn relay_anthropic(
                         Err(_) => break,
                     }
                 },
-                Ok(None) => {
+                Ok(Ok(None)) => {
                     if let Ok(frames) = gate.finish() {
                         for frame in frames { yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(frame)); }
                         stream_completed = true;
                     }
                     break;
                 }
-                Err(_) => break,
+                Ok(Err(_)) | Err(_) => break,
             }
         }
         let runtime_status = if stream_completed && status.is_success() { "completed" } else { "failed" };
