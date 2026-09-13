@@ -309,26 +309,30 @@ pub async fn launch_claude(
 /// Guided setup for the hackathon surface. It stores only non-secret choices;
 /// provider credentials are intentionally collected at the operation that uses them.
 pub async fn run_demo_setup() -> Result<()> {
+    let fast_path = crate::guard_routing::demo_profile_path().is_file();
     println!("Kerna demo setup\n");
-    println!("Choose the local model used for private routing and cloud shadows.");
+    if fast_path {
+        println!("[i] Existing demo profile found; starting the preflighted control room.");
+    }
     let local_choices = [
         "qwen3.5:9b — recommended, strongest local demo",
         "qwen3:4b — faster fallback",
         "Skip local model — cloud only, no shadow",
     ];
-    let local_selection = Select::new()
-        .with_prompt("Local model")
-        .items(local_choices)
-        .default(0)
-        .interact()?;
-    let mut profile = crate::guard_routing::DemoProfile {
-        local_model: match local_selection {
+    let mut profile = crate::guard_routing::load_demo_profile();
+    if !fast_path {
+        println!("Choose the local model used for private routing and cloud shadows.");
+        let local_selection = Select::new()
+            .with_prompt("Local model")
+            .items(local_choices)
+            .default(0)
+            .interact()?;
+        profile.local_model = match local_selection {
             0 => Some("qwen3.5:9b".to_string()),
             1 => Some("qwen3:4b".to_string()),
             _ => None,
-        },
-        ..crate::guard_routing::load_demo_profile()
-    };
+        };
+    }
 
     if let Some(model) = profile.local_model.as_deref() {
         if !ollama_model_ready_for(model).await {
@@ -352,23 +356,25 @@ pub async fn run_demo_setup() -> Result<()> {
         }
     }
 
-    let cloud_selection = Select::new()
-        .with_prompt("Cloud route")
-        .items([
-            "Anthropic claude-sonnet-5 — key requested only at cloud launch",
-            "Skip cloud for now",
-        ])
-        .default(0)
-        .interact()?;
-    profile.cloud_enabled = cloud_selection == 0;
-    profile.wasmer_enabled = Confirm::new()
-        .with_prompt("Enable Wasmer local sandbox? (required for the demo)")
-        .default(true)
-        .interact()?;
-    profile.tenki_enabled = Confirm::new()
-        .with_prompt("Enable Tenki remote sandbox? Its key is requested only at first use")
-        .default(true)
-        .interact()?;
+    if !fast_path {
+        let cloud_selection = Select::new()
+            .with_prompt("Cloud route")
+            .items([
+                "Anthropic claude-sonnet-5 — key requested only at cloud launch",
+                "Skip cloud for now",
+            ])
+            .default(0)
+            .interact()?;
+        profile.cloud_enabled = cloud_selection == 0;
+        profile.wasmer_enabled = Confirm::new()
+            .with_prompt("Enable Wasmer local sandbox? (required for the demo)")
+            .default(true)
+            .interact()?;
+        profile.tenki_enabled = Confirm::new()
+            .with_prompt("Enable Tenki remote sandbox? Its key is requested only at first use")
+            .default(true)
+            .interact()?;
+    }
     crate::guard_routing::save_demo_profile(&profile)?;
 
     std::fs::create_dir_all(demo_data_root())?;

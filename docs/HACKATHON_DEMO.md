@@ -7,7 +7,7 @@ disposable clone and is **not** fully containerized; the dashboard repeats that 
 ## Shortest path
 
 ```text
-kerna init --demo  # choose local/cloud/sandbox readiness; stores no keys
+kerna init --demo  # first run asks; later runs launch the saved non-secret profile
 kerna doctor   # scan hardware, runtimes, models, storage, and provider readiness
 kerna          # start governed Claude with automatic routing and local shadow
 ```
@@ -33,6 +33,21 @@ profile, checks Docker/Wasmer/Tenki readiness, and opens the dashboard when read
 are requested later by the operation that uses them.
 
 ## Guided sequence
+
+### 90-second judging cut
+
+Complete installation, model pulls, Docker startup, and hidden provider-key entry before the
+timer. On stage, use the already-saved profile:
+
+```powershell
+kerna init --demo
+```
+
+Then keep the dashboard on Route now. In one pass: show cloud primary plus local shadow, show the
+same short read-only task routed locally, trigger one allowed and one blocked governed tool, run
+Wasmer's `285` computation, and finish on the receipt hash, simulated ten-day chart, and signed
+evidence button. Use `kerna sandbox --backend tenki` only if the remote key and VM are already
+known-good; otherwise keep the truthful amber readiness card and use recorded replay.
 
 1. Run `kerna init --demo` once, then `kerna doctor`. Show the routing policy first, then the system card: GPU/VRAM, Ollama, local model,
    Claude Code, Wasmer, Docker, and amber Tenki authentication state.
