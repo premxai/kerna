@@ -10,6 +10,14 @@ $installRoot = 'C:\KernaData'
 $binRoot = Join-Path $installRoot 'bin'
 $targetRoot = 'C:\Temp\kerna-target'
 
+# Windows PowerShell sessions opened before Rust installation often do not have
+# Cargo on PATH yet. Prefer the standard Rustup location before asking Winget
+# to install an already-present toolchain.
+$cargoCandidate = Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe'
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $cargoCandidate)) {
+    $env:Path = "$(Split-Path -Parent $cargoCandidate);$env:Path"
+}
+
 function Require-WingetPackage {
     param([string]$Command, [string]$PackageId)
     if (Get-Command $Command -ErrorAction SilentlyContinue) { return }
@@ -32,7 +40,6 @@ if (-not $SkipDockerInstall) {
 
 $cargoCommand = Get-Command cargo -ErrorAction SilentlyContinue
 if (-not $cargoCommand) {
-    $cargoCandidate = Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe'
     if (-not (Test-Path -LiteralPath $cargoCandidate)) { throw 'Rust installed, but cargo is not available in this terminal.' }
     $cargoExecutable = $cargoCandidate
 } else {
@@ -45,7 +52,11 @@ New-Item -ItemType Directory -Force -Path $binRoot, $targetRoot | Out-Null
 $env:CARGO_TARGET_DIR = $targetRoot
 & $cargoExecutable build --manifest-path (Join-Path $projectRoot 'kernel\Cargo.toml') --release --locked
 if ($LASTEXITCODE -ne 0) { throw "Kerna release build failed (exit $LASTEXITCODE)." }
-Copy-Item -LiteralPath (Join-Path $targetRoot 'release\kerna.exe') -Destination (Join-Path $binRoot 'kerna.exe') -Force
+try {
+    Copy-Item -LiteralPath (Join-Path $targetRoot 'release\kerna.exe') -Destination (Join-Path $binRoot 'kerna.exe') -Force
+} catch [System.IO.IOException] {
+    throw 'Kerna is still running and Windows has locked C:\KernaData\bin\kerna.exe. Stop the Kerna dashboard or session, then rerun this installer.'
+}
 
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if (($userPath -split ';') -notcontains $binRoot) {

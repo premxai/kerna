@@ -35,7 +35,10 @@ if (-not $SkipOllama) {
     [Environment]::SetEnvironmentVariable('OLLAMA_MODELS', $ollamaModels, 'User')
     $env:OLLAMA_MODELS = $ollamaModels
     Get-Process ollama -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Process -FilePath $ollamaPath -ArgumentList 'serve' -WindowStyle Hidden -Environment @{ OLLAMA_MODELS = $ollamaModels }
+    # Windows PowerShell 5.1 does not support Start-Process -Environment. The
+    # current process already has OLLAMA_MODELS set above, so the child inherits
+    # the SSD-backed model location on both Windows PowerShell and PowerShell 7.
+    Start-Process -FilePath $ollamaPath -ArgumentList 'serve' -WindowStyle Hidden
     Start-Sleep -Seconds 3
     & $ollamaPath pull qwen3.5:9b
     if ($LASTEXITCODE -ne 0) { throw "Ollama model pull failed with exit code $LASTEXITCODE" }
