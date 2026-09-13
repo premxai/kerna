@@ -71,6 +71,72 @@ struct Cli {
     command: Option<Commands>,
 }
 
+/// Small, stable front door for the Claude-first product. Keeping this parser
+/// separate avoids loading the large legacy command graph for the common path.
+#[derive(Parser, Debug)]
+#[command(
+    name = "kerna",
+    version,
+    about = "Route, govern, and prove AI-agent work."
+)]
+struct QuickCli {
+    #[command(subcommand)]
+    command: QuickCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum QuickCommand {
+    /// Scan system, model, sandbox, and repository readiness.
+    Doctor {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
+    /// Start Claude through Kerna. Cloud tasks are shadowed locally by default.
+    Claude {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, value_enum, default_value_t = guard_routing::RouteMode::Auto)]
+        route: guard_routing::RouteMode,
+        /// Disable the tool-less local shadow for cloud sessions.
+        #[arg(long)]
+        no_shadow: bool,
+        #[arg(long)]
+        prompt: Option<String>,
+    },
+    /// Run bounded Python in the governed Wasmer or Tenki sandbox.
+    Sandbox {
+        #[arg(long, default_value = "wasmer", value_parser = ["wasmer", "tenki"])]
+        backend: String,
+        #[arg(long, default_value = "print(sum(i * i for i in range(10)))")]
+        code: String,
+        #[arg(long, default_value_t = 10_000)]
+        timeout_ms: u64,
+    },
+    /// Verify and open a signed, read-only rehearsal bundle.
+    Replay {
+        evidence: PathBuf,
+        #[arg(long, default_value_t = 8877)]
+        port: u16,
+        #[arg(long)]
+        no_open: bool,
+    },
+    /// Open the local routing, approval, sandbox, and evidence control room.
+    Dashboard {
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+        #[arg(long, default_value_t = 8765)]
+        port: u16,
+        #[arg(long)]
+        no_open: bool,
+        #[arg(long, value_enum, default_value_t = guard_routing::RouteMode::Auto)]
+        route: guard_routing::RouteMode,
+        #[arg(long)]
+        shadow: bool,
+    },
+    /// Show the governance capabilities active in the Claude-first runtime.
+    Skills,
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Initialize the Kerna runtime trust layer
@@ -93,18 +159,21 @@ enum Commands {
     },
 
     /// Launch and inspect governed coding-agent sessions.
+    #[command(hide = true)]
     Guard {
         #[command(subcommand)]
         action: GuardCommands,
     },
 
     /// Run or replay deterministic hackathon demo evidence.
+    #[command(hide = true)]
     Demo {
         #[command(subcommand)]
         action: DemoCommands,
     },
 
     /// Create a deterministic, reviewable governed-MCP starter contract
+    #[command(hide = true)]
     Contract {
         #[command(subcommand)]
         action: ContractCommands,
@@ -157,6 +226,12 @@ enum Commands {
         /// Do not open the local dashboard in a browser automatically
         #[arg(long)]
         no_open: bool,
+        /// Requested route shown before the first model request arrives.
+        #[arg(long, value_enum, default_value_t = guard_routing::RouteMode::Auto)]
+        route: guard_routing::RouteMode,
+        /// Show that cloud requests will also run in the local, tool-less shadow.
+        #[arg(long)]
+        shadow: bool,
     },
 
     /// Run as an MCP server that proxies configured MCP servers through Kerna's
@@ -1029,11 +1104,182 @@ fn command_needs_mcp(command: &Option<Commands>) -> bool {
     )
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // We rely on the local ctrl_c wait in Daemon instead of global exit(0)
+fn run_sponsor_sandbox(backend: &str, code: &str, timeout_ms: u64) -> Result<()> {
+    let backend = if backend == "tenki" {
+        sponsor_runtime::ExecutionBackend::Tenki
+    } else {
+        sponsor_runtime::ExecutionBackend::Wasmer
+    };
+    let auth_token = if backend == sponsor_runtime::ExecutionBackend::Tenki {
+        Some(
+            dialoguer::Password::new()
+                .with_prompt("Tenki API key (kept only in adapter memory)")
+                .interact()?,
+        )
+    } else {
+        None
+    };
+    let outcome = sponsor_runtime::run(sponsor_runtime::SandboxRequest {
+        backend,
+        language: "python".to_string(),
+        code: code.to_string(),
+        timeout_ms,
+        auth_token,
+    })?;
+    println!("{}", outcome.output);
+    eprintln!(
+        "[+] {:?} · {} · {} ms · sha256:{}",
+        outcome.backend, outcome.status, outcome.duration_ms, outcome.output_sha256
+    );
+    if outcome.status != "completed" || outcome.exit_code != 0 {
+        anyhow::bail!(
+            "sandbox program failed safely with exit code {}",
+            outcome.exit_code
+        );
+    }
+    Ok(())
+}
 
-    let cli = Cli::parse();
+fn print_kerna_skills() {
+    println!("Kerna skills");
+    println!("[+] Routing       sticky local/cloud decision before provider contact");
+    println!("[+] Policy        allow, ask, or deny before an action is released");
+    println!("[+] Identity      session/task/agent/version/worktree action binding");
+    println!("[+] Approvals     expiring, exact, one-time human authority");
+    println!("[+] Secrets       provider keys stay in trusted broker memory");
+    println!("[+] Evidence      redacted hash chain and signed export");
+    println!("[~] Budgets       MCP tool calls, runtime, and output bytes");
+    println!("[~] Orchestration session lifecycle and runtime supervision");
+}
+
+fn print_quick_help() {
+    println!("Kerna — route, govern, and prove AI-agent work.\n");
+    println!("Usage:");
+    println!("  kerna                         Start governed Claude (auto route + local shadow)");
+    println!("  kerna doctor                  Check hardware, models, keys, and sandboxes");
+    println!("  kerna claude --route local   Force private local inference");
+    println!("  kerna sandbox                Run bounded Python in Wasmer");
+    println!("  kerna replay <evidence.json> Open signed read-only evidence");
+    println!("  kerna skills                 Show active governance capabilities");
+    println!("  kerna dashboard              Open the local control room\n");
+    println!("Run `kerna advanced --help` for the legacy runtime command reference.");
+}
+
+fn main() -> Result<()> {
+    // Windows executables have a relatively small main-thread stack. The
+    // legacy Clap graph is intentionally still available under `advanced`, so
+    // run the application body on a bounded larger stack instead of allowing
+    // that compatibility surface to crash startup.
+    std::thread::Builder::new()
+        .name("kerna-main".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(async_main())
+        })?
+        .join()
+        .map_err(|_| anyhow::anyhow!("Kerna runtime thread panicked"))?
+}
+
+async fn async_main() -> Result<()> {
+    // We rely on the local ctrl_c wait in Daemon instead of global exit(0)
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    let first = arguments.get(1).and_then(|arg| arg.to_str());
+    if first.is_none() {
+        guard_launcher::launch_claude(
+            std::path::Path::new("."),
+            guard_routing::RouteMode::Auto,
+            true,
+            None,
+        )
+        .await?;
+        return Ok(());
+    }
+    if matches!(first, Some("--help" | "-h" | "help")) {
+        print_quick_help();
+        return Ok(());
+    }
+    if matches!(first, Some("--version" | "-V")) {
+        println!("kerna {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    let uses_quick_parser = matches!(
+        first,
+        Some("claude" | "sandbox" | "replay" | "skills" | "dashboard")
+    ) || (first == Some("doctor")
+        && !arguments.iter().any(|arg| arg == "--gateway"));
+    if uses_quick_parser {
+        match QuickCli::parse().command {
+            QuickCommand::Doctor { repo } => {
+                if !guard_launcher::print_doctor(true, Some(&repo)).await {
+                    std::process::exit(1);
+                }
+            }
+            QuickCommand::Claude {
+                repo,
+                route,
+                no_shadow,
+                prompt,
+            } => {
+                guard_launcher::launch_claude(&repo, route, !no_shadow, prompt.as_deref()).await?;
+            }
+            QuickCommand::Sandbox {
+                backend,
+                code,
+                timeout_ms,
+            } => run_sponsor_sandbox(&backend, &code, timeout_ms)?,
+            QuickCommand::Replay {
+                evidence,
+                port,
+                no_open,
+            } => server::start_replay_server(&evidence, port, !no_open).await?,
+            QuickCommand::Dashboard {
+                workspace,
+                port,
+                no_open,
+                route,
+                shadow,
+            } => {
+                std::env::set_current_dir(&workspace)?;
+                let config = Config::load();
+                let memory = Arc::new(MemoryEngine::new(&config.db_path)?);
+                let state = server::AppState {
+                    guard_policy: Arc::new(load_guard_policy(&config)?),
+                    worktree_baseline: server::capture_worktree_baseline()?,
+                    config,
+                    memory,
+                    mcp_registry: Arc::new(Mutex::new(McpRegistry::new())),
+                    auth_token: None,
+                    route_mode: route,
+                    shadow_enabled: shadow,
+                    anthropic_api_key: None,
+                    route_decisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                };
+                server::start_dashboard_server(state, port, !no_open).await?;
+            }
+            QuickCommand::Skills => print_kerna_skills(),
+        }
+        return Ok(());
+    }
+    // Clap builds the complete legacy command graph while parsing. On Windows
+    // that graph can exceed the executable's small default main-thread stack,
+    // so isolate legacy parsing on a bounded larger stack. The common product
+    // path above still uses the intentionally small parser.
+    let legacy_arguments = if first == Some("advanced") {
+        std::iter::once(arguments[0].clone())
+            .chain(arguments.into_iter().skip(2))
+            .collect::<Vec<_>>()
+    } else {
+        arguments
+    };
+    let cli = std::thread::Builder::new()
+        .name("kerna-legacy-cli".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || Cli::parse_from(legacy_arguments))?
+        .join()
+        .map_err(|_| anyhow::anyhow!("legacy command parser panicked"))?;
 
     // Contracts must work in a brand-new directory. Do this before config and
     // memory initialization so the command neither requires nor creates a
@@ -1101,38 +1347,7 @@ async fn main() -> Result<()> {
                     code,
                     timeout_ms,
                 } => {
-                    let backend = if backend == "tenki" {
-                        sponsor_runtime::ExecutionBackend::Tenki
-                    } else {
-                        sponsor_runtime::ExecutionBackend::Wasmer
-                    };
-                    let auth_token = if backend == sponsor_runtime::ExecutionBackend::Tenki {
-                        Some(
-                            dialoguer::Password::new()
-                                .with_prompt("Tenki API key (kept only in adapter memory)")
-                                .interact()?,
-                        )
-                    } else {
-                        None
-                    };
-                    let outcome = sponsor_runtime::run(sponsor_runtime::SandboxRequest {
-                        backend,
-                        language: "python".to_string(),
-                        code: code.clone(),
-                        timeout_ms: *timeout_ms,
-                        auth_token,
-                    })?;
-                    println!("{}", outcome.output);
-                    eprintln!(
-                        "[+] {:?} · {} · {} ms · sha256:{}",
-                        outcome.backend, outcome.status, outcome.duration_ms, outcome.output_sha256
-                    );
-                    if outcome.status != "completed" || outcome.exit_code != 0 {
-                        anyhow::bail!(
-                            "sandbox program failed safely with exit code {}",
-                            outcome.exit_code
-                        );
-                    }
+                    run_sponsor_sandbox(backend, code, *timeout_ms)?;
                 }
                 DemoCommands::Replay {
                     evidence,
@@ -1322,7 +1537,13 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::Dashboard { port, no_open, .. }) => {
+        Some(Commands::Dashboard {
+            port,
+            no_open,
+            route,
+            shadow,
+            ..
+        }) => {
             let state = server::AppState {
                 config: config.clone(),
                 guard_policy: Arc::new(load_guard_policy(&config)?),
@@ -1330,8 +1551,8 @@ async fn main() -> Result<()> {
                 mcp_registry: mcp_registry.clone(),
                 worktree_baseline: server::capture_worktree_baseline()?,
                 auth_token: None,
-                route_mode: guard_routing::RouteMode::Cloud,
-                shadow_enabled: false,
+                route_mode: route,
+                shadow_enabled: shadow,
                 anthropic_api_key: None,
                 route_decisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             };
@@ -2009,7 +2230,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::Doctor { gateway }) => {
+        Some(Commands::Doctor { gateway, .. }) => {
             println!("Kerna Doctor:\n");
 
             match rusqlite::Connection::open(&config.db_path) {

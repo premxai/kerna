@@ -46,7 +46,7 @@ goal → scheduler → policy + budgets → isolated MCP tool → local receipt
 | **Human approvals** | Consequential actions can pause for a clear local decision. |
 | **Hard budgets** | Limits for tool calls, LLM calls, runtime, cost, output, and memory writes stop runaway work. |
 | **MCP isolation** | Plugins run as untrusted child processes with sandboxed working directories and watchdog cleanup. |
-| **Receipts and traces** | Prompts, decisions, tool calls, payloads, cost, and failures are recorded in SQLite for inspection and replay. |
+| **Receipts and traces** | Redacted decisions, action digests, terminal states, budgets, and failures are recorded in SQLite for inspection and replay; raw prompts and model prose are excluded by default. |
 | **Provider choice** | Use supported BYOK providers, OpenAI-compatible endpoints, or local models without changing the trust boundary. |
 | **Local-first operation** | No Kerna account is required for the core runtime, workspace, policies, or receipts. |
 
@@ -236,7 +236,7 @@ npm run dev
 
 ## Project status
 
-Kerna `v0.2.8` is the current public release. The core runtime, verified release artifacts, npm launcher, curated plugin bundle, website, and launch workflows are available now. See [releases](https://github.com/premxai/kerna/releases), [open issues](https://github.com/premxai/kerna/issues), the [benchmark methodology](docs/BENCHMARKS.md), and the [launch checklist](docs/COHORT_LAUNCH_CHECKLIST.md) for current work.
+Kerna `v0.2.5` is the current public release. The hackathon routing, shadow, and Wasmer demo changes are on the development branch and must not be presented as published until a newer signed release is cut. See [releases](https://github.com/premxai/kerna/releases), [open issues](https://github.com/premxai/kerna/issues), the [benchmark methodology](docs/BENCHMARKS.md), and the [launch checklist](docs/COHORT_LAUNCH_CHECKLIST.md) for current work.
 
 ## Contributing
 

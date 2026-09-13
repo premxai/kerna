@@ -20,9 +20,70 @@ pub struct DoctorCheck {
     pub required: bool,
 }
 
+pub fn storage_locations() -> serde_json::Value {
+    let data_root = demo_data_root();
+    serde_json::json!({
+        "cargo_target": std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("kerna-target")),
+        "sessions": session_root(),
+        "ollama_models": std::env::var_os("OLLAMA_MODELS").map(PathBuf::from).unwrap_or_else(default_ollama_models_root),
+        "demo_runtime": data_root,
+    })
+}
+
+pub fn system_profile() -> serde_json::Value {
+    let cpu = if cfg!(windows) {
+        std::env::var("PROCESSOR_IDENTIFIER").unwrap_or_else(|_| std::env::consts::ARCH.to_string())
+    } else if cfg!(target_os = "macos") {
+        Command::new("sysctl")
+            .args(["-n", "machdep.cpu.brand_string"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| std::env::consts::ARCH.to_string())
+    } else {
+        std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|text| {
+                text.lines().find_map(|line| {
+                    line.strip_prefix("model name").and_then(|value| {
+                        value
+                            .split_once(':')
+                            .map(|(_, name)| name.trim().to_string())
+                    })
+                })
+            })
+            .unwrap_or_else(|| std::env::consts::ARCH.to_string())
+    };
+    serde_json::json!({
+        "os": std::env::consts::OS,
+        "architecture": std::env::consts::ARCH,
+        "cpu": cpu,
+    })
+}
+
 pub async fn print_doctor(demo: bool, repo: Option<&Path>) -> bool {
     let checks = doctor_checks(demo, repo).await;
-    println!("Kerna Guard readiness");
+    let hardware = crate::models::detect_hardware();
+    println!("Kerna doctor");
+    println!(
+        "[i] System             {} {} · {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        system_profile()["cpu"].as_str().unwrap_or("CPU unknown")
+    );
+    println!(
+        "[i] Accelerator        {} · {} GB",
+        hardware.name,
+        hardware
+            .memory_gb
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+    println!(
+        "[i] Routing            auto · local for private/read-only · cloud for complex changes"
+    );
     for check in &checks {
         let marker = match check.status.as_str() {
             "ready" => "+",
@@ -31,8 +92,18 @@ pub async fn print_doctor(demo: bool, repo: Option<&Path>) -> bool {
         };
         println!("[{marker}] {:<18} {}", check.name, check.detail);
     }
-    println!("[i] Runtime data: C:\\KernaData\\kerna-demo");
-    println!("[i] Session clones: C:\\Temp\\kerna-sessions");
+    let storage = storage_locations();
+    println!("[i] Keys               Anthropic is requested at cloud launch and never persisted");
+    println!(
+        "[i] Runtime data       {}",
+        storage["demo_runtime"]
+            .as_str()
+            .unwrap_or("configured locally")
+    );
+    println!(
+        "[i] Session clones     {}",
+        storage["sessions"].as_str().unwrap_or("system temp")
+    );
     checks
         .iter()
         .all(|check| !check.required || check.status == "ready")
@@ -80,6 +151,15 @@ pub async fn doctor_checks(demo: bool, repo: Option<&Path>) -> Vec<DoctorCheck> 
         .to_string(),
         detail: format!("pinned launcher {}", PINNED_CLAUDE_CODE_VERSION),
         required: true,
+    });
+    checks.push(DoctorCheck {
+        name: "Cloud model".to_string(),
+        status: "optional".to_string(),
+        detail: format!(
+            "{}; key requested in a hidden launch prompt",
+            crate::guard_routing::DEFAULT_CLOUD_MODEL
+        ),
+        required: false,
     });
     checks.push(DoctorCheck {
         name: "Wasmer SDK".to_string(),
@@ -184,7 +264,10 @@ pub async fn launch_claude(
             contract_dir.to_string_lossy().as_ref(),
             "--port",
             &dashboard_port.to_string(),
+            "--route",
+            route_name(route),
         ])
+        .args(shadow.then_some("--shadow"))
         .current_dir(&contract_dir)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -237,7 +320,7 @@ fn run_claude(
         .env("PATHEXT", std::env::var("PATHEXT").unwrap_or_default())
         .env("TEMP", std::env::var("TEMP").unwrap_or_default())
         .env("TMP", std::env::var("TMP").unwrap_or_default())
-        .env("npm_config_cache", r"C:\KernaData\kerna-demo\npm-cache")
+        .env("npm_config_cache", demo_data_root().join("npm-cache"))
         .env("ANTHROPIC_API_KEY", "")
         .env("ANTHROPIC_AUTH_TOKEN", session_token)
         .env(
@@ -256,15 +339,7 @@ fn run_claude(
 
 fn create_disposable_clone(repo: &Path, session_token: &str) -> Result<PathBuf> {
     let source = git_root(repo)?;
-    let root = std::env::var_os("KERNA_SESSION_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            if cfg!(windows) {
-                PathBuf::from(r"C:\Temp\kerna-sessions")
-            } else {
-                std::env::temp_dir().join("kerna-sessions")
-            }
-        });
+    let root = session_root();
     std::fs::create_dir_all(&root)?;
     let destination = root.join(format!("session-{}", &session_token[..8]));
     let output = Command::new("git")
@@ -366,6 +441,46 @@ fn route_name(route: RouteMode) -> &'static str {
         RouteMode::Auto => "auto",
         RouteMode::Local => "local",
         RouteMode::Cloud => "cloud",
+    }
+}
+
+fn demo_data_root() -> PathBuf {
+    if let Some(root) = std::env::var_os("KERNA_DEMO_DATA_DIR") {
+        return PathBuf::from(root);
+    }
+    if cfg!(windows) {
+        return PathBuf::from(r"C:\KernaData\kerna-demo");
+    }
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("kerna-demo")
+}
+
+fn session_root() -> PathBuf {
+    std::env::var_os("KERNA_SESSION_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                PathBuf::from(r"C:\Temp\kerna-sessions")
+            } else {
+                std::env::temp_dir().join("kerna-sessions")
+            }
+        })
+}
+
+fn default_ollama_models_root() -> PathBuf {
+    if cfg!(windows) {
+        std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Users\Public"))
+            .join(".ollama/models")
+    } else {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(".ollama/models")
     }
 }
 

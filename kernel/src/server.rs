@@ -237,10 +237,17 @@ async fn handle_guard_anthropic(
             )
         }
     };
+    let request_sha256 = format!("{:x}", Sha256::digest(&body));
     if decision.shadow_provider.is_some() {
-        spawn_local_shadow(state.memory.clone(), context.clone(), body.clone());
+        spawn_local_shadow(
+            state.memory.clone(),
+            context.clone(),
+            body.clone(),
+            request_sha256.clone(),
+        );
     }
     let base = decision.upstream_base_url();
+    let primary_started = std::time::Instant::now();
     let mut request = reqwest::Client::new()
         .post(provider_url(&base, "v1/messages"))
         .header(header::CONTENT_TYPE, "application/json")
@@ -253,11 +260,31 @@ async fn handle_guard_anthropic(
         }
     }
     match request.send().await {
-        Ok(upstream) => relay_anthropic(upstream, state.guard_policy, state.memory, context),
-        Err(_) => error_response(
-            StatusCode::BAD_GATEWAY,
-            "Anthropic upstream is unavailable.",
+        Ok(upstream) => relay_anthropic(
+            upstream,
+            state.guard_policy,
+            state.memory,
+            context,
+            decision,
+            request_sha256,
+            primary_started,
         ),
+        Err(_) => {
+            let _ = record_primary_runtime(
+                &state.memory,
+                &context,
+                &decision,
+                &request_sha256,
+                "failed",
+                primary_started.elapsed().as_millis(),
+                "",
+                0,
+            );
+            error_response(
+                StatusCode::BAD_GATEWAY,
+                "Anthropic upstream is unavailable.",
+            )
+        }
     }
 }
 
@@ -311,7 +338,12 @@ fn record_route_decision(
     })
 }
 
-fn spawn_local_shadow(memory: Arc<MemoryEngine>, context: GuardStreamContext, body: Bytes) {
+fn spawn_local_shadow(
+    memory: Arc<MemoryEngine>,
+    context: GuardStreamContext,
+    body: Bytes,
+    request_sha256: String,
+) {
     tokio::spawn(async move {
         let started = std::time::Instant::now();
         let shadow_body = match crate::guard_routing::rewrite_model(
@@ -373,12 +405,59 @@ fn spawn_local_shadow(memory: Arc<MemoryEngine>, context: GuardStreamContext, bo
                 "tools_removed": true,
                 "user_impact": "none",
                 "duration_ms": started.elapsed().as_millis(),
+                "request_sha256": request_sha256,
                 "output_bytes": bytes,
                 "output_sha256": digest,
                 "status": status,
             }),
         });
     });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_primary_runtime(
+    memory: &MemoryEngine,
+    context: &GuardStreamContext,
+    decision: &RouteDecision,
+    request_sha256: &str,
+    status: &str,
+    duration_ms: u128,
+    output_sha256: &str,
+    output_bytes: usize,
+) -> anyhow::Result<()> {
+    memory.record(Event {
+        event_id: Uuid::new_v4().to_string(),
+        task_id: context.task_id.clone(),
+        session_id: Some(context.session_id.clone()),
+        sequence: 3,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        event_type: format!("primary.{status}"),
+        actor: "kerna_primary".to_string(),
+        severity: if status == "completed" {
+            "info"
+        } else {
+            "warning"
+        }
+        .to_string(),
+        model: Some(decision.model.clone()),
+        tool: None,
+        policy_decision: Some("governed".to_string()),
+        risk_score: None,
+        parent_event_id: None,
+        correlation_id: Some(context.session_id.clone()),
+        redaction_status: Some("output_digest_only".to_string()),
+        budget_snapshot_json: None,
+        payload_json: json!({
+            "provider": decision.provider,
+            "model": decision.model,
+            "tool_authority": "Kerna policy gated",
+            "duration_ms": duration_ms,
+            "request_sha256": request_sha256,
+            "output_sha256": output_sha256,
+            "output_bytes": output_bytes,
+            "status": status,
+        }),
+    })
 }
 
 /// Relay an OpenAI Responses stream through the protocol gate. The caller's Authorization
@@ -592,6 +671,9 @@ fn relay_anthropic(
     policy: Arc<GuardPolicy>,
     memory: Arc<MemoryEngine>,
     context: GuardStreamContext,
+    decision: RouteDecision,
+    request_sha256: String,
+    started: std::time::Instant,
 ) -> axum::response::Response {
     let status = upstream.status();
     let stream = async_stream::stream! {
@@ -601,6 +683,9 @@ fn relay_anthropic(
         let mut gate = crate::guard_protocol::AnthropicStreamGate::new(move |action| {
             stream_policy_decision_with_receipt(&decision_policy, &stream_memory, &stream_context, action)
         });
+        let mut response_hasher = Sha256::new();
+        let mut response_bytes = 0usize;
+        let mut stream_completed = false;
         'relay: loop {
             if matches!(
                 memory.gateway_session_state(&context.session_id),
@@ -609,28 +694,45 @@ fn relay_anthropic(
                 break 'relay;
             }
             match upstream.chunk().await {
-                Ok(Some(chunk)) => match gate.feed(&chunk) {
-                    Ok(frames) => {
-                        for frame in frames { yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(frame)); }
-                        while let Some(action) = gate.pending_approval().cloned() {
-                            let decision = wait_for_stream_approval(&memory, &policy, &context, &action).await;
-                            match gate.resolve_pending(decision) {
-                                Ok(frames) => for frame in frames { yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(frame)); },
-                                Err(_) => break 'relay,
+                Ok(Some(chunk)) => {
+                    response_hasher.update(&chunk);
+                    response_bytes = response_bytes.saturating_add(chunk.len());
+                    match gate.feed(&chunk) {
+                        Ok(frames) => {
+                            for frame in frames { yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(frame)); }
+                            while let Some(action) = gate.pending_approval().cloned() {
+                                let approval = wait_for_stream_approval(&memory, &policy, &context, &action).await;
+                                match gate.resolve_pending(approval) {
+                                    Ok(frames) => for frame in frames { yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(frame)); },
+                                    Err(_) => break 'relay,
+                                }
                             }
-                        }
-                    },
-                    Err(_) => break,
+                        },
+                        Err(_) => break,
+                    }
                 },
                 Ok(None) => {
                     if let Ok(frames) = gate.finish() {
                         for frame in frames { yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(frame)); }
+                        stream_completed = true;
                     }
                     break;
                 }
                 Err(_) => break,
             }
         }
+        let runtime_status = if stream_completed && status.is_success() { "completed" } else { "failed" };
+        let output_sha256 = format!("{:x}", response_hasher.finalize());
+        let _ = record_primary_runtime(
+            &memory,
+            &context,
+            &decision,
+            &request_sha256,
+            runtime_status,
+            started.elapsed().as_millis(),
+            &output_sha256,
+            response_bytes,
+        );
         let _ = memory.finish_gateway_session(&context.session_id);
     };
     upstream_response(status, stream)
@@ -1467,13 +1569,9 @@ async fn dashboard_models(State(state): State<DashboardState>) -> Json<Value> {
 async fn dashboard_readiness(State(_state): State<DashboardState>) -> Json<Value> {
     Json(json!({
         "checks": crate::guard_launcher::doctor_checks(true, None).await,
+        "system": crate::guard_launcher::system_profile(),
         "hardware": crate::models::detect_hardware(),
-        "storage": {
-            "cargo_target": r"C:\Temp\kerna-target",
-            "sessions": r"C:\Temp\kerna-sessions",
-            "ollama_models": r"C:\KernaData\ollama-models",
-            "demo_runtime": r"C:\KernaData\kerna-demo"
-        }
+        "storage": crate::guard_launcher::storage_locations()
     }))
 }
 
@@ -1654,6 +1752,11 @@ fn dashboard_snapshot(state: &DashboardState) -> Value {
         .filter(|event| event.event_type.starts_with("shadow."))
         .cloned()
         .collect::<Vec<_>>();
+    let primary = runtime_events
+        .iter()
+        .filter(|event| event.event_type.starts_with("primary."))
+        .cloned()
+        .collect::<Vec<_>>();
     let sandbox_events = runtime_events
         .iter()
         .filter(|event| event.event_type.starts_with("sandbox."))
@@ -1673,8 +1776,31 @@ fn dashboard_snapshot(state: &DashboardState) -> Value {
         "approvals": approvals,
         "containment": plugins,
         "routing": routing,
+        "primary": primary,
         "shadow": shadow,
         "sandbox_events": sandbox_events,
+        "routing_config": {
+            "requested_mode": format!("{:?}", state.app.route_mode).to_ascii_lowercase(),
+            "shadow_enabled": state.app.shadow_enabled,
+            "sticky_after_first_task": true,
+            "local_model": crate::guard_routing::DEFAULT_LOCAL_MODEL,
+            "cloud_model": crate::guard_routing::DEFAULT_CLOUD_MODEL,
+        },
+        "capabilities": [
+            {"name": "Routing", "state": "active", "detail": "Deterministic local/cloud choice; sticky per session"},
+            {"name": "Policy", "state": "active", "detail": "Allow, ask, or deny before release"},
+            {"name": "Identity", "state": "active", "detail": "Action bound to session, task, agent, version, and worktree"},
+            {"name": "Approvals", "state": "active", "detail": "Exact, expiring, single-use authority"},
+            {"name": "Secrets", "state": "active", "detail": "Provider keys stay in trusted broker memory"},
+            {"name": "Evidence", "state": "active", "detail": "Redacted hash chain and signed export"},
+            {"name": "Budgets", "state": "scoped", "detail": "Tool calls, runtime, and output bytes at the MCP boundary"},
+            {"name": "Orchestration", "state": "scoped", "detail": "Session lifecycle and runtime supervision"}
+        ],
+        "model_registry": [
+            {"provider": "Ollama", "model": crate::guard_routing::DEFAULT_LOCAL_MODEL, "location": "Local GPU", "status": "configured", "best_for": "Private inspection, summaries, repository search, bounded analysis"},
+            {"provider": "Anthropic", "model": crate::guard_routing::DEFAULT_CLOUD_MODEL, "location": "Cloud", "status": "key at launch", "best_for": "Edits, dependencies, multi-file fixes, long context, ambiguous work"}
+        ],
+        "rehearsal": demo_rehearsal_history(),
         "runtime_boundaries": [
             {"name": "Claude host process", "runtime_mode": "disposable clone", "network": "brokered model traffic", "status": "governed; not fully containerized"},
             {"name": "Delegated MCP tools", "runtime_mode": "Docker", "network": "disabled by default", "status": "contained"},
@@ -1682,6 +1808,33 @@ fn dashboard_snapshot(state: &DashboardState) -> Value {
             {"name": "Remote sandbox", "runtime_mode": "Tenki", "network": "disabled by Kerna", "status": if std::env::var("TENKI_API_KEY").map(|value| !value.is_empty()).unwrap_or(false) { "configured" } else { "authentication required" }},
         ],
         "models": {"external_clients": "Kerna selects one sticky upstream for guarded Claude sessions", "routes": state.app.config.model_routes, "privacy_routes": state.app.config.privacy_routes}
+    })
+}
+
+fn demo_rehearsal_history() -> Value {
+    json!({
+        "synthetic": true,
+        "label": "Simulated 10-day rehearsal — illustrative, not customer telemetry",
+        "reason": "This is not production telemetry; no design-partner history exists yet, so the values are deterministic demo fixtures.",
+        "days": [
+            {"date":"Sep 04","local":4,"cloud":2,"blocked":1,"approved":1,"local_score":82,"cloud_score":91},
+            {"date":"Sep 05","local":5,"cloud":3,"blocked":1,"approved":2,"local_score":84,"cloud_score":92},
+            {"date":"Sep 06","local":6,"cloud":3,"blocked":2,"approved":1,"local_score":85,"cloud_score":92},
+            {"date":"Sep 07","local":4,"cloud":4,"blocked":1,"approved":2,"local_score":83,"cloud_score":93},
+            {"date":"Sep 08","local":7,"cloud":3,"blocked":2,"approved":2,"local_score":87,"cloud_score":93},
+            {"date":"Sep 09","local":6,"cloud":4,"blocked":2,"approved":3,"local_score":88,"cloud_score":94},
+            {"date":"Sep 10","local":8,"cloud":4,"blocked":3,"approved":2,"local_score":89,"cloud_score":94},
+            {"date":"Sep 11","local":7,"cloud":5,"blocked":2,"approved":3,"local_score":88,"cloud_score":95},
+            {"date":"Sep 12","local":9,"cloud":5,"blocked":3,"approved":2,"local_score":90,"cloud_score":95},
+            {"date":"Sep 13","local":10,"cloud":6,"blocked":4,"approved":3,"local_score":91,"cloud_score":96}
+        ],
+        "task_fit": [
+            {"task":"Explain or summarize repository policy","route":"Local","reason":"Private, short, read-only"},
+            {"task":"Inspect files and find a symbol","route":"Local","reason":"Low-risk repository analysis"},
+            {"task":"Fix a multi-file bug and run tests","route":"Cloud + local shadow","reason":"Higher reasoning depth and tool use"},
+            {"task":"Install dependencies or use network","route":"Cloud + approval","reason":"External side effect requires policy authority"},
+            {"task":"Run untrusted Python","route":"Wasmer","reason":"No host mounts, environment, or network"}
+        ]
     })
 }
 
@@ -1877,6 +2030,23 @@ mod tests {
         let payload = br#"{"evidence":"redacted"}"#;
         let signature = key.sign(payload);
         assert!(key.verifying_key().verify(payload, &signature).is_ok());
+    }
+
+    #[test]
+    fn rehearsal_history_is_unambiguously_synthetic_and_has_ten_days() {
+        let history = demo_rehearsal_history();
+        assert_eq!(history["synthetic"], true);
+        assert_eq!(history["days"].as_array().unwrap().len(), 10);
+        assert!(history["label"]
+            .as_str()
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("simulated"));
+        assert!(history["reason"]
+            .as_str()
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("not production"));
     }
 
     #[test]

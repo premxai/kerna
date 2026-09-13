@@ -164,6 +164,17 @@ fn runtime_dir() -> Option<PathBuf> {
         if installed.join("sponsor-runtime.mjs").exists() {
             return Some(installed);
         }
+    } else {
+        let installed = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+            })
+            .unwrap_or_else(std::env::temp_dir)
+            .join("kerna-demo/runtime");
+        if installed.join("sponsor-runtime.mjs").exists() {
+            return Some(installed);
+        }
     }
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()?
