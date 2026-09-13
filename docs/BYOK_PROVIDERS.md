@@ -39,7 +39,7 @@ is loopback before a task starts.
 
 ```toml
 [model_routes]
-offline-coding = "ollama/qwen2.5-coder:7b"
+offline-coding = "ollama/qwen3.5:9b"
 project-default = "openrouter/openai/gpt-4o-mini"
 
 [privacy_routes]

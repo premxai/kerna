@@ -302,6 +302,15 @@ fn run_claude(
     let mut command = Command::new(npm);
     command.args(["exec", "--yes", "--package", &package, "--", "claude"]);
     command
+        .arg("--bare")
+        .arg("--disable-slash-commands")
+        .arg("--no-session-persistence")
+        .arg("--tools")
+        .arg("")
+        .arg("--allowedTools")
+        .arg(
+            "mcp__kerna-governed-tools__echo,mcp__kerna-governed-tools__kerna_session_status,mcp__kerna-governed-tools__kerna_sandbox_run,mcp__kerna-governed-tools__secret_probe,mcp__kerna-governed-tools__network_probe",
+        )
         .arg("--mcp-config")
         .arg(mcp_config)
         .arg("--strict-mcp-config");
@@ -366,11 +375,16 @@ fn create_disposable_clone(repo: &Path, session_token: &str) -> Result<PathBuf> 
 fn prepare_demo_contract(session_dir: &Path) -> Result<(PathBuf, PathBuf)> {
     let contract_dir = session_dir.join(".kerna-demo");
     std::fs::create_dir_all(&contract_dir)?;
+    let evidence_db = contract_dir
+        .join("kerna-demo.db")
+        .to_string_lossy()
+        .replace('\\', "/");
     std::fs::write(
         contract_dir.join("kerna.toml"),
-        r#"llm_provider = "mock"
+        format!(
+            r#"llm_provider = "mock"
 llm_model = "mock"
-db_path = "kerna-demo.db"
+db_path = '{evidence_db}'
 sandbox_dir = "sandbox"
 memory_backend = "sqlite"
 runtime_mode = "docker"
@@ -392,7 +406,23 @@ tool = "echo"
 action = "auto_approve"
 
 [[permissions]]
+tool = "mcp__kerna-governed-tools__echo"
+action = "auto_approve"
+
+[[permissions]]
+tool = "kerna_session_status"
+action = "auto_approve"
+
+[[permissions]]
+tool = "mcp__kerna-governed-tools__kerna_session_status"
+action = "auto_approve"
+
+[[permissions]]
 tool = "kerna_sandbox_run"
+action = "auto_approve"
+
+[[permissions]]
+tool = "mcp__kerna-governed-tools__kerna_sandbox_run"
 action = "auto_approve"
 
 [[permissions]]
@@ -400,13 +430,22 @@ tool = "secret_probe"
 action = "require_confirmation"
 
 [[permissions]]
+tool = "mcp__kerna-governed-tools__secret_probe"
+action = "require_confirmation"
+
+[[permissions]]
 tool = "network_probe"
+action = "deny"
+
+[[permissions]]
+tool = "mcp__kerna-governed-tools__network_probe"
 action = "deny"
 
 [[permissions]]
 tool = "*"
 action = "deny"
-"#,
+"#
+        ),
     )?;
 
     let executable = std::env::current_exe()?;
@@ -584,5 +623,19 @@ mod tests {
         assert_eq!(route_name(RouteMode::Auto), "auto");
         assert_eq!(route_name(RouteMode::Local), "local");
         assert_eq!(route_name(RouteMode::Cloud), "cloud");
+    }
+
+    #[test]
+    fn demo_contract_binds_every_process_to_one_evidence_database() {
+        let session_dir = std::env::temp_dir().join(format!("kerna-contract-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let (contract_dir, _) = prepare_demo_contract(&session_dir).unwrap();
+        let config: crate::config::Config =
+            toml::from_str(&std::fs::read_to_string(contract_dir.join("kerna.toml")).unwrap())
+                .unwrap();
+        let expected = contract_dir.join("kerna-demo.db");
+        assert!(Path::new(&config.db_path).is_absolute());
+        assert_eq!(PathBuf::from(config.db_path), expected);
+        std::fs::remove_dir_all(session_dir).unwrap();
     }
 }

@@ -3,6 +3,15 @@ import process from "node:process";
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+const MAX_OUTPUT_BYTES = 65536;
+
+function boundedOutput(value) {
+  const output = String(value ?? "");
+  if (Buffer.byteLength(output, "utf8") > MAX_OUTPUT_BYTES) {
+    return { accepted: false, output: `output exceeded ${MAX_OUTPUT_BYTES} bytes` };
+  }
+  return { accepted: true, output };
+}
 
 async function runWasmer() {
   const { Wasmer } = await import("@wasmer/sdk/node");
@@ -17,10 +26,11 @@ async function runWasmer() {
       const output = await sandbox
         .command("python", ["/workspace/main.py"])
         .run({ timeout: request.timeout_ms });
+      const bounded = boundedOutput(output.text());
       return {
-        status: output.ok ? "completed" : "failed",
-        exit_code: output.ok ? 0 : 1,
-        output: output.text().slice(0, 65536),
+        status: output.ok && bounded.accepted ? "completed" : "failed",
+        exit_code: output.ok && bounded.accepted ? 0 : 1,
+        output: bounded.output,
         package: "python/python@=3.13.18",
         network: "disabled",
       };
@@ -28,7 +38,7 @@ async function runWasmer() {
       return {
         status: "failed",
         exit_code: 1,
-        output: String(error?.message || error).slice(0, 65536),
+        output: boundedOutput(error?.message || error).output,
         package: "python/python@=3.13.18",
         network: "disabled",
       };
@@ -55,10 +65,11 @@ async function runTenki() {
       args: ["-c", request.code],
       timeoutMs: request.timeout_ms,
     });
+    const bounded = boundedOutput(stdoutText(result));
     return {
-      status: result.exitCode === 0 ? "completed" : "failed",
-      exit_code: result.exitCode,
-      output: stdoutText(result).slice(0, 65536),
+      status: result.exitCode === 0 && bounded.accepted ? "completed" : "failed",
+      exit_code: result.exitCode === 0 && bounded.accepted ? 0 : 1,
+      output: bounded.output,
       package: "tenki/sandbox-v1",
       network: "inbound=false,outbound=false",
     };

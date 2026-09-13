@@ -25,7 +25,7 @@ kerna doctor
 ```
 
 The bootstrap installs the pinned Node bridge at `C:\KernaData\kerna-demo`, configures Ollama
-models at `C:\KernaData\ollama-models`, pulls `qwen2.5-coder:7b`, prewarms Claude Code 2.1.270,
+models at `C:\KernaData\ollama-models`, pulls `qwen3.5:9b`, prewarms Claude Code 2.1.270,
 and leaves Cargo/session data on `C:`.
 
 ## Guided sequence
@@ -39,7 +39,7 @@ and leaves Cargo/session data on `C:`.
    ```
 
    The dashboard prints the disposable clone path and its chosen loopback URL. Show the sticky
-   `ollama / qwen2.5-coder:7b` route and zero cloud shadow events.
+   `ollama / qwen3.5:9b` route and zero cloud shadow events.
 3. Prove automatic cloud routing and local shadow with a multi-file edit task:
 
    ```powershell

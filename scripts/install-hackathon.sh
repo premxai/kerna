@@ -21,7 +21,7 @@ cp "$project_root/runtime/package-lock.json" "$runtime_root/package-lock.json"
 cp "$project_root/runtime/sponsor-runtime.mjs" "$runtime_root/sponsor-runtime.mjs"
 npm ci --prefix "$runtime_root" --cache "$data_root/npm-cache" --ignore-scripts --no-audit --no-fund
 npm --cache "$data_root/npm-cache" exec --yes --package '@anthropic-ai/claude-code@2.1.270' -- claude --version
-ollama pull qwen2.5-coder:7b
+ollama pull qwen3.5:9b
 
 CARGO_TARGET_DIR="$target_root" cargo build --manifest-path "$project_root/kernel/Cargo.toml" --release --locked
 cp "$target_root/release/kerna" "$bin_root/kerna"

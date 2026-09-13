@@ -959,6 +959,14 @@ async fn wait_for_stream_approval(
 ) -> crate::guard_protocol::GateDecision {
     let (_, binding) = guard_binding(policy, context, action);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+    let approval_id = match memory.guard_approval_for_call(&binding.session_id, &binding.call_id) {
+        Ok(Some(id)) => id,
+        Ok(None) | Err(_) => {
+            return crate::guard_protocol::GateDecision::Deny {
+                reason: "approval persistence is unavailable".to_owned(),
+            }
+        }
+    };
     loop {
         if matches!(
             memory.gateway_session_state(&binding.session_id),
@@ -969,26 +977,6 @@ async fn wait_for_stream_approval(
                 reason: "session stopped from the local dashboard".to_owned(),
             };
         }
-        let approval_id =
-            match memory.guard_approval_for_call(&binding.session_id, &binding.call_id) {
-                Ok(Some(id)) => id,
-                Ok(None) if tokio::time::Instant::now() >= deadline => {
-                    let _ = memory.expire_guard_approval(&binding);
-                    let _ = memory.deny_guard_action(&binding);
-                    return crate::guard_protocol::GateDecision::Deny {
-                        reason: "approval expired".to_owned(),
-                    };
-                }
-                Ok(None) => {
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                    continue;
-                }
-                Err(_) => {
-                    return crate::guard_protocol::GateDecision::Deny {
-                        reason: "approval persistence is unavailable".to_owned(),
-                    }
-                }
-            };
         match memory.pending_approval_decision(&approval_id) {
             Ok(Some(true)) => {
                 return match memory.release_guard_action(&binding) {
@@ -2103,6 +2091,63 @@ mod tests {
             stream_policy_decision(&policy, &action),
             crate::guard_protocol::GateDecision::Hold
         );
+    }
+
+    #[tokio::test]
+    async fn rejected_guard_approval_wakes_the_waiting_stream() {
+        let path = std::env::temp_dir().join(format!("kerna-approval-wait-{}.db", Uuid::new_v4()));
+        let memory = Arc::new(MemoryEngine::new(&path).unwrap());
+        let task_id = Uuid::new_v4();
+        memory
+            .create_task(task_id, None, "approval wait test")
+            .unwrap();
+        let context = GuardStreamContext {
+            session_id: "guard-wait-test".to_owned(),
+            task_id: task_id.to_string(),
+            agent: AgentKind::ClaudeCode,
+            agent_version: "test".to_owned(),
+            worktree_baseline: "sha256:test".to_owned(),
+        };
+        let action = crate::guard_protocol::ActionCandidate {
+            protocol: crate::guard_protocol::Protocol::AnthropicMessages,
+            id: "toolu_wait_test".to_owned(),
+            raw_tool_name: "secret_probe".to_owned(),
+            arguments: json!({}),
+        };
+        let policy = GuardPolicy::from_legacy_permissions(
+            &[crate::config::PermissionRule {
+                tool: "secret_probe".to_owned(),
+                action: "require_confirmation".to_owned(),
+            }],
+            PolicyEffect::Deny,
+        );
+        let (_, binding) = guard_binding(&policy, &context, &action);
+        let approval_id = memory
+            .create_guard_action(&binding, "ask", "{}", true)
+            .unwrap()
+            .unwrap();
+        let decision_memory = memory.clone();
+        let reject = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            decision_memory
+                .decide_guard_approval(&approval_id, false)
+                .unwrap();
+        });
+
+        let decision = tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_for_stream_approval(&memory, &policy, &context, &action),
+        )
+        .await
+        .expect("rejection must wake the stream");
+        reject.await.unwrap();
+        assert!(matches!(
+            decision,
+            crate::guard_protocol::GateDecision::Deny { ref reason }
+                if reason == "denied by local approval"
+        ));
+        drop(memory);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

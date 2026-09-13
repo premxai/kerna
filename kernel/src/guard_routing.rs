@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const DEFAULT_CLOUD_MODEL: &str = "claude-sonnet-5";
-pub const DEFAULT_LOCAL_MODEL: &str = "qwen2.5-coder:7b";
+pub const DEFAULT_LOCAL_MODEL: &str = "qwen3.5:9b";
 pub const DEFAULT_LOCAL_BASE_URL: &str = "http://127.0.0.1:11434";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]

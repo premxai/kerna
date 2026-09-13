@@ -37,7 +37,7 @@ if (-not $SkipOllama) {
     Get-Process ollama -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Process -FilePath $ollamaPath -ArgumentList 'serve' -WindowStyle Hidden -Environment @{ OLLAMA_MODELS = $ollamaModels }
     Start-Sleep -Seconds 3
-    & $ollamaPath pull qwen2.5-coder:7b
+    & $ollamaPath pull qwen3.5:9b
     if ($LASTEXITCODE -ne 0) { throw "Ollama model pull failed with exit code $LASTEXITCODE" }
 }
 

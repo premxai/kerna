@@ -8,7 +8,10 @@ steps. This is not a claim of production readiness.
 - The product front door is `kerna`; setup is `kerna doctor`. `kerna claude`, `kerna sandbox`,
   `kerna replay`, `kerna skills`, and `kerna dashboard` are the only demo commands that need to be
   remembered. Legacy commands remain behind `kerna advanced`.
-- The full Rust suite passes: 195 tests, 0 failures, serial execution, local SSD Cargo target.
+- The full Rust suite passes: 197 tests, 0 failures, local SSD Cargo target.
+- The venue-tested local default is `qwen3.5:9b` (6.6 GB, 256K context). The Claude launcher uses
+  bare mode, disables built-in execution tools and ambient project/user customizations, and exposes
+  only the explicitly governed Kerna MCP entry points.
 - The live Wasmer runtime completes a Python calculation and denies host-filesystem and outbound-
   network access. The governed MCP path stores only capability, package, timing, status, and
   output digest evidence.
@@ -18,6 +21,9 @@ steps. This is not a claim of production readiness.
   tools removed and cannot release actions. Primary and shadow prose is not stored.
 - Exact, expiring, one-time approvals remain bound to session, task, agent version, protocol,
   policy digest, worktree baseline, and canonical action digest.
+- A live `secret_probe` request entered the dashboard inbox, was rejected through the exact-origin
+  CSRF endpoint, woke the waiting Claude stream immediately, produced a bound `blocked` receipt,
+  and never reached the downstream gateway.
 - The dashboard is loopback-only, mutation endpoints require exact-origin CSRF, signed replay is
   read-only, and the 10-day fixture is visibly marked `SIMULATED` and not customer telemetry.
 - Windows and macOS/Linux source-checkout installers parse successfully. Expensive caches, models,
@@ -25,8 +31,11 @@ steps. This is not a claim of production readiness.
 
 ## Required operator checks before the stage demo
 
-1. Run `kerna doctor` after connecting to venue power/network.
-2. Run one local prompt and one Wasmer success/failure sequence.
+1. Run `kerna doctor` after connecting to venue power/network. This passed on September 13 with
+   Docker Engine 29.7.2, Ollama, `qwen3.5:9b`, Claude Code 2.1.270, and Wasmer ready.
+2. Run one local prompt and one Wasmer success/failure sequence. The venue rehearsal passed: the
+   local summary was coherent, Claude dispatched `kerna_sandbox_run`, Wasmer returned `285`, and
+   the dashboard showed both the model-seam and gateway receipts plus `sandbox.completed`.
 3. Enter the Anthropic key only in Kerna's hidden cloud-launch prompt, then complete one real
    cloud-primary/local-shadow request. This provider-backed variation cannot be certified without
    the operator's key.
