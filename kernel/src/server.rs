@@ -713,6 +713,7 @@ async fn relay_anthropic(
     if !stream_requested {
         return relay_anthropic_json(
             upstream,
+            policy,
             memory,
             context,
             decision,
@@ -722,6 +723,33 @@ async fn relay_anthropic(
         )
         .await;
     }
+
+    // Do not open a successful-looking SSE response until the provider has
+    // delivered its first event.  Returning HTTP 200 with an empty
+    // `text/event-stream` body makes Claude Code retry the request repeatedly
+    // and leaves the CLI looking hung even though the dashboard already has a
+    // failed primary runtime.  A real gateway error gives the client a
+    // terminal failure while preserving the failed runtime receipt.
+    let first_chunk = match tokio::time::timeout(PROVIDER_REQUEST_TIMEOUT, upstream.chunk()).await {
+        Ok(Ok(Some(chunk))) => chunk,
+        Ok(Ok(None)) | Ok(Err(_)) | Err(_) => {
+            let _ = record_primary_runtime(
+                &memory,
+                &context,
+                &decision,
+                &request_sha256,
+                "failed",
+                started.elapsed().as_millis(),
+                "",
+                0,
+            );
+            let _ = memory.finish_gateway_session(&context.session_id);
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "Anthropic returned an empty or stalled stream.",
+            );
+        }
+    };
     let stream = async_stream::stream! {
         let stream_context = context.clone();
         let stream_memory = memory.clone();
@@ -732,6 +760,7 @@ async fn relay_anthropic(
         let mut response_hasher = Sha256::new();
         let mut response_bytes = 0usize;
         let mut stream_completed = false;
+        let mut first_chunk = Some(first_chunk);
         'relay: loop {
             if matches!(
                 memory.gateway_session_state(&context.session_id),
@@ -739,7 +768,12 @@ async fn relay_anthropic(
             ) {
                 break 'relay;
             }
-            match tokio::time::timeout(PROVIDER_REQUEST_TIMEOUT, upstream.chunk()).await {
+            let next_chunk = if let Some(chunk) = first_chunk.take() {
+                Ok(Ok(Some(chunk)))
+            } else {
+                tokio::time::timeout(PROVIDER_REQUEST_TIMEOUT, upstream.chunk()).await
+            };
+            match next_chunk {
                 Ok(Ok(Some(chunk))) => {
                     response_hasher.update(&chunk);
                     response_bytes = response_bytes.saturating_add(chunk.len());
@@ -790,6 +824,7 @@ async fn relay_anthropic(
 /// closed rather than ever reaching the agent client.
 async fn relay_anthropic_json(
     upstream: reqwest::Response,
+    policy: Arc<GuardPolicy>,
     memory: Arc<MemoryEngine>,
     context: GuardStreamContext,
     decision: RouteDecision,
@@ -822,17 +857,62 @@ async fn relay_anthropic_json(
             );
         }
     };
-    let contains_tool_use = serde_json::from_slice::<Value>(&body)
-        .ok()
-        .and_then(|payload| payload.get("content").and_then(Value::as_array).cloned())
-        .map(|blocks| {
-            blocks
-                .iter()
-                .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
-        })
-        .unwrap_or(false);
+    let mut body = body.to_vec();
+    let mut contains_tool_use = false;
+    let mut denied_tool_use = false;
+    let mut held_tool_use = false;
+    if let Ok(mut payload) = serde_json::from_slice::<Value>(&body) {
+        if let Some(blocks) = payload.get_mut("content").and_then(Value::as_array_mut) {
+            let mut rewritten = Vec::with_capacity(blocks.len());
+            for block in blocks.iter() {
+                if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                    rewritten.push(block.clone());
+                    continue;
+                }
+                contains_tool_use = true;
+                let action = crate::guard_protocol::ActionCandidate {
+                    protocol: crate::guard_protocol::Protocol::AnthropicMessages,
+                    id: block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown-tool-call")
+                        .to_owned(),
+                    raw_tool_name: block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_owned(),
+                    arguments: block.get("input").cloned().unwrap_or_else(|| json!({})),
+                };
+                match stream_policy_decision_with_receipt(&policy, &memory, &context, &action) {
+                    crate::guard_protocol::GateDecision::Allow => rewritten.push(block.clone()),
+                    crate::guard_protocol::GateDecision::Deny { reason } => {
+                        denied_tool_use = true;
+                        rewritten.push(json!({
+                            "type": "text",
+                            "text": format!(
+                                "[blocked by Kerna policy] {} was not released: {}",
+                                action.raw_tool_name, reason
+                            )
+                        }));
+                    }
+                    crate::guard_protocol::GateDecision::Hold => {
+                        held_tool_use = true;
+                        rewritten.push(block.clone());
+                    }
+                }
+            }
+            if denied_tool_use && !held_tool_use {
+                *blocks = rewritten;
+                payload["stop_reason"] = Value::String("end_turn".to_owned());
+                if let Ok(rewritten_body) = serde_json::to_vec(&payload) {
+                    body = rewritten_body;
+                }
+            }
+        }
+    }
     let output_sha256 = format!("{:x}", Sha256::digest(&body));
-    let runtime_status = if status.is_success() && !contains_tool_use {
+    let runtime_status = if status.is_success() && (!contains_tool_use || denied_tool_use) {
         "completed"
     } else {
         "failed"
@@ -848,7 +928,7 @@ async fn relay_anthropic_json(
         body.len(),
     );
     let _ = memory.finish_gateway_session(&context.session_id);
-    if contains_tool_use {
+    if contains_tool_use && !denied_tool_use {
         return error_response(
             StatusCode::CONFLICT,
             "Kerna requires streaming for a tool-capable Anthropic response; the action was not released.",
@@ -1329,7 +1409,7 @@ async fn replay_page() -> Html<String> {
     let watermark = r#"<div style="position:fixed;z-index:99;left:50%;top:10px;transform:translateX(-50%);padding:7px 14px;border:1px solid #e4b56e;border-radius:999px;background:#fff7e8;color:#9b6419;font:700 11px ui-monospace,monospace;box-shadow:0 4px 18px #0001">RECORDED REHEARSAL · SIGNATURE VERIFIED · READ ONLY</div>"#;
     let script = r#"<script>document.addEventListener('DOMContentLoaded',()=>document.querySelectorAll('button').forEach(button=>{button.disabled=true;button.title='Disabled in signed replay mode';button.style.opacity='.45';button.style.cursor='not-allowed'}));</script>"#;
     Html(
-        include_str!("../assets/dashboard.html")
+        include_str!("../assets/dashboard-premium.html")
             .replace("{csrf}", "replay-read-only")
             .replace("<body>", &format!("<body>{watermark}{script}")),
     )
@@ -1361,7 +1441,7 @@ async fn replay_events(State(state): State<ReplayState>) -> impl IntoResponse {
 }
 
 async fn dashboard_page(State(state): State<DashboardState>) -> Html<String> {
-    Html(include_str!("../assets/dashboard.html").replace("{csrf}", &state.csrf_token))
+    Html(include_str!("../assets/dashboard-premium.html").replace("{csrf}", &state.csrf_token))
 }
 
 async fn dashboard_overview(State(state): State<DashboardState>) -> Json<Value> {
@@ -1925,6 +2005,7 @@ fn dashboard_snapshot(state: &DashboardState) -> Value {
             {"provider": "Anthropic", "model": crate::guard_routing::DEFAULT_CLOUD_MODEL, "location": "Cloud", "status": "key at launch", "best_for": "Edits, dependencies, multi-file fixes, long context, ambiguous work"}
         ],
         "rehearsal": demo_rehearsal_history(),
+        "demo_cases": demo_case_matrix(),
         "runtime_boundaries": [
             {"name": "Claude host process", "runtime_mode": "disposable clone", "network": "brokered model traffic", "status": "governed; not fully containerized"},
             {"name": "Delegated MCP tools", "runtime_mode": "Docker", "network": "disabled by default", "status": "contained"},
@@ -1960,6 +2041,47 @@ fn demo_rehearsal_history() -> Value {
             {"task":"Run untrusted Python","route":"Wasmer","reason":"No host mounts, environment, or network"}
         ]
     })
+}
+
+fn demo_case_matrix() -> Value {
+    json!([
+        {
+            "title": "Cloud · approved",
+            "outcome": "approved",
+            "task": "Run a bounded calculation with no host files or network.",
+            "route": "Anthropic + local shadow",
+            "backend": "Tenki remote",
+            "policy": "Allow · receipt recorded",
+            "shadow": "Tool-less comparison"
+        },
+        {
+            "title": "Cloud · rejected",
+            "outcome": "blocked",
+            "task": "Attempt to read a secret from the remote sandbox.",
+            "route": "Anthropic + local shadow",
+            "backend": "Tenki remote",
+            "policy": "Deny · no release",
+            "shadow": "Tool-less comparison"
+        },
+        {
+            "title": "Local · approved",
+            "outcome": "approved",
+            "task": "Inspect a fixture and run safe Python in an isolated guest.",
+            "route": "Ollama local",
+            "backend": "Wasmer local",
+            "policy": "Allow · receipt recorded",
+            "shadow": "None by policy"
+        },
+        {
+            "title": "Local · rejected",
+            "outcome": "blocked",
+            "task": "Attempt host-file or network access from the local sandbox.",
+            "route": "Ollama local",
+            "backend": "Wasmer local",
+            "policy": "Deny · held at boundary",
+            "shadow": "None by policy"
+        }
+    ])
 }
 
 /// Constant-time-ish bearer check. Returns true when auth is satisfied.
