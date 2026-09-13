@@ -467,7 +467,6 @@ fn run_claude(
     command
         .arg("--bare")
         .arg("--disable-slash-commands")
-        .arg("--no-session-persistence")
         .arg("--tools")
         .arg("")
         .arg("--allowedTools")
@@ -478,7 +477,10 @@ fn run_claude(
         .arg(mcp_config)
         .arg("--strict-mcp-config");
     if let Some(prompt) = prompt {
-        command.args(["-p", "--max-turns", "8", prompt]);
+        // Claude Code 2.1.270 accepts --no-session-persistence only with
+        // --print/-p. Interactive sessions are still isolated by Kerna's
+        // disposable clone, but must omit Claude's print-only flag.
+        command.args(["--no-session-persistence", "-p", "--max-turns", "8", prompt]);
     }
     command
         .current_dir(session_dir)
