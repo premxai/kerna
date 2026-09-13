@@ -148,6 +148,14 @@ pub async fn print_doctor(demo: bool, repo: Option<&Path>) -> bool {
         .all(|check| !check.required || check.status == "ready")
 }
 
+/// Run the same readiness checks without turning a normal launch into a doctor report.
+pub async fn readiness_ok(demo: bool, repo: Option<&Path>) -> bool {
+    doctor_checks(demo, repo)
+        .await
+        .iter()
+        .all(|check| !check.required || check.status == "ready")
+}
+
 pub async fn doctor_checks(demo: bool, repo: Option<&Path>) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     checks.push(command_check("Git", "git", &["--version"], true));
@@ -264,7 +272,7 @@ pub async fn launch_claude(
             "cloud routing is disabled in the demo profile; rerun `kerna init --demo` or use --route local"
         ));
     }
-    if !print_doctor(false, Some(repo)).await {
+    if !readiness_ok(false, Some(repo)).await {
         return Err(anyhow!("Kerna Guard readiness checks failed"));
     }
     let session_token = Uuid::new_v4().to_string();
