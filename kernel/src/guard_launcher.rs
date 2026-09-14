@@ -516,7 +516,7 @@ pub async fn run_demo_setup(brief: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_claude(
+pub(crate) fn run_claude(
     session_dir: &Path,
     mcp_config: &Path,
     session_token: &str,
@@ -574,7 +574,7 @@ fn run_claude(
     }
 }
 
-fn create_disposable_clone(repo: &Path, session_token: &str) -> Result<PathBuf> {
+pub(crate) fn create_disposable_clone(repo: &Path, session_token: &str) -> Result<PathBuf> {
     let source = git_root(repo)?;
     let root = session_root();
     std::fs::create_dir_all(&root)?;
@@ -600,7 +600,7 @@ fn create_disposable_clone(repo: &Path, session_token: &str) -> Result<PathBuf> 
     Ok(destination)
 }
 
-fn prepare_demo_contract(session_dir: &Path) -> Result<(PathBuf, PathBuf)> {
+pub(crate) fn prepare_demo_contract(session_dir: &Path) -> Result<(PathBuf, PathBuf)> {
     let contract_dir = session_dir.join(".kerna-demo");
     std::fs::create_dir_all(&contract_dir)?;
     let evidence_db = contract_dir

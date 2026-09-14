@@ -16,6 +16,7 @@ New-Item -ItemType Directory -Force -Path $runtimeTarget, $npmCache, $ollamaMode
 Copy-Item -LiteralPath (Join-Path $runtimeSource 'package.json') -Destination $runtimeTarget -Force
 Copy-Item -LiteralPath (Join-Path $runtimeSource 'package-lock.json') -Destination $runtimeTarget -Force
 Copy-Item -LiteralPath (Join-Path $runtimeSource 'sponsor-runtime.mjs') -Destination $runtimeTarget -Force
+Copy-Item -LiteralPath (Join-Path $runtimeSource 'tenki-session.mjs') -Destination $runtimeTarget -Force
 npm.cmd ci --prefix $runtimeTarget --cache $npmCache --ignore-scripts --no-audit --no-fund
 if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit code $LASTEXITCODE" }
 

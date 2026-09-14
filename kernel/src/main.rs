@@ -3,6 +3,7 @@ mod client;
 mod config;
 mod contract;
 mod cron;
+mod demo_session;
 pub mod embeddings;
 pub mod events;
 pub mod folders;
@@ -838,6 +839,13 @@ pub enum GuardCommands {
 
 #[derive(Subcommand, Debug)]
 pub enum DemoCommands {
+    /// Keep keys in memory and run four demo cases against one dashboard.
+    Start {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value_t = 8877)]
+        port: u16,
+    },
     /// Execute a bounded Python program through the live sponsor sandbox adapter.
     Sandbox {
         #[arg(long, default_value = "wasmer", value_parser = ["wasmer", "tenki"])]
@@ -1541,6 +1549,7 @@ async fn async_main() -> Result<()> {
         }
         Some(Commands::Demo { action }) => {
             match action {
+                DemoCommands::Start { repo, port } => demo_session::start(repo, *port).await?,
                 DemoCommands::Sandbox {
                     backend,
                     code,

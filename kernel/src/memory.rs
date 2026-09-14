@@ -67,6 +67,16 @@ pub struct GuardActionBinding {
 }
 
 impl MemoryEngine {
+    pub fn guard_audit_for_task(&self, task_id: &str) -> Result<Vec<serde_json::Value>> {
+        let conn = self.get_conn();
+        let mut stmt = conn.prepare("SELECT call_id,event_type,sequence,previous_hash,event_hash,created_at,payload_json FROM guard_receipt_events WHERE task_id=?1 ORDER BY sequence")?;
+        let rows = stmt.query_map([task_id], |r| Ok(serde_json::json!({
+            "call_id":r.get::<_,String>(0)?,"event_type":r.get::<_,String>(1)?,"sequence":r.get::<_,i64>(2)?,
+            "previous_hash":r.get::<_,String>(3)?,"event_hash":r.get::<_,String>(4)?,"created_at":r.get::<_,String>(5)?,
+            "details":serde_json::from_str::<serde_json::Value>(&r.get::<_,String>(6)?).unwrap_or_default()
+        })))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
     pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
         let conn = match Connection::open(&db_path) {
             Ok(c) => c,

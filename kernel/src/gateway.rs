@@ -673,8 +673,12 @@ impl Gateway {
         // Forward to the downstream server (registry also enforces
         // allow_tools/deny_tools/capabilities filters).
         let forward = {
-            let mut registry = self.registry.lock().await;
-            registry.call_tool(&tool_name, arguments.clone()).await
+            if is_sandbox_call && std::env::var_os("KERNA_DEMO_BROKER_PORT").is_some() {
+                crate::demo_session::forward_sandbox(arguments.clone()).await
+            } else {
+                let mut registry = self.registry.lock().await;
+                registry.call_tool(&tool_name, arguments.clone()).await
+            }
         };
 
         match forward {

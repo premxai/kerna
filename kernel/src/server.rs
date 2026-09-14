@@ -147,6 +147,7 @@ pub async fn start_server(state: AppState, bind: &str, port: u16) -> anyhow::Res
     let app = Router::new()
         .route("/v1/chat/completions", post(handle_chat_completion))
         .route("/anthropic/v1/messages", post(handle_guard_anthropic))
+        .route("/kerna/sandbox", post(handle_demo_sandbox))
         .route("/openai/v1/responses", post(handle_guard_openai))
         .with_state(state);
 
@@ -158,6 +159,179 @@ pub async fn start_server(state: AppState, bind: &str, port: u16) -> anyhow::Res
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn handle_demo_sandbox(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(args): Json<Value>,
+) -> axum::response::Response {
+    // This endpoint has no unauthenticated mode, even for loopback servers.
+    if state.auth_token.is_none() || !is_authorized(&state, &headers) {
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "Missing sandbox session credential",
+        );
+    }
+    let session_id = format!(
+        "guard-{:x}",
+        Sha256::digest(state.auth_token.as_deref().unwrap_or_default().as_bytes())
+    );
+    if matches!(state.memory.gateway_session_state(&session_id), Ok(Some(value)) if value == "stopped")
+    {
+        return error_response(StatusCode::CONFLICT, "Session has been stopped");
+    }
+    let context = match start_guard_stream(&state, AgentKind::ClaudeCode, "sandbox_admission") {
+        Ok(context) => context,
+        Err(_) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Sandbox receipt store unavailable",
+            )
+        }
+    };
+    let backend = if state.route_mode == RouteMode::Local {
+        crate::sponsor_runtime::ExecutionBackend::Wasmer
+    } else {
+        crate::sponsor_runtime::ExecutionBackend::Tenki
+    };
+    let backend_name = if state.route_mode == RouteMode::Local {
+        "wasmer"
+    } else {
+        "tenki"
+    };
+    let request = crate::sponsor_runtime::SandboxRequest {
+        backend,
+        language: args["language"].as_str().unwrap_or_default().to_string(),
+        code: args["code"].as_str().unwrap_or_default().to_string(),
+        timeout_ms: args["timeout_ms"].as_u64().unwrap_or(10000),
+        auth_token: None,
+    };
+    let reason = if args["backend"].as_str() != Some(backend_name) {
+        Some("route_backend_mismatch")
+    } else {
+        crate::sponsor_runtime::admission_reason(&request)
+    };
+    let summary = json!({"backend":backend_name,"policy_owner":"Kerna","reason":reason,
+        "code_sha256":format!("{:x}",Sha256::digest(request.code.as_bytes())),"timeout_ms":request.timeout_ms});
+    let mut binding = GuardActionBinding {
+        call_id: Uuid::new_v4().to_string(),
+        session_id: context.session_id.clone(),
+        task_id: context.task_id.clone(),
+        agent: "claude_code".into(),
+        agent_version: crate::guard_launcher::PINNED_CLAUDE_CODE_VERSION.into(),
+        protocol: "sandbox_admission".into(),
+        tool: "kerna_sandbox_run".into(),
+        canonical_action_digest: format!("{:x}", Sha256::digest(summary.to_string().as_bytes())),
+        policy_digest: format!("{:x}", Sha256::digest(b"kerna-sandbox-admission-v1")),
+        worktree_baseline: context.worktree_baseline.clone(),
+        binding_hash: String::new(),
+    };
+    binding.binding_hash = format!(
+        "{:x}",
+        Sha256::digest(
+            json!([
+                binding.session_id,
+                binding.agent_version,
+                binding.policy_digest,
+                binding.worktree_baseline,
+                binding.canonical_action_digest,
+                binding.call_id
+            ])
+            .to_string()
+            .as_bytes()
+        )
+    );
+    if state
+        .memory
+        .create_guard_action(
+            &binding,
+            if reason.is_some() { "deny" } else { "allow" },
+            &summary.to_string(),
+            false,
+        )
+        .is_err()
+    {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Pre-execution receipt failed; no sandbox released",
+        );
+    }
+    let result = if let Some(reason) = reason {
+        json!({"isError":true,"content":[{"type":"text","text":format!("Blocked by Kerna policy: {reason}; receipt:{}; backend not contacted",binding.call_id)}],
+            "structuredContent":{"backend":backend_name,"status":"blocked","policy_decision":"deny","policy_reason":reason,"backend_contacted":false,"receipt_id":binding.call_id}})
+    } else {
+        let outcome = tokio::task::spawn_blocking(move || {
+            if backend == crate::sponsor_runtime::ExecutionBackend::Tenki {
+                crate::demo_session::tenki_run(request)
+            } else {
+                crate::sponsor_runtime::run(request)
+            }
+        })
+        .await;
+        match outcome {
+            Ok(Ok(outcome)) => {
+                json!({"isError":outcome.exit_code!=0,"content":[{"type":"text","text":outcome.output}],
+                "structuredContent":{"backend":backend_name,"status":outcome.status,"exit_code":outcome.exit_code,
+                "duration_ms":outcome.duration_ms,"package":outcome.package,"network":outcome.network,
+                "output_sha256":outcome.output_sha256,"receipt_id":binding.call_id,"policy_decision":"allow","backend_contacted":true}})
+            }
+            _ => {
+                json!({"isError":true,"content":[{"type":"text","text":"Sandbox result unavailable; inspect receipt"}],
+                "structuredContent":{"backend":backend_name,"status":"outcome_unknown","receipt_id":binding.call_id,"policy_decision":"allow"}})
+            }
+        }
+    };
+    let metadata = result["structuredContent"].clone();
+    let status = metadata["status"].as_str().unwrap_or("outcome_unknown");
+    let event_id = Uuid::new_v4().to_string();
+    let commit = (|| -> anyhow::Result<()> {
+        if reason.is_none() && status != "outcome_unknown" {
+            state
+                .memory
+                .observe_guard_result(&context.session_id, &binding.call_id)?;
+        }
+        state.memory.finish_tool_call_receipt(
+            &binding.call_id,
+            None,
+            metadata["duration_ms"].as_i64().unwrap_or(0),
+            status,
+            Some(&event_id),
+            Some(&metadata.to_string()),
+        )?;
+        state.memory.record(Event {
+            event_id,
+            task_id: context.task_id,
+            session_id: Some(context.session_id),
+            sequence: chrono::Utc::now().timestamp_millis(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            event_type: format!("sandbox.{status}"),
+            actor: "kerna".into(),
+            severity: if status == "completed" {
+                "info"
+            } else {
+                "warn"
+            }
+            .into(),
+            model: None,
+            tool: Some("kerna_sandbox_run".into()),
+            policy_decision: Some(if reason.is_some() { "deny" } else { "allow" }.into()),
+            risk_score: None,
+            parent_event_id: None,
+            correlation_id: Some(binding.call_id),
+            redaction_status: Some("digest_only".into()),
+            budget_snapshot_json: None,
+            payload_json: json!({"outcome":metadata}),
+        })?;
+        Ok(())
+    })();
+    if commit.is_err() {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Sandbox evidence commit failed; outcome must be reviewed",
+        );
+    }
+    Json(result).into_response()
 }
 
 /// Relay an Anthropic Messages stream through the protocol gate. The session token
@@ -1766,9 +1940,20 @@ async fn dashboard_models(State(state): State<DashboardState>) -> Json<Value> {
     }))
 }
 
-async fn dashboard_readiness(State(_state): State<DashboardState>) -> Json<Value> {
+async fn dashboard_readiness(State(state): State<DashboardState>) -> Json<Value> {
+    let mut checks = crate::guard_launcher::doctor_checks(true, None).await;
+    for check in &mut checks {
+        if check.name == "Cloud model" && state.app.anthropic_api_key.is_some() {
+            check.status = "ready".into();
+            check.detail = "Provider key loaded in trusted session memory".into();
+        }
+        if check.name == "Tenki" && crate::demo_session::tenki_ready() {
+            check.status = "ready".into();
+            check.detail = "Prewarmed VM; network disabled; maximum 15-minute lifetime".into();
+        }
+    }
     Json(json!({
-        "checks": crate::guard_launcher::doctor_checks(true, None).await,
+        "checks": checks,
         "system": crate::guard_launcher::system_profile(),
         "hardware": crate::models::detect_hardware(),
         "storage": crate::guard_launcher::storage_locations()
@@ -1789,7 +1974,9 @@ async fn dashboard_traces(
     Path(task_id): Path<String>,
 ) -> Json<Value> {
     Json(
-        json!({"task_id": task_id, "events": state.app.memory.get_events(&task_id).unwrap_or_default()}),
+        json!({"task_id": task_id, "events": state.app.memory.get_events(&task_id).unwrap_or_default(),
+            "receipts": state.app.memory.recent_tool_call_receipts(1000).unwrap_or_default().into_iter().filter(|r|r.task_id==task_id).collect::<Vec<_>>(),
+            "receipt_chain":state.app.memory.guard_audit_for_task(&task_id).unwrap_or_default()}),
     )
 }
 
@@ -2002,15 +2189,15 @@ fn dashboard_snapshot(state: &DashboardState) -> Value {
         ],
         "model_registry": [
             {"provider": "Ollama", "model": local_model, "location": "Local GPU", "status": if configured_local_model.is_some() { "configured" } else { "not selected" }, "best_for": "Private inspection, summaries, repository search, bounded analysis"},
-            {"provider": "Anthropic", "model": crate::guard_routing::DEFAULT_CLOUD_MODEL, "location": "Cloud", "status": "key at launch", "best_for": "Edits, dependencies, multi-file fixes, long context, ambiguous work"}
+            {"provider": "Anthropic", "model": crate::guard_routing::DEFAULT_CLOUD_MODEL, "location": "Cloud", "status": if state.app.anthropic_api_key.is_some() { "key loaded in trusted memory" } else { "key at launch" }, "best_for": "Edits, dependencies, multi-file fixes, long context, ambiguous work"}
         ],
         "rehearsal": demo_rehearsal_history(),
         "demo_cases": demo_case_matrix(),
         "runtime_boundaries": [
             {"name": "Claude host process", "runtime_mode": "disposable clone", "network": "brokered model traffic", "status": "governed; not fully containerized"},
-            {"name": "Delegated MCP tools", "runtime_mode": "Docker", "network": "disabled by default", "status": "contained"},
+            {"name": "Demo MCP gateway", "runtime_mode": "trusted host broker", "network": "scoped sponsor adapters", "status": "policy-governed; not containerized"},
             {"name": "Untrusted code", "runtime_mode": "Wasmer", "network": "disabled", "status": if sandbox_events.iter().any(|event| event.payload_json.pointer("/outcome/backend").and_then(Value::as_str) == Some("wasmer")) { "verified this session" } else { "awaiting smoke run" }},
-            {"name": "Remote sandbox", "runtime_mode": "Tenki", "network": "disabled by Kerna", "status": if std::env::var("TENKI_API_KEY").map(|value| !value.is_empty()).unwrap_or(false) { "configured" } else { "authentication required" }},
+            {"name": "Remote sandbox", "runtime_mode": "Tenki", "network": "inbound=false, outbound=false", "status": if crate::demo_session::tenki_ready() { "prewarmed — bounded 15-minute VM" } else { "not prepared or lifetime ending" }},
         ],
         "models": {"external_clients": "Kerna selects one sticky upstream for guarded Claude sessions", "routes": state.app.config.model_routes, "privacy_routes": state.app.config.privacy_routes}
     })
@@ -2178,6 +2365,56 @@ mod tests {
     use super::*;
     use crate::memory::MemoryEngine;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn demo_sandbox_denials_have_auditable_receipts_on_both_routes() {
+        for route in [RouteMode::Cloud, RouteMode::Local] {
+            let memory = Arc::new(MemoryEngine::new(":memory:").unwrap());
+            let state = AppState {
+                config: Config::default(),
+                guard_policy: Arc::new(GuardPolicy::balanced()),
+                memory: memory.clone(),
+                mcp_registry: Arc::new(Mutex::new(McpRegistry::new())),
+                worktree_baseline: "test-baseline".into(),
+                auth_token: Some("session-credential".into()),
+                route_mode: route,
+                shadow_enabled: true,
+                anthropic_api_key: None,
+                route_decisions: Arc::new(Mutex::new(HashMap::new())),
+            };
+            let args = json!({"backend":if route==RouteMode::Local{"wasmer"}else{"tenki"},"language":"python","code":"import os; print(os.environ)","timeout_ms":10000});
+            let response =
+                handle_demo_sandbox(State(state.clone()), HeaderMap::new(), Json(args.clone()))
+                    .await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(memory.recent_tool_call_receipts(10).unwrap().is_empty());
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "authorization",
+                "Bearer session-credential".parse().unwrap(),
+            );
+            let response = handle_demo_sandbox(State(state), headers, Json(args)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            let result: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(result["structuredContent"]["backend_contacted"], false);
+            assert_eq!(
+                result["structuredContent"]["policy_reason"],
+                "environment_access"
+            );
+            let receipts = memory.recent_tool_call_receipts(10).unwrap();
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].result_class.as_deref(), Some("blocked"));
+            let audit = memory.guard_audit_for_task(&receipts[0].task_id).unwrap();
+            assert_eq!(audit.len(), 2);
+            assert_eq!(audit[1]["event_type"], "denied");
+            assert!(!serde_json::to_string(&audit)
+                .unwrap()
+                .contains("print(os.environ)"));
+        }
+    }
 
     #[test]
     fn dashboard_snapshot_aggregates_durable_gateway_receipts() {

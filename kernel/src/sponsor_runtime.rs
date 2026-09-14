@@ -58,11 +58,6 @@ pub fn admission_reason(request: &SandboxRequest) -> Option<&'static str> {
     {
         return Some("invalid_or_unsupported_request");
     }
-    if request.backend == ExecutionBackend::Tenki
-        && request.auth_token.as_deref().unwrap_or_default().is_empty()
-    {
-        return Some("tenki_authentication_required");
-    }
 
     let code = request.code.to_ascii_lowercase();
     let denied_patterns: &[(&str, &[&str])] = &[
@@ -243,7 +238,7 @@ fn validate(request: &SandboxRequest) -> Result<()> {
     Ok(())
 }
 
-fn runtime_dir() -> Option<PathBuf> {
+pub(crate) fn runtime_dir() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("KERNA_SPONSOR_RUNTIME_DIR") {
         return Some(PathBuf::from(path));
     }
