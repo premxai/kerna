@@ -698,20 +698,35 @@ impl Gateway {
                     .get("isError")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
+                let sandbox_policy_denied = is_sandbox_call
+                    && result
+                        .pointer("/structuredContent/policy_decision")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("deny");
                 let sandbox_evidence = is_sandbox_call.then(|| sandbox_result_evidence(&result));
                 let result_preview = sandbox_evidence
                     .as_ref()
                     .and_then(|value| serde_json::to_string(value).ok())
                     .unwrap_or_else(|| redacted_preview(&result));
                 let trace_id = self.record(
-                    if downstream_error {
+                    if sandbox_policy_denied {
+                        "tool.call.blocked"
+                    } else if downstream_error {
                         "tool.call.failed"
                     } else {
                         "tool.call.completed"
                     },
                     Some(&tool_name),
-                    if downstream_error { "error" } else { "info" },
-                    Some("AutoApprove"),
+                    if sandbox_policy_denied || downstream_error {
+                        "warning"
+                    } else {
+                        "info"
+                    },
+                    Some(if sandbox_policy_denied {
+                        "Deny"
+                    } else {
+                        "AutoApprove"
+                    }),
                     json!({
                         "result_preview": result_preview,
                         "container": self.container_metadata(server_name.as_deref())
@@ -719,14 +734,24 @@ impl Gateway {
                 );
                 if let Some(evidence) = sandbox_evidence {
                     self.record(
-                        if downstream_error {
+                        if sandbox_policy_denied {
+                            "sandbox.blocked"
+                        } else if downstream_error {
                             "sandbox.failed"
                         } else {
                             "sandbox.completed"
                         },
                         Some(&tool_name),
-                        if downstream_error { "error" } else { "info" },
-                        Some("AutoApprove"),
+                        if sandbox_policy_denied || downstream_error {
+                            "warning"
+                        } else {
+                            "info"
+                        },
+                        Some(if sandbox_policy_denied {
+                            "Deny"
+                        } else {
+                            "AutoApprove"
+                        }),
                         evidence,
                     );
                 }
@@ -734,7 +759,9 @@ impl Gateway {
                     &call_id,
                     None,
                     started.elapsed(),
-                    if downstream_error {
+                    if sandbox_policy_denied {
+                        "blocked"
+                    } else if downstream_error {
                         "failed"
                     } else {
                         "completed"

@@ -44,6 +44,80 @@ pub struct SandboxOutcome {
     pub network: String,
 }
 
+/// Return the stable, redacted reason for refusing a sandbox request before a
+/// sponsor backend is contacted. This is deliberately conservative: Wasmer
+/// and Tenki remain the isolation boundary, but Kerna must also demonstrate
+/// that it owns admission policy rather than merely reporting a guest failure.
+pub fn admission_reason(request: &SandboxRequest) -> Option<&'static str> {
+    if request.language != "python"
+        || request.code.is_empty()
+        || request.code.len() > MAX_CODE_BYTES
+        || request.timeout_ms == 0
+        || request.timeout_ms > MAX_TIMEOUT_MS
+        || request.backend == ExecutionBackend::Docker
+    {
+        return Some("invalid_or_unsupported_request");
+    }
+    if request.backend == ExecutionBackend::Tenki
+        && request.auth_token.as_deref().unwrap_or_default().is_empty()
+    {
+        return Some("tenki_authentication_required");
+    }
+
+    let code = request.code.to_ascii_lowercase();
+    let denied_patterns: &[(&str, &[&str])] = &[
+        (
+            "network_access",
+            &[
+                "urllib", "requests", "http://", "https://", "socket", "urlopen(", "ftplib", "dns",
+            ],
+        ),
+        (
+            "host_filesystem_access",
+            &[
+                "open(",
+                "os.listdir",
+                "os.walk",
+                "pathlib",
+                "/etc/",
+                "c:/",
+                "c:\\",
+                "system32",
+            ],
+        ),
+        (
+            "environment_access",
+            &["os.environ", "os.getenv", "getenv(", "environ["],
+        ),
+        (
+            "process_escape",
+            &[
+                "subprocess",
+                "os.system",
+                "os.popen",
+                "ctypes",
+                "__import__(",
+            ],
+        ),
+    ];
+    for (reason, patterns) in denied_patterns {
+        if patterns.iter().any(|pattern| code.contains(pattern)) {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+/// Kerna's pre-execution admission gate. Callers should persist the request
+/// receipt before invoking this function and must not call the backend when it
+/// returns an error.
+pub fn policy_check(request: &SandboxRequest) -> Result<()> {
+    if let Some(reason) = admission_reason(request) {
+        anyhow::bail!("Kerna policy denied sandbox request: {reason}");
+    }
+    validate(request)
+}
+
 #[derive(Debug, Deserialize)]
 struct BridgeOutcome {
     status: String,
@@ -66,7 +140,7 @@ pub fn bridge_available() -> bool {
 }
 
 pub fn run(request: SandboxRequest) -> Result<SandboxOutcome> {
-    validate(&request)?;
+    policy_check(&request)?;
     let bridge = bridge_path().ok_or_else(|| {
         anyhow!("Kerna sponsor runtime bridge is unavailable; run the demo bootstrap")
     })?;
@@ -251,5 +325,25 @@ mod tests {
         let mut request = smoke_request();
         request.backend = ExecutionBackend::Tenki;
         assert!(validate(&request).is_err());
+    }
+
+    #[test]
+    fn kerna_denies_escape_intent_before_backend_contact() {
+        let mut request = smoke_request();
+        request.code = "print(open('/etc/passwd').read())".to_string();
+        assert_eq!(admission_reason(&request), Some("host_filesystem_access"));
+        assert!(policy_check(&request).is_err());
+
+        request.code =
+            "import urllib.request; urllib.request.urlopen('https://example.com')".to_string();
+        assert_eq!(admission_reason(&request), Some("network_access"));
+        assert!(policy_check(&request).is_err());
+    }
+
+    #[test]
+    fn safe_code_is_admitted() {
+        let request = smoke_request();
+        assert_eq!(admission_reason(&request), None);
+        assert!(policy_check(&request).is_ok());
     }
 }

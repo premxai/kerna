@@ -1143,6 +1143,8 @@ fn run_sponsor_sandbox(backend: &str, code: &str, timeout_ms: u64) -> Result<()>
         auth_token,
     };
 
+    let admission = sponsor_runtime::admission_reason(&request);
+
     // Standalone sandbox runs must use the same durable receipt path as MCP
     // calls. Commit the requested receipt before entering the sponsor runtime,
     // then close it on both success and safe containment failure.
@@ -1170,8 +1172,61 @@ fn run_sponsor_sandbox(backend: &str, code: &str, timeout_ms: u64) -> Result<()>
         Some(&backend_name),
         None,
         "kerna_sandbox_run",
-        "allow_contained",
+        if admission.is_some() {
+            "deny"
+        } else {
+            "allow_contained"
+        },
     )?;
+
+    if let Some(reason) = admission {
+        let elapsed = 0_i64;
+        let trace_id = uuid::Uuid::new_v4().to_string();
+        let digest = format!("{:x}", Sha256::digest(reason.as_bytes()));
+        let payload = serde_json::json!({
+            "policy": {
+                "decision": "deny",
+                "reason": reason,
+                "backend_contacted": false,
+                "code_bytes": code.len(),
+                "code_sha256": format!("{:x}", Sha256::digest(code.as_bytes()))
+            },
+            "output_sha256": digest
+        });
+        memory.finish_tool_call_receipt(
+            &call_id,
+            None,
+            elapsed,
+            "blocked",
+            Some(&trace_id),
+            Some(&format!("[REDACTED] policy:{reason}")),
+        )?;
+        memory.record(Event {
+            event_id: trace_id,
+            task_id: task_id.clone(),
+            session_id: Some(session_id.clone()),
+            sequence: chrono::Utc::now().timestamp_millis(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            event_type: "sandbox.blocked".to_string(),
+            actor: "kerna-policy".to_string(),
+            severity: "warning".to_string(),
+            model: None,
+            tool: Some("kerna_sandbox_run".to_string()),
+            policy_decision: Some("deny".to_string()),
+            risk_score: None,
+            parent_event_id: None,
+            correlation_id: Some(call_id.clone()),
+            redaction_status: Some("code_digest_only".to_string()),
+            budget_snapshot_json: None,
+            payload_json: payload,
+        })?;
+        memory.finish_gateway_session(&session_id)?;
+        eprintln!(
+            "[-] {} · blocked by Kerna policy · {} · receipt:{}",
+            backend_name, reason, call_id
+        );
+        anyhow::bail!("Kerna policy denied sandbox request ({reason}); receipt recorded")
+    }
 
     let started = std::time::Instant::now();
     let result = sponsor_runtime::run(request);

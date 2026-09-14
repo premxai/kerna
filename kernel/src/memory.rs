@@ -1339,7 +1339,7 @@ impl MemoryEngine {
         output_preview: Option<&str>,
     ) -> Result<()> {
         let conn = self.get_conn();
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE tool_call_receipts
              SET approval_id = ?1, completed_at = ?2, duration_ms = ?3,
                  result_class = ?4, trace_id = ?5, output_preview = ?6
@@ -1354,6 +1354,9 @@ impl MemoryEngine {
                 call_id
             ],
         )?;
+        if changed != 1 {
+            anyhow::bail!("receipt {call_id} was not found while closing");
+        }
         Ok(())
     }
 

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::Digest;
 use std::io::{self, BufRead};
 
 #[derive(Debug, Deserialize)]
@@ -286,6 +287,21 @@ impl MockMcpServer {
                     // --backend tenki`, whose adapter reads its key from hidden stdin.
                     auth_token: None,
                 };
+                if let Some(reason) = crate::sponsor_runtime::admission_reason(&request) {
+                    return json!({
+                        "isError": true,
+                        "content": [{ "type": "text", "text": format!("Kerna policy denied sandbox request: {reason}") }],
+                        "structuredContent": {
+                            "backend": backend,
+                            "status": "blocked",
+                            "exit_code": 1,
+                            "policy_decision": "deny",
+                            "policy_reason": reason,
+                            "backend_contacted": false,
+                            "output_sha256": format!("{:x}", sha2::Sha256::digest(reason.as_bytes()))
+                        }
+                    });
+                }
                 match crate::sponsor_runtime::run(request) {
                     Ok(outcome) => {
                         let failed = outcome.status != "completed" || outcome.exit_code != 0;
