@@ -4,10 +4,13 @@ From PowerShell in the verified local checkout, before sharing the screen:
 
 ```powershell
 cd D:\Kerna-MVP\repos\kerna
-kerna demo start
+& C:\KernaData\bin\kerna-demo.exe demo start --port 8892
 ```
 
 Enter Anthropic and Tenki keys at the two hidden prompts. They remain in the
+trusted supervisor/adapter. The venue binary is installed side-by-side as
+`kerna-demo.exe` because the existing `kerna.exe` is locked by another dashboard.
+The command above uses the new dashboard on port 8892. Keys stay in the
 trusted supervisor/adapter, never in the agent environment or generated files.
 Wait for `Ready`. Tenki provisioning happens here (up to 70 seconds), not once
 per stage command. The cloud VM has inbound/outbound networking disabled and a
