@@ -47,8 +47,8 @@
     },
     {
       "id": "SB-003",
-      "title": "Demo Claude native tools on the host",
-      "entrypoint": "kerna claude and kerna demo start",
+      "title": "Explicitly degraded Claude host demo",
+      "entrypoint": "kerna claude --host-demo and kerna demo start",
       "initiator": "agent",
       "controlled_inputs": ["native Bash", "native file tools", "client subprocess behavior", "repository instructions"],
       "operation": ["filesystem", "process", "network", "credential"],
@@ -56,14 +56,14 @@
       "enforcement_point": "Model-seam policy observes model-issued actions, but cannot mediate every native client side effect.",
       "containment_boundary": "Disposable clone only; no complete OS/container boundary around the Claude host process.",
       "receipt_coverage": "Model-seam actions may be receipted; native actions outside the seam are not guaranteed to be observed.",
-      "failure_behavior": "A native-tool bypass can execute with the launching user's host authority.",
+      "failure_behavior": "The CLI prints a degraded-containment warning; this path is excluded from production and pilot claims.",
       "platforms": ["windows", "macos"],
       "tests": ["client::tests::claude_and_codex_configs_pin_the_contract_working_directory"],
       "source_files": ["kernel/src/guard_launcher.rs", "kernel/src/demo_session.rs"],
-      "status": "open-bypass",
-      "risk": "P0",
+      "status": "intentionally-excluded",
+      "risk": "P1",
       "remediation_task": 4,
-      "evidence": "PROJECT_STATE explicitly says the Claude host process is not fully containerized and native tools are not claimed as governed."
+      "evidence": "The host path now requires an explicit --host-demo flag and prints that it is not structurally contained."
     },
     {
       "id": "SB-004",
@@ -364,6 +364,26 @@
       "risk": "accepted",
       "remediation_task": 8,
       "evidence": "Coverage scanner includes these files so test helpers cannot be mistaken for unclassified production surfaces."
+    },
+    {
+      "id": "SB-019",
+      "title": "Production Claude agent container",
+      "entrypoint": "kerna claude and kerna guard claude without --host-demo",
+      "initiator": "agent",
+      "controlled_inputs": ["native shell and file tools", "repository instructions", "MCP configuration", "model-issued actions"],
+      "operation": ["filesystem", "process", "network", "credential", "container", "evidence"],
+      "privileges": "The agent can write only the disposable workspace and can connect only to the Kerna broker on an internal Docker network.",
+      "enforcement_point": "Digest-pinned base images, reviewed image labels, one bind mount, read-only root, dropped capabilities, no-new-privileges, scoped session credential, and separate Docker networks",
+      "containment_boundary": "Claude runs in an agent container attached only to an internal network; the broker runs separately on both the internal and egress networks.",
+      "receipt_coverage": "Protocol and MCP actions retain existing receipt coverage; native execution remains confined to the disposable container workspace.",
+      "failure_behavior": "Missing or mislabeled image, unsupported local/shadow route, Docker failure, broker failure, or network setup failure aborts before Claude starts.",
+      "platforms": ["windows", "macos"],
+      "tests": ["guard_launcher::tests::production_container_contract_exposes_only_the_disposable_workspace", "guard_launcher::tests::container_contract_uses_only_container_paths", "guard_launcher::tests::production_launch_refuses_routes_that_need_host_services", "scripts/test-claude-container-boundary.ps1", "scripts/test-claude-container-boundary.sh"],
+      "source_files": ["kernel/src/guard_launcher.rs", "kernel/src/main.rs"],
+      "status": "contained",
+      "risk": "P1",
+      "remediation_task": 4,
+      "evidence": "Windows live proof showed workspace-only write access, no host home, no Docker socket, no provider key, broker reachability, and no public network. Physical macOS proof remains required before pilot GO."
     }
   ]
 }

@@ -108,6 +108,9 @@ enum QuickCommand {
         no_shadow: bool,
         #[arg(long)]
         prompt: Option<String>,
+        /// Use the legacy host-launched demo path. This is not production containment.
+        #[arg(long)]
+        host_demo: bool,
     },
     /// Run bounded Python in the governed Wasmer or Tenki sandbox.
     Sandbox {
@@ -834,6 +837,9 @@ pub enum GuardCommands {
         /// Optional non-interactive prompt for a repeatable demo run.
         #[arg(long)]
         prompt: Option<String>,
+        /// Use the legacy host-launched demo path. This is not production containment.
+        #[arg(long)]
+        host_demo: bool,
     },
 }
 
@@ -1429,8 +1435,20 @@ async fn async_main() -> Result<()> {
                 route,
                 no_shadow,
                 prompt,
+                host_demo,
             } => {
-                guard_launcher::launch_claude(&repo, route, !no_shadow, prompt.as_deref()).await?;
+                if host_demo {
+                    guard_launcher::launch_claude_host_demo(
+                        &repo,
+                        route,
+                        !no_shadow,
+                        prompt.as_deref(),
+                    )
+                    .await?;
+                } else {
+                    guard_launcher::launch_claude(&repo, route, !no_shadow, prompt.as_deref())
+                        .await?;
+                }
             }
             QuickCommand::Sandbox {
                 backend,
@@ -1541,8 +1559,20 @@ async fn async_main() -> Result<()> {
                     route,
                     shadow,
                     prompt,
+                    host_demo,
                 } => {
-                    guard_launcher::launch_claude(repo, *route, *shadow, prompt.as_deref()).await?;
+                    if *host_demo {
+                        guard_launcher::launch_claude_host_demo(
+                            repo,
+                            *route,
+                            *shadow,
+                            prompt.as_deref(),
+                        )
+                        .await?;
+                    } else {
+                        guard_launcher::launch_claude(repo, *route, *shadow, prompt.as_deref())
+                            .await?;
+                    }
                 }
             }
             return Ok(());

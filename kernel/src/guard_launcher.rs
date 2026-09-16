@@ -2,13 +2,15 @@ use crate::guard_routing::RouteMode;
 use anyhow::{anyhow, Context, Result};
 use dialoguer::{Confirm, Password, Select};
 use serde::Serialize;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use uuid::Uuid;
 
 pub const PINNED_CLAUDE_CODE_VERSION: &str = "2.1.270";
+pub const CLAUDE_AGENT_IMAGE: &str = "kerna-claude-agent:0.2.9-claude-2.1.270";
+const CLAUDE_AGENT_CONTRACT: &str = "claude-agent-v1";
 const BROKER_PORT: u16 = 8766;
 const DASHBOARD_PORT: u16 = 8877;
 
@@ -196,15 +198,29 @@ pub async fn doctor_checks(demo: bool, repo: Option<&Path>) -> Vec<DoctorCheck> 
         },
         required: demo && selected_model.is_some(),
     });
+    let contained_image = (!demo).then(verified_agent_image_id);
     checks.push(DoctorCheck {
         name: "Claude Code".to_string(),
-        status: if command_exists("npm") {
+        status: if if demo {
+            command_exists("npm")
+        } else {
+            matches!(contained_image, Some(Ok(_)))
+        } {
             "ready"
         } else {
             "missing"
         }
         .to_string(),
-        detail: format!("pinned launcher {}", PINNED_CLAUDE_CODE_VERSION),
+        detail: if demo {
+            format!("degraded host-demo launcher {}", PINNED_CLAUDE_CODE_VERSION)
+        } else if let Some(Ok(image_id)) = contained_image {
+            format!("contained image {}", &image_id[..image_id.len().min(19)])
+        } else {
+            format!(
+                "build {} with scripts/build-claude-agent-image",
+                CLAUDE_AGENT_IMAGE
+            )
+        },
         required: true,
     });
     checks.push(DoctorCheck {
@@ -261,7 +277,101 @@ pub async fn doctor_checks(demo: bool, repo: Option<&Path>) -> Vec<DoctorCheck> 
     checks
 }
 
+/// Production Claude launch. The agent and trusted broker run in separate
+/// containers. Only the broker receives provider authority or outbound egress.
 pub async fn launch_claude(
+    repo: &Path,
+    route: RouteMode,
+    shadow: bool,
+    prompt: Option<&str>,
+) -> Result<()> {
+    if route != RouteMode::Cloud || shadow {
+        return Err(anyhow!(
+            "production containment currently supports --route cloud without shadow; use --host-demo only for the explicitly degraded local demo"
+        ));
+    }
+    if !git_root(repo)?.is_dir() {
+        return Err(anyhow!("repository is unavailable"));
+    }
+    let image_id = verified_agent_image_id()?;
+    let session_token = Uuid::new_v4().to_string();
+    let suffix = &session_token[..8];
+    let session_dir = create_disposable_clone(repo, &session_token)?;
+    let (contract_dir, mcp_config) = prepare_container_contract(&session_dir)?;
+    let cloud_key = Password::new()
+        .with_prompt(
+            "Anthropic API key (sent to the broker over stdin; never stored in container metadata)",
+        )
+        .interact()?;
+    if cloud_key.trim().is_empty() {
+        return Err(anyhow!("Anthropic API key cannot be empty"));
+    }
+
+    let agent_network = format!("kerna-agent-{suffix}");
+    let egress_network = format!("kerna-egress-{suffix}");
+    let broker_name = format!("kerna-broker-{suffix}");
+    create_network(&agent_network, true, &session_token)?;
+    let mut cleanup = ContainerCleanup::new(
+        broker_name.clone(),
+        agent_network.clone(),
+        egress_network.clone(),
+    );
+    create_network(&egress_network, false, &session_token)?;
+
+    let mut broker = start_broker_container(
+        &image_id,
+        &session_dir,
+        &agent_network,
+        &broker_name,
+        &session_token,
+    )?;
+    if let Some(mut stdin) = broker.stdin.take() {
+        stdin.write_all(cloud_key.as_bytes())?;
+        stdin.write_all(b"\n")?;
+    }
+    drop(cloud_key);
+    cleanup.broker = Some(broker);
+    docker_status(&["network", "connect", &egress_network, &broker_name])?;
+    wait_for_container(&broker_name)?;
+
+    let executable = std::env::current_exe()?;
+    let dashboard_port = available_loopback_port(DASHBOARD_PORT)?;
+    let mut dashboard = Command::new(&executable)
+        .args([
+            "dashboard",
+            "--workspace",
+            contract_dir.to_string_lossy().as_ref(),
+            "--port",
+            &dashboard_port.to_string(),
+            "--route",
+            "cloud",
+        ])
+        .current_dir(&contract_dir)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("could not start the Kerna dashboard")?;
+
+    println!("[+] Contained session: {}", session_dir.display());
+    println!("[+] Dashboard: http://127.0.0.1:{dashboard_port}/");
+    println!("[+] Claude boundary: Docker agent network; broker-only connectivity");
+    let result = run_claude_container(
+        &image_id,
+        &session_dir,
+        &mcp_config,
+        &agent_network,
+        &broker_name,
+        &session_token,
+        prompt,
+    );
+    terminate_child(&mut dashboard);
+    drop(cleanup);
+    result
+}
+
+/// Legacy guided-demo path. This remains available only behind `--host-demo`
+/// and must never be represented as production containment.
+pub async fn launch_claude_host_demo(
     repo: &Path,
     route: RouteMode,
     shadow: bool,
@@ -338,7 +448,7 @@ pub async fn launch_claude(
     std::thread::sleep(Duration::from_millis(900));
     println!("[+] Disposable session: {}", session_dir.display());
     println!("[+] Dashboard: http://127.0.0.1:{dashboard_port}/");
-    println!("[i] Claude is model-seam governed; the host process is not fully containerized.");
+    println!("[!] DEGRADED HOST DEMO: Claude is model-seam governed, not structurally contained.");
     let result = run_claude(
         &session_dir,
         &mcp_config,
@@ -573,6 +683,298 @@ pub(crate) fn run_claude(
     } else {
         Err(anyhow!("Claude Code exited with status {status}"))
     }
+}
+
+fn verified_agent_image_id() -> Result<String> {
+    let output = docker_command()
+        .args([
+            "image",
+            "inspect",
+            CLAUDE_AGENT_IMAGE,
+            "--format",
+            "{{.Id}}|{{index .Config.Labels \"dev.kerna.contract\"}}|{{index .Config.Labels \"dev.kerna.claude-code-version\"}}",
+        ])
+        .output()
+        .context("could not inspect the pinned Kerna Claude agent image")?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "the contained Claude image is unavailable; run scripts/build-claude-agent-image before a production session"
+        ));
+    }
+    let rendered = String::from_utf8(output.stdout)?;
+    let mut fields = rendered.trim().split('|');
+    let image_id = fields.next().unwrap_or_default();
+    let contract = fields.next().unwrap_or_default();
+    let version = fields.next().unwrap_or_default();
+    if !image_id.starts_with("sha256:")
+        || contract != CLAUDE_AGENT_CONTRACT
+        || version != PINNED_CLAUDE_CODE_VERSION
+    {
+        return Err(anyhow!(
+            "Claude agent image labels do not match the reviewed Kerna contract"
+        ));
+    }
+    Ok(image_id.to_string())
+}
+
+fn docker_command() -> Command {
+    if cfg!(windows) {
+        let installed = Path::new(r"C:\Program Files\Docker\Docker\resources\bin\docker.exe");
+        if installed.is_file() {
+            return Command::new(installed);
+        }
+    }
+    Command::new("docker")
+}
+
+fn docker_status(args: &[&str]) -> Result<()> {
+    let output = docker_command().args(args).output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "docker {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+fn create_network(name: &str, internal: bool, session_token: &str) -> Result<()> {
+    let mut args = vec![
+        "network".to_string(),
+        "create".to_string(),
+        "--label".to_string(),
+        "dev.kerna.managed=true".to_string(),
+        "--label".to_string(),
+        format!("dev.kerna.session={}", &session_token[..8]),
+    ];
+    if internal {
+        args.push("--internal".to_string());
+    }
+    args.push(name.to_string());
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    docker_status(&borrowed)
+}
+
+fn container_user() -> String {
+    if cfg!(unix) {
+        let uid = Command::new("id").arg("-u").output();
+        let gid = Command::new("id").arg("-g").output();
+        if let (Ok(uid), Ok(gid)) = (uid, gid) {
+            if uid.status.success() && gid.status.success() {
+                return format!(
+                    "{}:{}",
+                    String::from_utf8_lossy(&uid.stdout).trim(),
+                    String::from_utf8_lossy(&gid.stdout).trim()
+                );
+            }
+        }
+    }
+    "10001:10001".to_string()
+}
+
+fn common_container_args(name: Option<&str>, network: &str, session_dir: &Path) -> Vec<String> {
+    let mut args = vec!["run".to_string(), "--rm".to_string(), "-i".to_string()];
+    if let Some(name) = name {
+        args.extend(["--name".to_string(), name.to_string()]);
+    }
+    args.extend([
+        "--network".to_string(),
+        network.to_string(),
+        "--read-only".to_string(),
+        "--cap-drop=ALL".to_string(),
+        "--security-opt=no-new-privileges:true".to_string(),
+        "--pids-limit=256".to_string(),
+        "--memory=2g".to_string(),
+        "--user".to_string(),
+        container_user(),
+        "--tmpfs".to_string(),
+        "/tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777".to_string(),
+        "--mount".to_string(),
+        format!(
+            "type=bind,src={},dst=/workspace",
+            session_dir.to_string_lossy()
+        ),
+        "--workdir".to_string(),
+        "/workspace".to_string(),
+        "--env".to_string(),
+        "HOME=/tmp/kerna".to_string(),
+    ]);
+    args
+}
+
+fn start_broker_container(
+    image_id: &str,
+    session_dir: &Path,
+    network: &str,
+    name: &str,
+    session_token: &str,
+) -> Result<Child> {
+    let mut args = common_container_args(Some(name), network, session_dir);
+    args.extend([
+        "--workdir".to_string(),
+        "/workspace/.kerna-demo".to_string(),
+    ]);
+    args.extend([
+        image_id.to_string(),
+        "kerna".to_string(),
+        "serve".to_string(),
+        "--port".to_string(),
+        BROKER_PORT.to_string(),
+        "--bind".to_string(),
+        "0.0.0.0".to_string(),
+        "--token".to_string(),
+        session_token.to_string(),
+        "--route".to_string(),
+        "cloud".to_string(),
+        "--provider-key-stdin".to_string(),
+    ]);
+    docker_command()
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("could not start the contained Kerna broker")
+}
+
+fn wait_for_container(name: &str) -> Result<()> {
+    for _ in 0..50 {
+        let output = docker_command()
+            .args(["inspect", "--format", "{{.State.Running}}", name])
+            .output()?;
+        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true" {
+            std::thread::sleep(Duration::from_millis(500));
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(anyhow!("contained Kerna broker did not become ready"))
+}
+
+fn run_claude_container(
+    image_id: &str,
+    session_dir: &Path,
+    mcp_config: &Path,
+    network: &str,
+    broker_name: &str,
+    session_token: &str,
+    prompt: Option<&str>,
+) -> Result<()> {
+    let mut args = common_container_args(None, network, session_dir);
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        args.insert(3, "-t".to_string());
+    }
+    args.extend([
+        "--env".to_string(),
+        "ANTHROPIC_API_KEY=".to_string(),
+        "--env".to_string(),
+        format!("ANTHROPIC_AUTH_TOKEN={session_token}"),
+        "--env".to_string(),
+        format!("ANTHROPIC_BASE_URL=http://{broker_name}:{BROKER_PORT}/anthropic"),
+        image_id.to_string(),
+        "claude".to_string(),
+        "--bare".to_string(),
+        "--disable-slash-commands".to_string(),
+        "--tools".to_string(),
+        String::new(),
+        "--allowedTools".to_string(),
+        "mcp__kerna-governed-tools__echo,mcp__kerna-governed-tools__kerna_session_status,mcp__kerna-governed-tools__kerna_sandbox_run,mcp__kerna-governed-tools__secret_probe,mcp__kerna-governed-tools__network_probe".to_string(),
+        "--mcp-config".to_string(),
+        format!(
+            "/workspace/{}",
+            mcp_config.strip_prefix(session_dir)?.to_string_lossy().replace('\\', "/")
+        ),
+        "--strict-mcp-config".to_string(),
+    ]);
+    if let Some(prompt) = prompt {
+        args.extend([
+            "--no-session-persistence".to_string(),
+            "-p".to_string(),
+            "--max-turns".to_string(),
+            "8".to_string(),
+            prompt.to_string(),
+        ]);
+    }
+    let status = docker_command()
+        .args(&args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!("contained Claude exited with status {status}"))
+    }
+}
+
+struct ContainerCleanup {
+    broker_name: String,
+    agent_network: String,
+    egress_network: String,
+    broker: Option<Child>,
+}
+
+impl ContainerCleanup {
+    fn new(broker_name: String, agent_network: String, egress_network: String) -> Self {
+        Self {
+            broker_name,
+            agent_network,
+            egress_network,
+            broker: None,
+        }
+    }
+}
+
+impl Drop for ContainerCleanup {
+    fn drop(&mut self) {
+        let _ = docker_command()
+            .args(["rm", "--force", &self.broker_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if let Some(child) = self.broker.as_mut() {
+            terminate_child(child);
+        }
+        for network in [&self.agent_network, &self.egress_network] {
+            let _ = docker_command()
+                .args(["network", "rm", network])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+fn prepare_container_contract(session_dir: &Path) -> Result<(PathBuf, PathBuf)> {
+    let (contract_dir, mcp_config) = prepare_demo_contract(session_dir)?;
+    let config_path = contract_dir.join("kerna.toml");
+    let config = std::fs::read_to_string(&config_path)?
+        .lines()
+        .map(|line| {
+            if line.starts_with("db_path = ") {
+                "db_path = '/workspace/.kerna-demo/kerna-demo.db'".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(config_path, format!("{config}\n"))?;
+    std::fs::write(
+        &mcp_config,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "mcpServers": {
+                "kerna-governed-tools": {
+                    "command": "/usr/local/bin/kerna",
+                    "args": ["gateway", "--workspace", "/workspace/.kerna-demo"]
+                }
+            }
+        }))?,
+    )?;
+    Ok((contract_dir, mcp_config))
 }
 
 pub(crate) fn create_disposable_clone(repo: &Path, session_token: &str) -> Result<PathBuf> {
@@ -886,5 +1288,68 @@ mod tests {
         assert!(Path::new(&config.db_path).is_absolute());
         assert_eq!(PathBuf::from(config.db_path), expected);
         std::fs::remove_dir_all(session_dir).unwrap();
+    }
+
+    #[test]
+    fn production_container_contract_exposes_only_the_disposable_workspace() {
+        let session_dir = std::env::temp_dir().join(format!("kerna-agent-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let args = common_container_args(None, "kerna-agent-test", &session_dir);
+        let rendered = args.join(" ");
+        assert!(rendered.contains("--network kerna-agent-test"));
+        assert!(rendered.contains("--read-only"));
+        assert!(rendered.contains("--cap-drop=ALL"));
+        assert!(rendered.contains("--security-opt=no-new-privileges:true"));
+        assert!(rendered.contains("dst=/workspace"));
+        assert_eq!(
+            args.iter().filter(|arg| arg.as_str() == "--mount").count(),
+            1
+        );
+        for forbidden in [
+            "docker.sock",
+            "USERPROFILE",
+            "APPDATA",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "provider-key",
+        ] {
+            assert!(!rendered.contains(forbidden), "leaked {forbidden}");
+        }
+        std::fs::remove_dir_all(session_dir).unwrap();
+    }
+
+    #[test]
+    fn container_contract_uses_only_container_paths() {
+        let session_dir = std::env::temp_dir().join(format!("kerna-contract-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let (contract_dir, mcp_config) = prepare_container_contract(&session_dir).unwrap();
+        let config: crate::config::Config =
+            toml::from_str(&std::fs::read_to_string(contract_dir.join("kerna.toml")).unwrap())
+                .unwrap();
+        assert_eq!(config.db_path, "/workspace/.kerna-demo/kerna-demo.db");
+        let mcp: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(mcp_config).unwrap()).unwrap();
+        let server = &mcp["mcpServers"]["kerna-governed-tools"];
+        assert_eq!(server["command"], "/usr/local/bin/kerna");
+        assert_eq!(server["args"][2], "/workspace/.kerna-demo");
+        let rendered = serde_json::to_string(&mcp).unwrap();
+        assert!(!rendered.contains(&session_dir.to_string_lossy().to_string()));
+        std::fs::remove_dir_all(session_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn production_launch_refuses_routes_that_need_host_services() {
+        let error = launch_claude(Path::new("."), RouteMode::Local, false, None)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("production containment currently supports"));
+        let error = launch_claude(Path::new("."), RouteMode::Cloud, true, None)
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("production containment currently supports"));
     }
 }
