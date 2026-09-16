@@ -7,6 +7,32 @@ use std::path::Path;
 use std::sync::Mutex;
 use uuid::Uuid;
 
+type GuardApprovalRow = (
+    Option<String>,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+);
+
+type ReleasedGuardReceiptRow = (
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    String,
+    Option<String>,
+);
+
 pub struct MemoryEngine {
     conn: Mutex<Connection>,
 }
@@ -788,19 +814,7 @@ impl MemoryEngine {
     /// guard-only path.
     pub fn decide_guard_approval(&self, id: &str, approved: bool) -> Result<bool> {
         let conn = self.get_conn();
-        let row: Option<(
-            Option<String>,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-        )> = conn
+        let row: Option<GuardApprovalRow> = conn
             .query_row(
                 "SELECT call_id, session_id, task_id, agent, agent_version, protocol, tool,
                         canonical_action_digest, policy_digest, worktree_baseline, expires_at
@@ -1055,17 +1069,7 @@ impl MemoryEngine {
     /// content. Only a released action can advance to result_observed.
     pub fn observe_guard_result(&self, session_id: &str, call_id: &str) -> Result<bool> {
         let conn = self.get_conn();
-        let row: Option<(
-            String,
-            Option<String>,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-            String,
-            String,
-            Option<String>,
-        )> = conn
+        let row: Option<ReleasedGuardReceiptRow> = conn
             .query_row(
                 "SELECT task_id, client_name, tool, agent_version, protocol,
                         canonical_action_digest, policy_digest, worktree_baseline, approval_id

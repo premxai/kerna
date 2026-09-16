@@ -60,6 +60,15 @@ struct GuardStreamContext {
     worktree_baseline: String,
 }
 
+struct AnthropicRelayContext {
+    policy: Arc<GuardPolicy>,
+    memory: Arc<MemoryEngine>,
+    stream: GuardStreamContext,
+    decision: RouteDecision,
+    request_sha256: String,
+    started: std::time::Instant,
+}
+
 #[derive(Clone)]
 struct DashboardState {
     app: AppState,
@@ -439,7 +448,7 @@ async fn handle_guard_anthropic(
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let mut request = client
-        .post(provider_url(&base, "v1/messages"))
+        .post(provider_url(base, "v1/messages"))
         .header(header::CONTENT_TYPE, "application/json")
         .header("x-api-key", key)
         .header("anthropic-version", "2023-06-01")
@@ -451,17 +460,15 @@ async fn handle_guard_anthropic(
     }
     match request.send().await {
         Ok(upstream) => {
-            relay_anthropic(
-                upstream,
-                state.guard_policy,
-                state.memory,
-                context,
+            let relay = AnthropicRelayContext {
+                policy: state.guard_policy,
+                memory: state.memory,
+                stream: context,
                 decision,
                 request_sha256,
-                primary_started,
-                stream_requested,
-            )
-            .await
+                started: primary_started,
+            };
+            relay_anthropic(upstream, relay, stream_requested).await
         }
         Err(_) => {
             let _ = record_primary_runtime(
@@ -874,28 +881,29 @@ fn upstream_response(
 
 async fn relay_anthropic(
     mut upstream: reqwest::Response,
-    policy: Arc<GuardPolicy>,
-    memory: Arc<MemoryEngine>,
-    context: GuardStreamContext,
-    decision: RouteDecision,
-    request_sha256: String,
-    started: std::time::Instant,
+    relay: AnthropicRelayContext,
     stream_requested: bool,
 ) -> axum::response::Response {
+    let AnthropicRelayContext {
+        policy,
+        memory,
+        stream: context,
+        decision,
+        request_sha256,
+        started,
+    } = relay;
     let status = upstream.status();
     let request_id = upstream.headers().get("request-id").cloned();
     if !stream_requested {
-        return relay_anthropic_json(
-            upstream,
+        let relay = AnthropicRelayContext {
             policy,
             memory,
-            context,
+            stream: context,
             decision,
             request_sha256,
             started,
-            request_id,
-        )
-        .await;
+        };
+        return relay_anthropic_json(upstream, relay, request_id).await;
     }
 
     // Do not open a successful-looking SSE response until the provider has
@@ -998,14 +1006,17 @@ async fn relay_anthropic(
 /// closed rather than ever reaching the agent client.
 async fn relay_anthropic_json(
     upstream: reqwest::Response,
-    policy: Arc<GuardPolicy>,
-    memory: Arc<MemoryEngine>,
-    context: GuardStreamContext,
-    decision: RouteDecision,
-    request_sha256: String,
-    started: std::time::Instant,
+    relay: AnthropicRelayContext,
     request_id: Option<HeaderValue>,
 ) -> axum::response::Response {
+    let AnthropicRelayContext {
+        policy,
+        memory,
+        stream: context,
+        decision,
+        request_sha256,
+        started,
+    } = relay;
     let status = upstream.status();
     let content_type = upstream
         .headers()

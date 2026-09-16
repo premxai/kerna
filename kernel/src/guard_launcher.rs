@@ -157,23 +157,24 @@ pub async fn readiness_ok(demo: bool, repo: Option<&Path>) -> bool {
 }
 
 pub async fn doctor_checks(demo: bool, repo: Option<&Path>) -> Vec<DoctorCheck> {
-    let mut checks = Vec::new();
-    checks.push(command_check("Git", "git", &["--version"], true));
-    checks.push(command_check_with_candidates(
-        "Docker",
-        "docker",
-        &["version", "--format", "{{.Server.Version}}"],
-        &[r"C:\Program Files\Docker\Docker\resources\bin\docker.exe"],
-        true,
-    ));
-    checks.push(command_check("Node.js", "node", &["--version"], true));
-    checks.push(command_check_with_candidates(
-        "Ollama",
-        "ollama",
-        &["--version"],
-        &[r"C:\Users\ptula\AppData\Local\Programs\Ollama\ollama.exe"],
-        demo,
-    ));
+    let mut checks = vec![
+        command_check("Git", "git", &["--version"], true),
+        command_check_with_candidates(
+            "Docker",
+            "docker",
+            &["version", "--format", "{{.Server.Version}}"],
+            &[r"C:\Program Files\Docker\Docker\resources\bin\docker.exe"],
+            true,
+        ),
+        command_check("Node.js", "node", &["--version"], true),
+        command_check_with_candidates(
+            "Ollama",
+            "ollama",
+            &["--version"],
+            &[r"C:\Users\ptula\AppData\Local\Programs\Ollama\ollama.exe"],
+            demo,
+        ),
+    ];
     let selected_model = crate::guard_routing::active_local_model();
     let model_ready = match selected_model.as_deref() {
         Some(model) => ollama_model_ready_for(model).await,

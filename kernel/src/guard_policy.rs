@@ -412,6 +412,9 @@ pub struct PolicyDecision {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+// This vocabulary is part of the canonical cross-adapter contract. The
+// production persistence path currently stores its stable string form.
+#[allow(dead_code)]
 pub enum ApprovalDecision {
     Approved,
     Denied,
@@ -420,6 +423,9 @@ pub enum ApprovalDecision {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+// Keep the typed receipt vocabulary even while SQLite stores the serialized
+// event names; protocol conformance tests protect these values.
+#[allow(dead_code)]
 pub enum ReceiptEvent {
     Requested,
     ApprovalPending,

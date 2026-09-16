@@ -110,6 +110,7 @@ impl RouteDecision {
     }
 }
 
+#[allow(dead_code)]
 pub fn decide_route(
     session_id: impl Into<String>,
     requested_mode: RouteMode,
