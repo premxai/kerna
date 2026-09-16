@@ -1657,6 +1657,13 @@ mod tests {
             .join("examples/filesystem-mcp");
         let mut config: Config =
             toml::from_str(&fs::read_to_string(workspace.join("kerna.toml")).unwrap()).unwrap();
+        let fixture_image = &config.mcp_servers[0].image;
+        if !crate::mcp_registry::image_available(fixture_image) {
+            eprintln!(
+                "skipping Docker acceptance test: reviewed fixture image is unavailable locally ({fixture_image})"
+            );
+            return;
+        }
         let db_path =
             std::env::temp_dir().join(format!("kerna-container-gateway-{}.db", Uuid::new_v4()));
         config.db_path = db_path.to_string_lossy().to_string();
