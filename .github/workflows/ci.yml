@@ -51,6 +51,10 @@ jobs:
     - name: Run clippy
       run: cargo clippy -- -D warnings
       working-directory: ./kernel
+
+    - name: Verify security action inventory coverage
+      run: cargo test --locked --test security_action_inventory
+      working-directory: ./kernel
       
     - name: Build binary
       run: cargo build
