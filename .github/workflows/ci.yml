@@ -175,6 +175,22 @@ jobs:
       run: pwsh -File scripts/smoke_test.ps1
       shell: pwsh
 
+    # The hackathon surface gets a separate, keyless proof artifact. It checks
+    # only the shipped CLI and packaging seams; live providers and sandboxes
+    # remain operator-owned rehearsal steps.
+    - name: Verify hackathon demo surface (keyless)
+      if: runner.os == 'Windows'
+      run: pwsh -File scripts/verify-demo.ps1
+      shell: pwsh
+
+    - name: Upload hackathon demo proof
+      if: always() && runner.os == 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: kerna-demo-readiness
+        path: reports/demo-readiness/ci.json
+        if-no-files-found: error
+
   # Its own job, gated behind `build`, and this placement is the fix rather than a
   # tidy-up. `cargo audit` used to run *before* `cargo build` and `cargo test` in the
   # same job. When RUSTSEC-2026-0258 was published against `h2`, CI went red and stayed

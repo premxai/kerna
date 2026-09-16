@@ -90,7 +90,7 @@ fn builtin_preset(name: &str) -> Option<Preset> {
             protocol: WireProtocol::Anthropic,
             base_url: "https://api.anthropic.com",
             api_key_env: "ANTHROPIC_API_KEY",
-            default_model: "claude-sonnet-4-20250514",
+            default_model: crate::guard_routing::DEFAULT_CLOUD_MODEL,
         },
         "openrouter" => Preset {
             protocol: WireProtocol::OpenAiCompat,

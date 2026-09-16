@@ -109,7 +109,7 @@ pub fn detect_hardware() -> HardwareProfile {
                     } else {
                         "Mixed NVIDIA GPUs".to_string()
                     },
-                    memory_gb: Some(memory_mib / 1024),
+                    memory_gb: Some((memory_mib + 512) / 1024),
                     device_count: rows.len() as u32,
                     detected: true,
                 };

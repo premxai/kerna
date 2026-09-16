@@ -1,0 +1,34 @@
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_redacted","output_index":0,"content_index":0,"delta":"I will inspect and test the project."}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_redacted","call_id":"call_redacted_1","name":"exec_command","arguments":"","status":"in_progress"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_redacted","output_index":1,"delta":"{\"cmd\":\"echo KERNA_ALLOW_TEST\"}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","item_id":"fc_redacted","output_index":1,"arguments":"{\"cmd\":\"echo KERNA_ALLOW_TEST\"}"}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc_redacted_2","call_id":"call_redacted_2","name":"write_stdin","arguments":"","status":"in_progress"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_redacted_2","output_index":2,"delta":"{\"session_id\":123,\"chars\":\"\"}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","item_id":"fc_redacted_2","output_index":2,"arguments":"{\"session_id\":123,\"chars\":\"\"}"}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":3,"item":{"type":"custom_tool_call","id":"ctc_redacted_2","call_id":"call_redacted_3","name":"apply_patch","input":"","status":"in_progress"}}
+
+event: response.custom_tool_call_input.delta
+data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_redacted_2","output_index":3,"delta":"*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch"}
+
+event: response.custom_tool_call_input.done
+data: {"type":"response.custom_tool_call_input.done","item_id":"ctc_redacted_2","output_index":3,"input":"*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_redacted","status":"completed"}}
+
+: redacted fixture terminator

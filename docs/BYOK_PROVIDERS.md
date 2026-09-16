@@ -21,7 +21,7 @@ Model routes allow you to define semantic aliases for your models. Instead of ha
 
 ```bash
 kerna provider route set cheap my-openai/gpt-4o-mini
-kerna provider route set smart anthropic/claude-sonnet-4-20250514
+kerna provider route set smart anthropic/claude-sonnet-5
 ```
 
 Routes are selected by an explicit privacy label in `kerna.toml`; there is no
@@ -39,7 +39,7 @@ is loopback before a task starts.
 
 ```toml
 [model_routes]
-offline-coding = "ollama/qwen2.5-coder:7b"
+offline-coding = "ollama/qwen3.5:9b"
 project-default = "openrouter/openai/gpt-4o-mini"
 
 [privacy_routes]

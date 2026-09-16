@@ -3,11 +3,16 @@ mod client;
 mod config;
 mod contract;
 mod cron;
+mod demo_session;
 pub mod embeddings;
 pub mod events;
 pub mod folders;
 mod gateway;
 mod gateways;
+mod guard_launcher;
+mod guard_policy;
+mod guard_protocol;
+mod guard_routing;
 mod mcp;
 mod mcp_governance;
 mod mcp_registry;
@@ -24,20 +29,38 @@ mod sandbox;
 mod scheduler;
 mod security;
 mod server;
+mod sponsor_runtime;
 mod tool_packs;
 mod watchdog;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use sha2::{Digest, Sha256};
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
 use config::Config;
 use cron::CronEngine;
+use events::{Event, EventSink};
+use guard_policy::{GuardPolicy, PolicyEffect};
 use mcp_registry::McpRegistry;
 use memory::MemoryEngine;
 use scheduler::TaskScheduler;
 use watchdog::WatchdogEngine;
+
+fn load_guard_policy(config: &Config) -> anyhow::Result<GuardPolicy> {
+    let path = std::path::Path::new("kerna.policy.toml");
+    if path.exists() {
+        return GuardPolicy::load(path).map_err(anyhow::Error::from);
+    }
+    if config.permissions.is_empty() {
+        return Ok(GuardPolicy::balanced());
+    }
+    Ok(GuardPolicy::from_legacy_permissions(
+        &config.permissions,
+        PolicyEffect::Deny,
+    ))
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "kerna")]
@@ -49,6 +72,75 @@ use watchdog::WatchdogEngine;
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+/// Small, stable front door for the Claude-first product. Keeping this parser
+/// separate avoids loading the large legacy command graph for the common path.
+#[derive(Parser, Debug)]
+#[command(
+    name = "kerna",
+    version,
+    about = "Route, govern, and prove AI-agent work."
+)]
+struct QuickCli {
+    #[command(subcommand)]
+    command: QuickCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum QuickCommand {
+    /// Scan system, model, sandbox, and repository readiness.
+    Doctor {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Keep readiness output to one compact summary.
+        #[arg(long, alias = "compact")]
+        brief: bool,
+    },
+    /// Start Claude through Kerna. Cloud tasks are shadowed locally by default.
+    Claude {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, value_enum, default_value_t = guard_routing::RouteMode::Auto)]
+        route: guard_routing::RouteMode,
+        /// Disable the tool-less local shadow for cloud sessions.
+        #[arg(long)]
+        no_shadow: bool,
+        #[arg(long)]
+        prompt: Option<String>,
+    },
+    /// Run bounded Python in the governed Wasmer or Tenki sandbox.
+    Sandbox {
+        #[arg(long, default_value = "wasmer", value_parser = ["wasmer", "tenki"])]
+        backend: String,
+        #[arg(long, default_value = "print(sum(i * i for i in range(10)))")]
+        code: String,
+        #[arg(long, default_value_t = 10_000)]
+        timeout_ms: u64,
+    },
+    /// Verify and open a signed, read-only rehearsal bundle.
+    Replay {
+        evidence: PathBuf,
+        #[arg(long, default_value_t = 8877)]
+        port: u16,
+        #[arg(long)]
+        no_open: bool,
+    },
+    /// Open the local routing, approval, sandbox, and evidence control room.
+    Dashboard {
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+        #[arg(long, default_value_t = 8765)]
+        port: u16,
+        #[arg(long)]
+        no_open: bool,
+        #[arg(long, value_enum, default_value_t = guard_routing::RouteMode::Auto)]
+        route: guard_routing::RouteMode,
+        #[arg(long)]
+        shadow: bool,
+    },
+    /// Show the governance capabilities active in the Claude-first runtime.
+    Skills,
 }
 
 #[derive(Subcommand, Debug)]
@@ -67,9 +159,30 @@ enum Commands {
         provider: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// Prepare and diagnose the Claude-first hackathon demo runtime.
+        #[arg(long)]
+        demo: bool,
+        /// Keep demo setup and readiness output compact.
+        #[arg(long, alias = "compact")]
+        brief: bool,
+    },
+
+    /// Launch and inspect governed coding-agent sessions.
+    #[command(hide = true)]
+    Guard {
+        #[command(subcommand)]
+        action: GuardCommands,
+    },
+
+    /// Run or replay deterministic hackathon demo evidence.
+    #[command(hide = true)]
+    Demo {
+        #[command(subcommand)]
+        action: DemoCommands,
     },
 
     /// Create a deterministic, reviewable governed-MCP starter contract
+    #[command(hide = true)]
     Contract {
         #[command(subcommand)]
         action: ContractCommands,
@@ -97,6 +210,18 @@ enum Commands {
         /// Bearer token required on requests. Mandatory when binding a non-loopback address.
         #[arg(long)]
         token: Option<String>,
+
+        /// Sticky upstream selection for guarded Claude sessions.
+        #[arg(long, value_enum, default_value_t = guard_routing::RouteMode::Cloud)]
+        route: guard_routing::RouteMode,
+
+        /// Run a non-executing local shadow beside cloud sessions.
+        #[arg(long)]
+        shadow: bool,
+
+        /// Read the provider key from stdin into trusted broker memory.
+        #[arg(long)]
+        provider_key_stdin: bool,
     },
 
     /// Open a local live dashboard for governed MCP sessions and model routing
@@ -110,6 +235,12 @@ enum Commands {
         /// Do not open the local dashboard in a browser automatically
         #[arg(long)]
         no_open: bool,
+        /// Requested route shown before the first model request arrives.
+        #[arg(long, value_enum, default_value_t = guard_routing::RouteMode::Auto)]
+        route: guard_routing::RouteMode,
+        /// Show that cloud requests will also run in the local, tool-less shadow.
+        #[arg(long)]
+        shadow: bool,
     },
 
     /// Run as an MCP server that proxies configured MCP servers through Kerna's
@@ -653,7 +784,7 @@ pub enum RouteCommands {
         route_name: String,
 
         #[arg(index = 2)]
-        target: String, // e.g. "anthropic/claude-3-5-sonnet-latest"
+        target: String, // e.g. "anthropic/claude-sonnet-5"
     },
     /// Resolve and display the exact model selected by a privacy label
     Resolve {
@@ -680,6 +811,57 @@ pub enum ModelCommands {
     Verify {
         #[arg(long, default_value = "ollama")]
         provider: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GuardCommands {
+    /// Check Claude-first demo prerequisites without changing the machine.
+    Doctor {
+        #[arg(long)]
+        demo: bool,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// Launch pinned Claude Code through Kerna from a disposable SSD clone.
+    Claude {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, value_enum, default_value_t = guard_routing::RouteMode::Auto)]
+        route: guard_routing::RouteMode,
+        #[arg(long)]
+        shadow: bool,
+        /// Optional non-interactive prompt for a repeatable demo run.
+        #[arg(long)]
+        prompt: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DemoCommands {
+    /// Keep keys in memory and run four demo cases against one dashboard.
+    Start {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value_t = 8877)]
+        port: u16,
+    },
+    /// Execute a bounded Python program through the live sponsor sandbox adapter.
+    Sandbox {
+        #[arg(long, default_value = "wasmer", value_parser = ["wasmer", "tenki"])]
+        backend: String,
+        #[arg(long, default_value = "print(sum(i * i for i in range(10)))")]
+        code: String,
+        #[arg(long, default_value_t = 10_000)]
+        timeout_ms: u64,
+    },
+    /// Verify and serve an immutable signed dashboard rehearsal.
+    Replay {
+        evidence: PathBuf,
+        #[arg(long, default_value_t = 8877)]
+        port: u16,
+        #[arg(long)]
+        no_open: bool,
     },
 }
 
@@ -938,11 +1120,373 @@ fn command_needs_mcp(command: &Option<Commands>) -> bool {
     )
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // We rely on the local ctrl_c wait in Daemon instead of global exit(0)
+fn run_sponsor_sandbox(backend: &str, code: &str, timeout_ms: u64) -> Result<()> {
+    let profile = guard_routing::load_demo_profile();
+    if backend == "wasmer" && !profile.wasmer_enabled {
+        anyhow::bail!("Wasmer is disabled in the demo profile; rerun `kerna init --demo`");
+    }
+    if backend == "tenki" && !profile.tenki_enabled {
+        anyhow::bail!("Tenki is disabled in the demo profile; rerun `kerna init --demo`");
+    }
+    let backend = if backend == "tenki" {
+        sponsor_runtime::ExecutionBackend::Tenki
+    } else {
+        sponsor_runtime::ExecutionBackend::Wasmer
+    };
+    let backend_name = format!("{backend:?}").to_ascii_lowercase();
+    let auth_token = if backend == sponsor_runtime::ExecutionBackend::Tenki {
+        Some(
+            dialoguer::Password::new()
+                .with_prompt("Tenki API key (kept only in adapter memory)")
+                .interact()?,
+        )
+    } else {
+        None
+    };
+    let request = sponsor_runtime::SandboxRequest {
+        backend,
+        language: "python".to_string(),
+        code: code.to_string(),
+        timeout_ms,
+        auth_token,
+    };
 
-    let cli = Cli::parse();
+    let admission = sponsor_runtime::admission_reason(&request);
+
+    // Standalone sandbox runs must use the same durable receipt path as MCP
+    // calls. Commit the requested receipt before entering the sponsor runtime,
+    // then close it on both success and safe containment failure.
+    let config = Config::load();
+    let memory = MemoryEngine::new(&config.db_path)?;
+    let session_id = format!("sandbox-{}", uuid::Uuid::new_v4());
+    let task_id = uuid::Uuid::new_v4().to_string();
+    let call_id = uuid::Uuid::new_v4().to_string();
+    memory.start_gateway_session(
+        &session_id,
+        &task_id,
+        &std::env::current_dir()?.display().to_string(),
+    )?;
+    memory.identify_gateway_session(
+        &session_id,
+        Some("Kerna CLI"),
+        Some(env!("CARGO_PKG_VERSION")),
+        "sandbox-v1",
+    )?;
+    memory.start_tool_call_receipt(
+        &call_id,
+        &session_id,
+        &task_id,
+        Some("Kerna CLI"),
+        Some(&backend_name),
+        None,
+        "kerna_sandbox_run",
+        if admission.is_some() {
+            "deny"
+        } else {
+            "allow_contained"
+        },
+    )?;
+
+    if let Some(reason) = admission {
+        let elapsed = 0_i64;
+        let trace_id = uuid::Uuid::new_v4().to_string();
+        let digest = format!("{:x}", Sha256::digest(reason.as_bytes()));
+        let payload = serde_json::json!({
+            "policy": {
+                "decision": "deny",
+                "reason": reason,
+                "backend_contacted": false,
+                "code_bytes": code.len(),
+                "code_sha256": format!("{:x}", Sha256::digest(code.as_bytes()))
+            },
+            "output_sha256": digest
+        });
+        memory.finish_tool_call_receipt(
+            &call_id,
+            None,
+            elapsed,
+            "blocked",
+            Some(&trace_id),
+            Some(&format!("[REDACTED] policy:{reason}")),
+        )?;
+        memory.record(Event {
+            event_id: trace_id,
+            task_id: task_id.clone(),
+            session_id: Some(session_id.clone()),
+            sequence: chrono::Utc::now().timestamp_millis(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            event_type: "sandbox.blocked".to_string(),
+            actor: "kerna-policy".to_string(),
+            severity: "warning".to_string(),
+            model: None,
+            tool: Some("kerna_sandbox_run".to_string()),
+            policy_decision: Some("deny".to_string()),
+            risk_score: None,
+            parent_event_id: None,
+            correlation_id: Some(call_id.clone()),
+            redaction_status: Some("code_digest_only".to_string()),
+            budget_snapshot_json: None,
+            payload_json: payload,
+        })?;
+        memory.finish_gateway_session(&session_id)?;
+        eprintln!(
+            "[-] {} · blocked by Kerna policy · {} · receipt:{}",
+            backend_name, reason, call_id
+        );
+        anyhow::bail!("Kerna policy denied sandbox request ({reason}); receipt recorded")
+    }
+
+    let started = std::time::Instant::now();
+    let result = sponsor_runtime::run(request);
+    let (status, exit_code, duration_ms, output_digest, output, result_class, payload) =
+        match result {
+            Ok(outcome) => {
+                let payload = serde_json::json!({
+                    "outcome": {
+                        "backend": backend_name.clone(),
+                        "status": outcome.status.clone(),
+                        "exit_code": outcome.exit_code,
+                        "duration_ms": outcome.duration_ms,
+                    "package": outcome.package.clone(),
+                    "network": outcome.network.clone(),
+                    "containment": if outcome.status == "completed" && outcome.exit_code == 0 {
+                        "isolated"
+                    } else {
+                        "held at sandbox boundary"
+                    },
+                    "output_sha256": outcome.output_sha256.clone(),
+                    }
+                });
+                let result_class = if outcome.status == "completed" && outcome.exit_code == 0 {
+                    "completed"
+                } else {
+                    "failed"
+                };
+                (
+                    outcome.status,
+                    outcome.exit_code,
+                    outcome.duration_ms,
+                    outcome.output_sha256,
+                    outcome.output,
+                    result_class,
+                    payload,
+                )
+            }
+            Err(error) => {
+                let digest = format!("{:x}", Sha256::digest(error.to_string().as_bytes()));
+                let elapsed = started.elapsed().as_millis();
+                (
+                    "failed".to_string(),
+                    1,
+                    elapsed,
+                    digest.clone(),
+                    String::new(),
+                    "failed",
+                    serde_json::json!({
+                        "outcome": {
+                            "backend": backend_name.clone(),
+                            "status": "failed",
+                            "exit_code": 1,
+                        "duration_ms": elapsed,
+                        "error": "[REDACTED]",
+                        "containment": "held before unsafe execution",
+                        "error_sha256": digest,
+                        }
+                    }),
+                )
+            }
+        };
+    let trace_id = uuid::Uuid::new_v4().to_string();
+    let output_preview = format!("[REDACTED] sha256:{output_digest}");
+    memory.finish_tool_call_receipt(
+        &call_id,
+        None,
+        duration_ms as i64,
+        result_class,
+        Some(&trace_id),
+        Some(&output_preview),
+    )?;
+    memory.record(Event {
+        event_id: trace_id,
+        task_id: task_id.clone(),
+        session_id: Some(session_id.clone()),
+        sequence: chrono::Utc::now().timestamp_millis(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        event_type: format!("sandbox.{result_class}"),
+        actor: "kerna".to_string(),
+        severity: if result_class == "completed" {
+            "info"
+        } else {
+            "warn"
+        }
+        .to_string(),
+        model: None,
+        tool: Some("kerna_sandbox_run".to_string()),
+        policy_decision: Some("allow_contained".to_string()),
+        risk_score: None,
+        parent_event_id: None,
+        correlation_id: Some(call_id.clone()),
+        redaction_status: Some("output_digest_only".to_string()),
+        budget_snapshot_json: None,
+        payload_json: payload,
+    })?;
+    memory.finish_gateway_session(&session_id)?;
+
+    println!("{}", output);
+    eprintln!(
+        "[+] {} · {} · {} ms · sha256:{} · receipt:{}",
+        backend_name, status, duration_ms, output_digest, call_id
+    );
+    if status != "completed" || exit_code != 0 {
+        anyhow::bail!("sandbox program failed safely with exit code {exit_code}; receipt recorded");
+    }
+    Ok(())
+}
+
+fn print_kerna_skills() {
+    println!("Kerna skills");
+    println!("[+] Routing       sticky local/cloud decision before provider contact");
+    println!("[+] Policy        allow, ask, or deny before an action is released");
+    println!("[+] Identity      session/task/agent/version/worktree action binding");
+    println!("[+] Approvals     expiring, exact, one-time human authority");
+    println!("[+] Secrets       provider keys stay in trusted broker memory");
+    println!("[+] Evidence      redacted hash chain and signed export");
+    println!("[~] Budgets       MCP tool calls, runtime, and output bytes");
+    println!("[~] Orchestration session lifecycle and runtime supervision");
+}
+
+fn print_quick_help() {
+    println!("Kerna — route, govern, and prove AI-agent work.\n");
+    println!("Usage:");
+    println!("  kerna                         Start governed Claude (auto route + local shadow)");
+    println!("  kerna doctor                  Check hardware, models, keys, and sandboxes");
+    println!("  kerna claude --route local   Force private local inference");
+    println!("  kerna sandbox                Run bounded Python in Wasmer");
+    println!("  kerna replay <evidence.json> Open signed read-only evidence");
+    println!("  kerna skills                 Show active governance capabilities");
+    println!("  kerna dashboard              Open the local control room\n");
+    println!("Run `kerna advanced --help` for the legacy runtime command reference.");
+}
+
+fn main() -> Result<()> {
+    // Windows executables have a relatively small main-thread stack. The
+    // legacy Clap graph is intentionally still available under `advanced`, so
+    // run the application body on a bounded larger stack instead of allowing
+    // that compatibility surface to crash startup.
+    std::thread::Builder::new()
+        .name("kerna-main".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(async_main())
+        })?
+        .join()
+        .map_err(|_| anyhow::anyhow!("Kerna runtime thread panicked"))?
+}
+
+async fn async_main() -> Result<()> {
+    // We rely on the local ctrl_c wait in Daemon instead of global exit(0)
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    let first = arguments.get(1).and_then(|arg| arg.to_str());
+    if first.is_none() {
+        guard_launcher::launch_claude(
+            std::path::Path::new("."),
+            guard_routing::RouteMode::Auto,
+            true,
+            None,
+        )
+        .await?;
+        return Ok(());
+    }
+    if matches!(first, Some("--help" | "-h" | "help")) {
+        print_quick_help();
+        return Ok(());
+    }
+    if matches!(first, Some("--version" | "-V")) {
+        println!("kerna {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    let uses_quick_parser = matches!(
+        first,
+        Some("claude" | "sandbox" | "replay" | "skills" | "dashboard")
+    ) || (first == Some("doctor")
+        && !arguments.iter().any(|arg| arg == "--gateway"));
+    if uses_quick_parser {
+        match QuickCli::parse().command {
+            QuickCommand::Doctor { repo, brief } => {
+                if !(if brief {
+                    guard_launcher::print_doctor_brief(true, Some(&repo)).await
+                } else {
+                    guard_launcher::print_doctor(true, Some(&repo)).await
+                }) {
+                    std::process::exit(1);
+                }
+            }
+            QuickCommand::Claude {
+                repo,
+                route,
+                no_shadow,
+                prompt,
+            } => {
+                guard_launcher::launch_claude(&repo, route, !no_shadow, prompt.as_deref()).await?;
+            }
+            QuickCommand::Sandbox {
+                backend,
+                code,
+                timeout_ms,
+            } => run_sponsor_sandbox(&backend, &code, timeout_ms)?,
+            QuickCommand::Replay {
+                evidence,
+                port,
+                no_open,
+            } => server::start_replay_server(&evidence, port, !no_open).await?,
+            QuickCommand::Dashboard {
+                workspace,
+                port,
+                no_open,
+                route,
+                shadow,
+            } => {
+                std::env::set_current_dir(&workspace)?;
+                let config = Config::load();
+                let memory = Arc::new(MemoryEngine::new(&config.db_path)?);
+                let state = server::AppState {
+                    guard_policy: Arc::new(load_guard_policy(&config)?),
+                    worktree_baseline: server::capture_worktree_baseline()?,
+                    config,
+                    memory,
+                    mcp_registry: Arc::new(Mutex::new(McpRegistry::new())),
+                    auth_token: None,
+                    route_mode: route,
+                    shadow_enabled: shadow,
+                    anthropic_api_key: None,
+                    route_decisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                };
+                server::start_dashboard_server(state, port, !no_open).await?;
+            }
+            QuickCommand::Skills => print_kerna_skills(),
+        }
+        return Ok(());
+    }
+    // Clap builds the complete legacy command graph while parsing. On Windows
+    // that graph can exceed the executable's small default main-thread stack,
+    // so isolate legacy parsing on a bounded larger stack. The common product
+    // path above still uses the intentionally small parser.
+    let legacy_arguments = if first == Some("advanced") {
+        std::iter::once(arguments[0].clone())
+            .chain(arguments.into_iter().skip(2))
+            .collect::<Vec<_>>()
+    } else {
+        arguments
+    };
+    let cli = std::thread::Builder::new()
+        .name("kerna-legacy-cli".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || Cli::parse_from(legacy_arguments))?
+        .join()
+        .map_err(|_| anyhow::anyhow!("legacy command parser panicked"))?;
 
     // Contracts must work in a brand-new directory. Do this before config and
     // memory initialization so the command neither requires nor creates a
@@ -984,6 +1528,43 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
         },
+        Some(Commands::Guard { action }) => {
+            match action {
+                GuardCommands::Doctor { demo, repo } => {
+                    let ready = guard_launcher::print_doctor(*demo, repo.as_deref()).await;
+                    if !ready {
+                        std::process::exit(1);
+                    }
+                }
+                GuardCommands::Claude {
+                    repo,
+                    route,
+                    shadow,
+                    prompt,
+                } => {
+                    guard_launcher::launch_claude(repo, *route, *shadow, prompt.as_deref()).await?;
+                }
+            }
+            return Ok(());
+        }
+        Some(Commands::Demo { action }) => {
+            match action {
+                DemoCommands::Start { repo, port } => demo_session::start(repo, *port).await?,
+                DemoCommands::Sandbox {
+                    backend,
+                    code,
+                    timeout_ms,
+                } => {
+                    run_sponsor_sandbox(backend, code, *timeout_ms)?;
+                }
+                DemoCommands::Replay {
+                    evidence,
+                    port,
+                    no_open,
+                } => server::start_replay_server(evidence, *port, !no_open).await?,
+            }
+            return Ok(());
+        }
         _ => {}
     }
     // IDE MCP launchers do not consistently support a per-server working
@@ -1045,8 +1626,14 @@ async fn main() -> Result<()> {
             no_setup,
             provider,
             model,
+            demo,
+            brief,
         }) => {
-            onboarding::run_onboarding(quick, ci, yes, no_setup, provider, model);
+            if demo {
+                guard_launcher::run_demo_setup(brief).await?;
+            } else {
+                onboarding::run_onboarding(quick, ci, yes, no_setup, provider, model);
+            }
         }
         // Handled before runtime initialization above. Keeping this arm makes
         // the exhaustive command dispatch explicit if that early return is
@@ -1056,6 +1643,12 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Client { .. }) => {
             unreachable!("client command returns before runtime setup")
+        }
+        Some(Commands::Guard { .. }) => {
+            unreachable!("guard command returns before runtime setup")
+        }
+        Some(Commands::Demo { .. }) => {
+            unreachable!("demo command returns before runtime setup")
         }
         Some(Commands::Daemon) => {
             let watchdog = WatchdogEngine::new(memory.clone(), config.clone());
@@ -1107,7 +1700,14 @@ async fn main() -> Result<()> {
             println!("\n[+] Daemon stopped cleanly.");
         }
 
-        Some(Commands::Serve { port, bind, token }) => {
+        Some(Commands::Serve {
+            port,
+            bind,
+            token,
+            route,
+            shadow,
+            provider_key_stdin,
+        }) => {
             let is_loopback = bind == "127.0.0.1" || bind == "localhost" || bind == "::1";
             if !is_loopback && token.is_none() {
                 eprintln!(
@@ -1119,23 +1719,49 @@ async fn main() -> Result<()> {
             if token.is_none() {
                 println!("[i] No --token set: this server is loopback-only and unauthenticated.");
             }
+            let anthropic_api_key = if provider_key_stdin {
+                let mut key = String::new();
+                std::io::stdin().read_line(&mut key)?;
+                let key = key.trim_end().to_string();
+                (!key.is_empty()).then(|| Arc::new(key))
+            } else {
+                std::env::var("ANTHROPIC_API_KEY").ok().map(Arc::new)
+            };
             let state = server::AppState {
                 config: config.clone(),
+                guard_policy: Arc::new(load_guard_policy(&config)?),
                 memory: memory.clone(),
                 mcp_registry: mcp_registry.clone(),
+                worktree_baseline: server::capture_worktree_baseline()?,
                 auth_token: token,
+                route_mode: route,
+                shadow_enabled: shadow,
+                anthropic_api_key,
+                route_decisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             };
             if let Err(e) = server::start_server(state, &bind, port).await {
                 eprintln!("[-] Server failed: {}", e);
             }
         }
 
-        Some(Commands::Dashboard { port, no_open, .. }) => {
+        Some(Commands::Dashboard {
+            port,
+            no_open,
+            route,
+            shadow,
+            ..
+        }) => {
             let state = server::AppState {
                 config: config.clone(),
+                guard_policy: Arc::new(load_guard_policy(&config)?),
                 memory: memory.clone(),
                 mcp_registry: mcp_registry.clone(),
+                worktree_baseline: server::capture_worktree_baseline()?,
                 auth_token: None,
+                route_mode: route,
+                shadow_enabled: shadow,
+                anthropic_api_key: None,
+                route_decisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             };
             if let Err(e) = server::start_dashboard_server(state, port, !no_open).await {
                 eprintln!("[-] Dashboard failed: {}", e);
@@ -1811,7 +2437,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::Doctor { gateway }) => {
+        Some(Commands::Doctor { gateway, .. }) => {
             println!("Kerna Doctor:\n");
 
             match rusqlite::Connection::open(&config.db_path) {

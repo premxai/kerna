@@ -1,0 +1,9 @@
+{
+  "name": "kerna-sponsor-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@tenkicloud/sandbox": "1.0.6",
+    "@wasmer/sdk": "0.13.0"
+  }
+}

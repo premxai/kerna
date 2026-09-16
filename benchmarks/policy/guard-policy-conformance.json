@@ -1,0 +1,136 @@
+{
+  "$comment": "Canonical WP1 cases evaluated through both protocol adapters. Raw arguments are synthetic and contain no secrets.",
+  "version": 1,
+  "cases": [
+    {
+      "name": "source path rule",
+      "policy": {
+        "version": 1,
+        "default": "deny",
+        "rules": [{ "id": "source-read", "effect": "allow", "kind": "file_read", "path": "src/*" }]
+      },
+      "claude": { "tool": "Read", "arguments": { "file_path": "src/lib.rs" } },
+      "openai": { "tool": "read_file", "arguments": { "path": "src/lib.rs" } },
+      "expect": "allow"
+    },
+    {
+      "name": "patch path rule",
+      "policy": {
+        "version": 1,
+        "default": "deny",
+        "rules": [{ "id": "source-write", "effect": "allow", "kind": "file_write", "path": "src/*" }]
+      },
+      "claude": { "tool": "Edit", "arguments": { "file_path": "src/lib.rs" } },
+      "openai": { "tool": "apply_patch", "arguments": "*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch" },
+      "expect": "allow"
+    },
+    {
+      "name": "offline test program",
+      "policy": {
+        "version": 1,
+        "default": "deny",
+        "rules": [{ "id": "cargo", "effect": "allow", "kind": "shell", "executable": "cargo" }]
+      },
+      "claude": { "tool": "Bash", "arguments": { "command": "cargo test" } },
+      "openai": { "tool": "exec_command", "arguments": { "cmd": "cargo test" } },
+      "expect": "allow"
+    },
+    {
+      "name": "dependency install risk",
+      "policy": {
+        "version": 1,
+        "default": "deny",
+        "rules": [{ "id": "install", "effect": "ask", "risk_tag": "dependency_install" }]
+      },
+      "claude": { "tool": "Bash", "arguments": { "command": "npm install left-pad" } },
+      "openai": { "tool": "exec_command", "arguments": { "cmd": "npm install left-pad" } },
+      "expect": "ask"
+    },
+    {
+      "name": "domain allowlist",
+      "policy": {
+        "version": 1,
+        "default": "deny",
+        "rules": [{ "id": "docs-domain", "effect": "allow", "kind": "network", "domain": "docs.example.com" }]
+      },
+      "claude": { "tool": "WebFetch", "arguments": { "url": "https://docs.example.com/guide" } },
+      "openai": { "tool": "WebFetch", "arguments": { "url": "https://docs.example.com/guide" } },
+      "expect": "allow"
+    },
+    {
+      "name": "unknown action",
+      "policy": { "version": 1, "default": "deny", "rules": [] },
+      "claude": { "tool": "Mystery", "arguments": {} },
+      "openai": { "tool": "Mystery", "arguments": {} },
+      "expect": "deny"
+    },
+    {
+      "name": "malformed known action",
+      "policy": { "version": 1, "default": "allow", "rules": [] },
+      "claude": { "tool": "Read", "arguments": {} },
+      "openai": { "tool": "read_file", "arguments": {} },
+      "expect": "deny"
+    },
+    {
+      "name": "secret path invariant",
+      "policy": { "version": 1, "default": "allow", "rules": [] },
+      "claude": { "tool": "Read", "arguments": { "file_path": ".env" } },
+      "openai": { "tool": "read_file", "arguments": { "path": ".env" } },
+      "expect": "deny"
+    },
+    {
+      "name": "parent path invariant",
+      "policy": { "version": 1, "default": "allow", "rules": [] },
+      "claude": { "tool": "Read", "arguments": { "file_path": "../outside.txt" } },
+      "openai": { "tool": "read_file", "arguments": { "path": "../outside.txt" } },
+      "expect": "deny"
+    },
+    {
+      "name": "destructive shell requires approval",
+      "policy": {
+        "version": 1,
+        "default": "deny",
+        "rules": [{ "id": "shell", "effect": "allow", "kind": "shell" }]
+      },
+      "claude": { "tool": "Bash", "arguments": { "command": "rm -rf target" } },
+      "openai": { "tool": "exec_command", "arguments": { "cmd": "rm -rf target" } },
+      "expect": "ask"
+    },
+    {
+      "name": "mcp actions remain denied by policy",
+      "policy": {
+        "version": 1,
+        "default": "allow",
+        "rules": [{ "id": "deny-mcp", "effect": "deny", "kind": "mcp" }]
+      },
+      "claude": { "tool": "mcp__filesystem__read", "arguments": { "path": "src/lib.rs" } },
+      "openai": { "tool": "mcp__filesystem__read", "arguments": { "path": "src/lib.rs" } },
+      "expect": "deny"
+    },
+    {
+      "name": "shell network access requires approval",
+      "policy": {
+        "version": 1,
+        "default": "deny",
+        "rules": [
+          { "id": "network", "effect": "ask", "risk_tag": "network_access" },
+          { "id": "shell", "effect": "allow", "kind": "shell" }
+        ]
+      },
+      "claude": { "tool": "Bash", "arguments": { "command": "curl https://example.com" } },
+      "openai": { "tool": "exec_command", "arguments": { "cmd": "curl https://example.com" } },
+      "expect": "ask"
+    },
+    {
+      "name": "shell secret access is denied",
+      "policy": {
+        "version": 1,
+        "default": "deny",
+        "rules": [{ "id": "shell", "effect": "allow", "kind": "shell" }]
+      },
+      "claude": { "tool": "Bash", "arguments": { "command": "cat ~/.ssh/id_rsa" } },
+      "openai": { "tool": "exec_command", "arguments": { "cmd": "cat ~/.ssh/id_rsa" } },
+      "expect": "deny"
+    }
+  ]
+}
