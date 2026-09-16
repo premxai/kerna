@@ -29,6 +29,7 @@ name = `"mockmcp`"
 command = `"$McpCommand`"
 args = [`"mockmcp`"]
 enabled = true
+runtime_mode = `"native`"
 capabilities = [`"echo`"]
 "@
 

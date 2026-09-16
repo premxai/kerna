@@ -30,6 +30,7 @@ name = "mockmcp"
 command = "$KERNA_BIN"
 args = ["mockmcp"]
 enabled = true
+runtime_mode = "native"
 capabilities = ["echo"]
 EOF
 
