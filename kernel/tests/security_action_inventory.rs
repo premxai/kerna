@@ -169,3 +169,42 @@ fn model_controlled_surfaces_fail_closed_or_are_explicit_bypasses() {
         }
     }
 }
+
+#[test]
+fn pilot_release_decision_fails_closed_until_every_required_gate_passes() {
+    let root = repo_root();
+    let gate: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("contracts/claude-pilot-release-gate.json"))
+            .expect("release gate must be readable"),
+    )
+    .expect("release gate must be valid JSON");
+    assert_eq!(gate["version"], 1);
+    assert_eq!(gate["supported_client"], "claude-code");
+    assert!(gate["compatibility_only_clients"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("codex")));
+
+    let mut ids = BTreeSet::new();
+    let mut all_pass = true;
+    for item in gate["required_gates"]
+        .as_array()
+        .expect("required_gates must be an array")
+    {
+        let id = item["id"].as_str().expect("release gate needs an id");
+        assert!(ids.insert(id), "duplicate release gate {id}");
+        assert!(!item["evidence"].as_str().unwrap_or_default().is_empty());
+        assert!(matches!(item["status"].as_str(), Some("pass" | "pending")));
+        all_pass &= item["status"] == "pass";
+    }
+    assert_eq!(gate["decision"] == "GO", all_pass);
+
+    let has_open_p0 = inventory()["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["status"] == "open-bypass" && entry["risk"] == "P0");
+    if has_open_p0 {
+        assert_eq!(gate["decision"], "NO-GO");
+    }
+}

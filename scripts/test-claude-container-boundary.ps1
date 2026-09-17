@@ -28,6 +28,7 @@ const fail = m => { console.error(m); process.exit(1); };
   if (!fs.existsSync('/workspace/workspace-canary.txt')) fail('workspace mount missing');
   if (fs.existsSync('/var/run/docker.sock')) fail('docker socket exposed');
   if (fs.existsSync('/host-home-canary')) fail('host home exposed');
+  if (fs.existsSync('/kerna-state') || fs.existsSync('/workspace/.kerna-demo/kerna-demo.db')) fail('trusted evidence store exposed');
   const forbiddenCredentials = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'TENKI_API_KEY', 'KERNA_BROWSER_CONTROL_TOKEN', 'KERNA_UNRELATED_PLUGIN_SECRET'];
   if (forbiddenCredentials.some(name => process.env[name])) fail('provider, browser, or unrelated plugin credential exposed');
   const mounts = fs.readFileSync('/proc/mounts', 'utf8');
@@ -38,7 +39,7 @@ const fail = m => { console.error(m); process.exit(1); };
   let escaped = false;
   try { await fetch('https://example.com', {signal: AbortSignal.timeout(2000)}); escaped = true; } catch (_) {}
   if (escaped) fail('agent reached public network');
-  console.log(JSON.stringify({workspace:true, host_home:false, docker_socket:false, provider_key:false, browser_key:false, unrelated_plugin_key:false, broker:true, public_network:false, uid:process.getuid()}));
+  console.log(JSON.stringify({workspace:true, evidence_store:false, host_home:false, docker_socket:false, provider_key:false, browser_key:false, unrelated_plugin_key:false, broker:true, public_network:false, uid:process.getuid()}));
 })().catch(error => fail(error.message));
 '@.Replace('SUFFIX', $suffix)
 

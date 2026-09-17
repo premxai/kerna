@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "decision": "NO-GO",
+  "supported_client": "claude-code",
+  "compatibility_only_clients": ["codex"],
+  "required_gates": [
+    {
+      "id": "RG-001",
+      "title": "No open P0 action surface",
+      "status": "pass",
+      "evidence": "security-action-inventory.json contains no open-bypass entry with P0 risk"
+    },
+    {
+      "id": "RG-002",
+      "title": "Windows containment and evidence ACL",
+      "status": "pass",
+      "evidence": "scripts/test-claude-container-boundary.ps1"
+    },
+    {
+      "id": "RG-003",
+      "title": "Physical macOS containment and evidence ACL",
+      "status": "pending",
+      "evidence": "Must run scripts/build-claude-agent-image.sh and scripts/test-claude-container-boundary.sh on physical macOS"
+    },
+    {
+      "id": "RG-004",
+      "title": "Provider-backed contained Claude lifecycle",
+      "status": "pending",
+      "evidence": "Requires allow, deny, approval, result, interruption, diff review, and cleanup with a real Anthropic key"
+    },
+    {
+      "id": "RG-005",
+      "title": "Inventory, receipts, provenance, and fail-closed CI gates",
+      "status": "pass",
+      "evidence": "security_action_inventory tests plus locked Rust suite"
+    }
+  ]
+}

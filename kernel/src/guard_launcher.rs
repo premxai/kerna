@@ -304,7 +304,8 @@ pub async fn launch_claude(
     let session_token = Uuid::new_v4().to_string();
     let suffix = &session_token[..8];
     let session_dir = create_disposable_clone(repo, &session_token)?;
-    let (contract_dir, mcp_config) = prepare_container_contract(&session_dir)?;
+    let state_dir = prepare_broker_state(&session_token)?;
+    let evidence_db = state_dir.join("evidence.db");
     let cloud_key = Zeroizing::new(
         Password::new()
             .with_prompt(
@@ -330,6 +331,7 @@ pub async fn launch_claude(
     let mut broker = start_broker_container(
         &image_id,
         &session_dir,
+        &state_dir,
         &agent_network,
         &broker_name,
         &session_token,
@@ -349,25 +351,26 @@ pub async fn launch_claude(
         .args([
             "dashboard",
             "--workspace",
-            contract_dir.to_string_lossy().as_ref(),
+            session_dir.to_string_lossy().as_ref(),
             "--port",
             &dashboard_port.to_string(),
             "--route",
             "cloud",
         ])
-        .current_dir(&contract_dir)
+        .current_dir(&session_dir)
+        .env("KERNA_DB_PATH", &evidence_db)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
         .context("could not start the Kerna dashboard")?;
 
     println!("[+] Contained session: {}", session_dir.display());
+    println!("[+] Trusted evidence: {}", evidence_db.display());
     println!("[+] Dashboard: http://127.0.0.1:{dashboard_port}/");
     println!("[+] Claude boundary: Docker agent network; broker-only connectivity");
     let result = run_claude_container(
         &image_id,
         &session_dir,
-        &mcp_config,
         &agent_network,
         &broker_name,
         &session_token,
@@ -832,14 +835,45 @@ fn common_container_args(name: Option<&str>, network: &str, session_dir: &Path) 
 fn start_broker_container(
     image_id: &str,
     session_dir: &Path,
+    state_dir: &Path,
     network: &str,
     name: &str,
     session_token: &str,
 ) -> Result<Child> {
+    let args = broker_container_args(
+        image_id,
+        session_dir,
+        state_dir,
+        network,
+        name,
+        session_token,
+    );
+    docker_command()
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("could not start the contained Kerna broker")
+}
+
+fn broker_container_args(
+    image_id: &str,
+    session_dir: &Path,
+    state_dir: &Path,
+    network: &str,
+    name: &str,
+    session_token: &str,
+) -> Vec<String> {
     let mut args = common_container_args(Some(name), network, session_dir);
     args.extend([
-        "--workdir".to_string(),
-        "/workspace/.kerna-demo".to_string(),
+        "--mount".to_string(),
+        format!(
+            "type=bind,src={},dst=/kerna-state",
+            state_dir.to_string_lossy()
+        ),
+        "--env".to_string(),
+        "KERNA_DB_PATH=/kerna-state/evidence.db".to_string(),
     ]);
     args.extend([
         image_id.to_string(),
@@ -855,13 +889,7 @@ fn start_broker_container(
         "cloud".to_string(),
         "--provider-key-stdin".to_string(),
     ]);
-    docker_command()
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("could not start the contained Kerna broker")
+    args
 }
 
 fn wait_for_container(name: &str) -> Result<()> {
@@ -881,7 +909,6 @@ fn wait_for_container(name: &str) -> Result<()> {
 fn run_claude_container(
     image_id: &str,
     session_dir: &Path,
-    mcp_config: &Path,
     network: &str,
     broker_name: &str,
     session_token: &str,
@@ -903,15 +930,9 @@ fn run_claude_container(
         "--bare".to_string(),
         "--disable-slash-commands".to_string(),
         "--tools".to_string(),
-        String::new(),
+        "Read,Write,Edit,Bash,Glob,Grep".to_string(),
         "--allowedTools".to_string(),
-        "mcp__kerna-governed-tools__echo,mcp__kerna-governed-tools__kerna_session_status,mcp__kerna-governed-tools__kerna_sandbox_run,mcp__kerna-governed-tools__secret_probe,mcp__kerna-governed-tools__network_probe".to_string(),
-        "--mcp-config".to_string(),
-        format!(
-            "/workspace/{}",
-            mcp_config.strip_prefix(session_dir)?.to_string_lossy().replace('\\', "/")
-        ),
-        "--strict-mcp-config".to_string(),
+        "Read,Write,Edit,Bash,Glob,Grep".to_string(),
     ]);
     if let Some(prompt) = prompt {
         args.extend([
@@ -973,33 +994,10 @@ impl Drop for ContainerCleanup {
     }
 }
 
-fn prepare_container_contract(session_dir: &Path) -> Result<(PathBuf, PathBuf)> {
-    let (contract_dir, mcp_config) = prepare_demo_contract(session_dir)?;
-    let config_path = contract_dir.join("kerna.toml");
-    let config = std::fs::read_to_string(&config_path)?
-        .lines()
-        .map(|line| {
-            if line.starts_with("db_path = ") {
-                "db_path = '/workspace/.kerna-demo/kerna-demo.db'".to_string()
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(config_path, format!("{config}\n"))?;
-    std::fs::write(
-        &mcp_config,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "mcpServers": {
-                "kerna-governed-tools": {
-                    "command": "/usr/local/bin/kerna",
-                    "args": ["gateway", "--workspace", "/workspace/.kerna-demo"]
-                }
-            }
-        }))?,
-    )?;
-    Ok((contract_dir, mcp_config))
+fn prepare_broker_state(session_token: &str) -> Result<PathBuf> {
+    let state_dir = session_root().join(format!("state-{}", &session_token[..8]));
+    std::fs::create_dir_all(&state_dir)?;
+    Ok(state_dir)
 }
 
 pub(crate) fn create_disposable_clone(repo: &Path, session_token: &str) -> Result<PathBuf> {
@@ -1370,22 +1368,39 @@ mod tests {
     }
 
     #[test]
-    fn container_contract_uses_only_container_paths() {
-        let session_dir = std::env::temp_dir().join(format!("kerna-contract-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&session_dir).unwrap();
-        let (contract_dir, mcp_config) = prepare_container_contract(&session_dir).unwrap();
-        let config: crate::config::Config =
-            toml::from_str(&std::fs::read_to_string(contract_dir.join("kerna.toml")).unwrap())
-                .unwrap();
-        assert_eq!(config.db_path, "/workspace/.kerna-demo/kerna-demo.db");
-        let mcp: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(mcp_config).unwrap()).unwrap();
-        let server = &mcp["mcpServers"]["kerna-governed-tools"];
-        assert_eq!(server["command"], "/usr/local/bin/kerna");
-        assert_eq!(server["args"][2], "/workspace/.kerna-demo");
-        let rendered = serde_json::to_string(&mcp).unwrap();
-        assert!(!rendered.contains(&session_dir.to_string_lossy().to_string()));
-        std::fs::remove_dir_all(session_dir).unwrap();
+    fn production_evidence_state_is_outside_the_agent_workspace() {
+        let token = Uuid::new_v4().to_string();
+        let state_dir = prepare_broker_state(&token).unwrap();
+        let workspace = std::env::temp_dir().join(format!("kerna-agent-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        assert!(!state_dir.starts_with(&workspace));
+        assert!(!workspace.join(".kerna-demo").exists());
+        let _ = std::fs::remove_dir_all(state_dir);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn evidence_mount_is_broker_only_and_never_part_of_agent_arguments() {
+        let workspace = std::env::temp_dir().join(format!("kerna-work-{}", Uuid::new_v4()));
+        let state = std::env::temp_dir().join(format!("kerna-state-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let broker = broker_container_args(
+            &format!("sha256:{}", "1".repeat(64)),
+            &workspace,
+            &state,
+            "agent-net",
+            "broker",
+            "12345678-session",
+        )
+        .join(" ");
+        let agent = common_container_args(None, "agent-net", &workspace).join(" ");
+        assert!(broker.contains("dst=/kerna-state"));
+        assert!(broker.contains("KERNA_DB_PATH=/kerna-state/evidence.db"));
+        assert!(!agent.contains("kerna-state"));
+        assert!(!agent.contains("evidence.db"));
+        let _ = std::fs::remove_dir_all(workspace);
+        let _ = std::fs::remove_dir_all(state);
     }
 
     #[tokio::test]

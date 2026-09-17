@@ -640,8 +640,10 @@ impl Config {
             });
         }
 
-        if config.db_path.is_empty() {
-            config.db_path = env::var("KERNA_DB_PATH").unwrap_or_else(|_| "kerna.db".to_string());
+        if let Ok(trusted_db_path) = env::var("KERNA_DB_PATH") {
+            config.db_path = trusted_db_path;
+        } else if config.db_path.is_empty() {
+            config.db_path = "kerna.db".to_string();
         }
 
         if config.sandbox_dir.is_empty() {
