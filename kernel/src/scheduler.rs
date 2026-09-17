@@ -297,7 +297,7 @@ impl TaskScheduler {
 
     /// Stream one tool-less model turn. Every emitted string is provider text;
     /// action-shaped stream items fail closed before the caller receives them.
-    pub async fn ask_stream<F>(&self, prompt: &str, mut emit: F) -> Result<u64>
+    pub async fn ask_stream<F>(&self, prompt: &str, emit: F) -> Result<u64>
     where
         F: FnMut(&str) -> Result<()>,
     {
@@ -310,6 +310,21 @@ impl TaskScheduler {
             Some(&self.config.llm_model),
             &self.config.llm_api_key,
         )?;
+        self.ask_stream_resolved(prompt, &resolved, emit).await
+    }
+
+    pub async fn ask_stream_resolved<F>(
+        &self,
+        prompt: &str,
+        resolved: &crate::providers::ResolvedProvider,
+        mut emit: F,
+    ) -> Result<u64>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        if prompt.trim().is_empty() {
+            return Err(anyhow!("the question cannot be empty"));
+        }
         match resolved.protocol {
             crate::providers::WireProtocol::Mock => {
                 let messages = vec![ChatMessage {
@@ -323,11 +338,10 @@ impl TaskScheduler {
                 Ok(tokens)
             }
             crate::providers::WireProtocol::OpenAiCompat => {
-                self.stream_openai_compat(&resolved, prompt, &mut emit)
-                    .await
+                self.stream_openai_compat(resolved, prompt, &mut emit).await
             }
             crate::providers::WireProtocol::Anthropic => {
-                self.stream_anthropic(&resolved, prompt, &mut emit).await
+                self.stream_anthropic(resolved, prompt, &mut emit).await
             }
         }
     }

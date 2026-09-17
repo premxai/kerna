@@ -49,6 +49,7 @@ pub struct AppState {
     pub route_mode: RouteMode,
     pub shadow_enabled: bool,
     pub anthropic_api_key: Option<Arc<Zeroizing<String>>>,
+    pub openai_api_key: Option<Arc<Zeroizing<String>>>,
     pub route_decisions: Arc<Mutex<HashMap<String, RouteDecision>>>,
 }
 
@@ -157,6 +158,14 @@ pub async fn start_server(state: AppState, bind: &str, port: u16) -> anyhow::Res
     let app = Router::new()
         .route("/v1/chat/completions", post(handle_chat_completion))
         .route("/anthropic/v1/messages", post(handle_guard_anthropic))
+        .route(
+            "/native/anthropic/v1/messages",
+            post(handle_native_anthropic),
+        )
+        .route(
+            "/native/openai/v1/chat/completions",
+            post(handle_native_openai_chat),
+        )
         .route("/kerna/sandbox", post(handle_demo_sandbox))
         .route("/openai/v1/responses", post(handle_guard_openai))
         .with_state(state);
@@ -169,6 +178,132 @@ pub async fn start_server(state: AppState, bind: &str, port: u16) -> anyhow::Res
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn native_request_is_toolless(body: &Bytes) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .get("tools")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
+                && value.get("tool_choice").is_none()
+        })
+}
+
+async fn handle_native_anthropic(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    if !is_native_authorized(&state, &headers) {
+        return error_response(StatusCode::UNAUTHORIZED, "Invalid native session token");
+    }
+    if !native_request_is_toolless(&body) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Native ask broker accepts no tool authority",
+        );
+    }
+    let key = match state.anthropic_api_key.as_ref() {
+        Some(key) if !key.is_empty() => key.as_str(),
+        _ => return error_response(StatusCode::SERVICE_UNAVAILABLE, "Broker key unavailable"),
+    };
+    let target = "https://api.anthropic.com/v1/messages";
+    let validated = match crate::egress::cloud_client(
+        target,
+        &["api.anthropic.com"],
+        Duration::from_secs(10),
+        PROVIDER_REQUEST_TIMEOUT,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "Provider destination refused"),
+    };
+    let upstream = validated
+        .client
+        .post(validated.url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-api-key", key)
+        .header("anthropic-version", "2023-06-01")
+        .body(body)
+        .send()
+        .await;
+    native_upstream_response(upstream).await
+}
+
+async fn handle_native_openai_chat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    if !is_native_authorized(&state, &headers) {
+        return error_response(StatusCode::UNAUTHORIZED, "Invalid native session token");
+    }
+    if !native_request_is_toolless(&body) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Native ask broker accepts no tool authority",
+        );
+    }
+    let key = match state.openai_api_key.as_ref() {
+        Some(key) if !key.is_empty() => key.as_str(),
+        _ => return error_response(StatusCode::SERVICE_UNAVAILABLE, "Broker key unavailable"),
+    };
+    let target = "https://api.openai.com/v1/chat/completions";
+    let validated = match crate::egress::cloud_client(
+        target,
+        &["api.openai.com"],
+        Duration::from_secs(10),
+        PROVIDER_REQUEST_TIMEOUT,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "Provider destination refused"),
+    };
+    let upstream = validated
+        .client
+        .post(validated.url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .bearer_auth(key)
+        .body(body)
+        .send()
+        .await;
+    native_upstream_response(upstream).await
+}
+
+async fn native_upstream_response(
+    upstream: Result<reqwest::Response, reqwest::Error>,
+) -> axum::response::Response {
+    let upstream = match upstream {
+        Ok(value) if value.status().is_redirection() => {
+            return error_response(StatusCode::BAD_GATEWAY, "Provider redirect refused")
+        }
+        Ok(value) => value,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "Provider unavailable"),
+    };
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
+    let body = if status.is_success() {
+        Body::from_stream(upstream.bytes_stream())
+    } else {
+        match upstream.bytes().await {
+            Ok(body) => Body::from(body),
+            Err(_) => return error_response(StatusCode::BAD_GATEWAY, "Provider error unavailable"),
+        }
+    };
+    let mut response = axum::response::Response::new(body);
+    *response.status_mut() = status;
+    if let Some(content_type) = content_type {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, content_type);
+    }
+    response
 }
 
 async fn handle_demo_sandbox(
@@ -704,8 +839,8 @@ async fn handle_guard_openai(
             "Missing or invalid session token.",
         );
     }
-    let key = match std::env::var("OPENAI_API_KEY") {
-        Ok(value) if !value.is_empty() => value,
+    let key = match state.openai_api_key.as_ref() {
+        Some(value) if !value.is_empty() => value.as_str().to_string(),
         _ => {
             return error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -2348,6 +2483,19 @@ fn is_authorized(state: &AppState, headers: &HeaderMap) -> bool {
     !presented.is_empty() && presented == expected
 }
 
+fn is_native_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    if is_authorized(state, headers) {
+        return true;
+    }
+    let Some(expected) = &state.auth_token else {
+        return true;
+    };
+    headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|presented| !presented.is_empty() && presented == expected)
+}
+
 async fn handle_chat_completion(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2444,6 +2592,7 @@ mod tests {
                 route_mode: route,
                 shadow_enabled: true,
                 anthropic_api_key: None,
+                openai_api_key: None,
                 route_decisions: Arc::new(Mutex::new(HashMap::new())),
             };
             let args = json!({"backend":if route==RouteMode::Local{"wasmer"}else{"tenki"},"language":"python","code":"import os; print(os.environ)","timeout_ms":10000});
@@ -2525,6 +2674,7 @@ mod tests {
                 route_mode: RouteMode::Cloud,
                 shadow_enabled: false,
                 anthropic_api_key: None,
+                openai_api_key: None,
                 route_decisions: Arc::new(Mutex::new(HashMap::new())),
             },
             csrf_token: "csrf".to_string(),
@@ -2551,6 +2701,7 @@ mod tests {
                 route_mode: RouteMode::Cloud,
                 shadow_enabled: false,
                 anthropic_api_key: None,
+                openai_api_key: None,
                 route_decisions: Arc::new(Mutex::new(HashMap::new())),
             },
             csrf_token: "one-time-token".to_string(),
@@ -2606,6 +2757,23 @@ mod tests {
             provider_url("http://127.0.0.1:8081/v1/", "responses"),
             "http://127.0.0.1:8081/v1/responses"
         );
+    }
+
+    #[test]
+    fn native_model_plane_accepts_only_well_formed_toolless_requests() {
+        assert!(native_request_is_toolless(&Bytes::from_static(
+            br#"{"model":"claude-test","stream":true}"#
+        )));
+        assert!(native_request_is_toolless(&Bytes::from_static(
+            br#"{"model":"claude-test","tools":[]}"#
+        )));
+        assert!(!native_request_is_toolless(&Bytes::from_static(
+            br#"{"model":"claude-test","tools":[{"name":"shell"}]}"#
+        )));
+        assert!(!native_request_is_toolless(&Bytes::from_static(
+            br#"{"model":"claude-test","tool_choice":"none"}"#
+        )));
+        assert!(!native_request_is_toolless(&Bytes::from_static(b"{")));
     }
 
     #[test]

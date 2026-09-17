@@ -23,9 +23,10 @@ kerna ask "Summarize this design" --provider mock --json
 ```
 
 The selected provider key comes from that provider's declared environment variable or a hidden
-per-request prompt. It is never accepted as a command-line argument. The request contains no tool
-schemas, cannot mutate the workspace, and rejects any action-bearing provider response. Questions
-and model prose are not written to Kerna's task or evidence database.
+per-request prompt. It is never accepted as a command-line argument. Kerna passes it once over
+stdin to a short-lived trusted broker container, then drops the host copy. The request contains no
+tool schemas, cannot mutate the workspace, and rejects any action-bearing provider response.
+Questions and model prose are not written to Kerna's task or evidence database.
 
 `--json` emits JSON Lines using the stable `session.started`, `assistant.delta`,
 `session.completed`, and `session.failed` vocabulary. Anthropic and OpenAI-compatible SSE text is
@@ -33,8 +34,15 @@ decoded incrementally and emitted as provider deltas. Human output and JSON outp
 the same internal events. Malformed JSON, action-bearing events, and streams ending mid-event fail
 closed.
 
-This checkpoint uses the trusted host process for provider I/O. It must move provider traffic and
-key custody into the trusted broker before any native path receives tools.
+Provider I/O now leaves only from the broker's dedicated egress network. The CLI connects to a
+loopback-only published port using a random session credential; the broker accepts only the exact
+Anthropic Messages or OpenAI Chat Completions endpoint and provider domain. The provider key is
+held only in broker memory and never enters Docker metadata. Container and network cleanup is
+RAII-bound to success, provider failure, malformed streams, and early CLI exit.
+
+This completes the credential and egress boundary for the tool-less command. It does not authorize
+tools: adding tools requires canonical actions, containment, policy, approval, and pre-release
+receipts as a separate checkpoint.
 
 ## Stable internal event direction
 

@@ -381,6 +381,156 @@ pub async fn launch_claude(
     result
 }
 
+pub struct NativeAskBroker {
+    pub base_url: String,
+    pub session_token: String,
+    container_name: String,
+    network_name: String,
+    child: Option<Child>,
+}
+
+impl Drop for NativeAskBroker {
+    fn drop(&mut self) {
+        let _ = docker_command()
+            .args(["rm", "--force", &self.container_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if let Some(child) = self.child.as_mut() {
+            terminate_child(child);
+        }
+        let _ = docker_command()
+            .args(["network", "rm", &self.network_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// Start the short-lived trusted provider broker used by `kerna ask`.
+/// The provider key crosses stdin once and is never placed in Docker metadata.
+pub fn start_native_ask_broker(
+    repo: &Path,
+    provider: &str,
+    provider_key: &str,
+) -> Result<NativeAskBroker> {
+    if !matches!(provider, "anthropic" | "openai") {
+        return Err(anyhow!(
+            "native broker currently supports anthropic and openai"
+        ));
+    }
+    let image_id = verified_agent_image_id()?;
+    let session_token = Uuid::new_v4().to_string();
+    let suffix = &session_token[..8];
+    let session_dir = create_disposable_clone(repo, &session_token)?;
+    let state_dir = prepare_broker_state(&session_token)?;
+    let network_name = format!("kerna-native-egress-{suffix}");
+    let container_name = format!("kerna-native-broker-{suffix}");
+    let host_port = available_loopback_port(BROKER_PORT)?;
+    create_network(&network_name, false, &session_token)?;
+
+    let args = native_broker_container_args(&NativeBrokerContainerSpec {
+        image_id: &image_id,
+        session_dir: &session_dir,
+        state_dir: &state_dir,
+        network_name: &network_name,
+        container_name: &container_name,
+        host_port,
+        session_token: &session_token,
+        provider,
+    });
+    let child = match docker_command()
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = docker_command()
+                .args(["network", "rm", &network_name])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            return Err(error).context("could not start the native Kerna broker");
+        }
+    };
+    let provider_path = if provider == "anthropic" {
+        "native/anthropic"
+    } else {
+        "native/openai/v1"
+    };
+    let mut broker = NativeAskBroker {
+        base_url: format!("http://127.0.0.1:{host_port}/{provider_path}"),
+        session_token,
+        container_name,
+        network_name,
+        child: Some(child),
+    };
+    if let Some(mut stdin) = broker.child.as_mut().and_then(|child| child.stdin.take()) {
+        stdin.write_all(provider_key.as_bytes())?;
+        stdin.write_all(b"\n")?;
+    }
+    wait_for_container(&broker.container_name)?;
+    let address = format!("127.0.0.1:{host_port}");
+    for attempt in 0..50 {
+        if std::net::TcpStream::connect(&address).is_ok() {
+            break;
+        }
+        if attempt == 49 {
+            return Err(anyhow!("native Kerna broker did not become reachable"));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(broker)
+}
+
+struct NativeBrokerContainerSpec<'a> {
+    image_id: &'a str,
+    session_dir: &'a Path,
+    state_dir: &'a Path,
+    network_name: &'a str,
+    container_name: &'a str,
+    host_port: u16,
+    session_token: &'a str,
+    provider: &'a str,
+}
+
+fn native_broker_container_args(spec: &NativeBrokerContainerSpec<'_>) -> Vec<String> {
+    let mut args = common_container_args(
+        Some(spec.container_name),
+        spec.network_name,
+        spec.session_dir,
+    );
+    args.extend([
+        "--mount".to_string(),
+        format!(
+            "type=bind,src={},dst=/kerna-state",
+            spec.state_dir.to_string_lossy()
+        ),
+        "--publish".to_string(),
+        format!("127.0.0.1:{}:{BROKER_PORT}", spec.host_port),
+        "--env".to_string(),
+        "KERNA_DB_PATH=/kerna-state/evidence.db".to_string(),
+        spec.image_id.to_string(),
+        "kerna".to_string(),
+        "serve".to_string(),
+        "--port".to_string(),
+        BROKER_PORT.to_string(),
+        "--bind".to_string(),
+        "0.0.0.0".to_string(),
+        "--token".to_string(),
+        spec.session_token.to_string(),
+        "--route".to_string(),
+        "cloud".to_string(),
+        "--provider-key-stdin".to_string(),
+        "--provider-key-kind".to_string(),
+        spec.provider.to_string(),
+    ]);
+    args
+}
+
 /// Legacy guided-demo path. This remains available only behind `--host-demo`
 /// and must never be represented as production containment.
 pub async fn launch_claude_host_demo(
@@ -1399,6 +1549,36 @@ mod tests {
         assert!(broker.contains("KERNA_DB_PATH=/kerna-state/evidence.db"));
         assert!(!agent.contains("kerna-state"));
         assert!(!agent.contains("evidence.db"));
+        let _ = std::fs::remove_dir_all(workspace);
+        let _ = std::fs::remove_dir_all(state);
+    }
+
+    #[test]
+    fn native_broker_is_loopback_only_and_provider_key_never_enters_metadata() {
+        let workspace = std::env::temp_dir().join(format!("kerna-native-work-{}", Uuid::new_v4()));
+        let state = std::env::temp_dir().join(format!("kerna-native-state-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        let secret = "provider-secret-must-not-appear";
+        let image = format!("sha256:{}", "1".repeat(64));
+        let args = native_broker_container_args(&NativeBrokerContainerSpec {
+            image_id: &image,
+            session_dir: &workspace,
+            state_dir: &state,
+            network_name: "native-egress",
+            container_name: "native-broker",
+            host_port: 28766,
+            session_token: "scoped-session-token",
+            provider: "anthropic",
+        });
+        let rendered = args.join(" ");
+        assert!(rendered.contains("127.0.0.1:28766:8766"));
+        assert!(rendered.contains("--provider-key-stdin"));
+        assert!(rendered.contains("--provider-key-kind anthropic"));
+        assert!(rendered.contains("dst=/kerna-state"));
+        assert!(!rendered.contains(secret));
+        assert!(!rendered.contains("ANTHROPIC_API_KEY"));
+        assert!(!rendered.contains("OPENAI_API_KEY"));
         let _ = std::fs::remove_dir_all(workspace);
         let _ = std::fs::remove_dir_all(state);
     }

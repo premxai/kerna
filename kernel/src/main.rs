@@ -96,7 +96,7 @@ enum QuickCommand {
     Ask {
         /// Question to send. Prompts and model prose are not persisted.
         question: String,
-        #[arg(long, default_value = "anthropic")]
+        #[arg(long, default_value = "anthropic", value_parser = ["anthropic", "openai", "mock"])]
         provider: String,
         #[arg(long)]
         model: Option<String>,
@@ -240,6 +240,10 @@ enum Commands {
         /// Read the provider key from stdin into trusted broker memory.
         #[arg(long)]
         provider_key_stdin: bool,
+
+        /// Provider whose key is supplied on stdin.
+        #[arg(long, default_value = "anthropic", value_parser = ["anthropic", "openai"])]
+        provider_key_kind: String,
     },
 
     /// Open a local live dashboard for governed MCP sessions and model routing
@@ -1453,21 +1457,24 @@ async fn async_main() -> Result<()> {
                     config.llm_model = preset.default_model;
                 }
                 let key_env = providers::api_key_env_for(&config, &provider);
-                if provider != "mock"
-                    && std::env::var(&key_env)
-                        .ok()
-                        .filter(|key| !key.trim().is_empty())
-                        .is_none()
+                let provider_key = if provider == "mock" {
+                    zeroize::Zeroizing::new(String::new())
+                } else if let Some(key) = std::env::var(&key_env)
+                    .ok()
+                    .filter(|key| !key.trim().is_empty())
                 {
-                    config.llm_api_key = dialoguer::Password::new()
-                        .with_prompt(format!(
-                            "{} API key (held in trusted Kerna memory for this request only)",
-                            provider
-                        ))
-                        .interact()?;
+                    zeroize::Zeroizing::new(key)
                 } else {
-                    config.llm_api_key.clear();
-                }
+                    zeroize::Zeroizing::new(
+                        dialoguer::Password::new()
+                            .with_prompt(format!(
+                                "{} API key (sent to the trusted broker over stdin)",
+                                provider
+                            ))
+                            .interact()?,
+                    )
+                };
+                config.llm_api_key.clear();
                 let event_model = config.llm_model.clone();
                 let memory = Arc::new(MemoryEngine::new(&config.db_path)?);
                 let scheduler = TaskScheduler::new(
@@ -1476,6 +1483,27 @@ async fn async_main() -> Result<()> {
                     Arc::new(Mutex::new(McpRegistry::new())),
                     None,
                 )?;
+                let broker = if provider == "mock" {
+                    None
+                } else {
+                    Some(guard_launcher::start_native_ask_broker(
+                        std::path::Path::new("."),
+                        &provider,
+                        provider_key.as_str(),
+                    )?)
+                };
+                drop(provider_key);
+                let broker_provider = broker.as_ref().map(|broker| providers::ResolvedProvider {
+                    name: provider.clone(),
+                    protocol: if provider == "anthropic" {
+                        providers::WireProtocol::Anthropic
+                    } else {
+                        providers::WireProtocol::OpenAiCompat
+                    },
+                    base_url: broker.base_url.clone(),
+                    api_key: broker.session_token.clone(),
+                    model: event_model.clone(),
+                });
                 let session_id = format!("ask-{}", uuid::Uuid::new_v4());
                 let mut renderer = native_cli::EventRenderer::new(json);
                 renderer.emit(&native_cli::NativeEvent::SessionStarted {
@@ -1484,15 +1512,23 @@ async fn async_main() -> Result<()> {
                     model: event_model,
                     tool_authority: "none",
                 })?;
-                match scheduler
-                    .ask_stream(&question, |text| {
-                        renderer.emit(&native_cli::NativeEvent::AssistantDelta {
-                            session_id: session_id.clone(),
-                            text: text.to_string(),
-                        })
+                let stream = |text: &str| {
+                    renderer.emit(&native_cli::NativeEvent::AssistantDelta {
+                        session_id: session_id.clone(),
+                        text: text.to_string(),
                     })
-                    .await
-                {
+                };
+                let result = if let Some(resolved) = broker_provider.as_ref() {
+                    scheduler
+                        .ask_stream_resolved(&question, resolved, stream)
+                        .await
+                } else {
+                    scheduler.ask_stream(&question, stream).await
+                };
+                // Keep the broker/container RAII guard alive until the response
+                // body has been consumed or the request has failed terminally.
+                let _broker_guard = broker.as_ref();
+                match result {
                     Ok(tokens) => {
                         renderer.emit(&native_cli::NativeEvent::SessionCompleted {
                             session_id,
@@ -1567,6 +1603,7 @@ async fn async_main() -> Result<()> {
                     route_mode: route,
                     shadow_enabled: shadow,
                     anthropic_api_key: None,
+                    openai_api_key: None,
                     route_decisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 };
                 server::start_dashboard_server(state, port, !no_open).await?;
@@ -1824,6 +1861,7 @@ async fn async_main() -> Result<()> {
             route,
             shadow,
             provider_key_stdin,
+            provider_key_kind,
         }) => {
             let is_loopback = bind == "127.0.0.1" || bind == "localhost" || bind == "::1";
             if !is_loopback && token.is_none() {
@@ -1836,16 +1874,25 @@ async fn async_main() -> Result<()> {
             if token.is_none() {
                 println!("[i] No --token set: this server is loopback-only and unauthenticated.");
             }
-            let anthropic_api_key = if provider_key_stdin {
+            let stdin_provider_key = if provider_key_stdin {
                 let mut key = zeroize::Zeroizing::new(String::new());
                 std::io::stdin().read_line(&mut key)?;
                 let key = zeroize::Zeroizing::new(key.trim_end().to_string());
                 (!key.is_empty()).then(|| Arc::new(key))
             } else {
-                std::env::var("ANTHROPIC_API_KEY")
-                    .ok()
-                    .map(zeroize::Zeroizing::new)
-                    .map(Arc::new)
+                std::env::var(if provider_key_kind == "openai" {
+                    "OPENAI_API_KEY"
+                } else {
+                    "ANTHROPIC_API_KEY"
+                })
+                .ok()
+                .map(zeroize::Zeroizing::new)
+                .map(Arc::new)
+            };
+            let (anthropic_api_key, openai_api_key) = if provider_key_kind == "openai" {
+                (None, stdin_provider_key)
+            } else {
+                (stdin_provider_key, None)
             };
             let state = server::AppState {
                 config: config.clone(),
@@ -1857,6 +1904,7 @@ async fn async_main() -> Result<()> {
                 route_mode: route,
                 shadow_enabled: shadow,
                 anthropic_api_key,
+                openai_api_key,
                 route_decisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             };
             if let Err(e) = server::start_server(state, &bind, port).await {
@@ -1881,6 +1929,7 @@ async fn async_main() -> Result<()> {
                 route_mode: route,
                 shadow_enabled: shadow,
                 anthropic_api_key: None,
+                openai_api_key: None,
                 route_decisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             };
             if let Err(e) = server::start_dashboard_server(state, port, !no_open).await {

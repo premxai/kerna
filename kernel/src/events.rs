@@ -184,7 +184,8 @@ mod tests {
             "safe": "ordinary plugin output"
         });
 
-        let (redacted, changed) = redact_payload_with_secrets(&payload, &[secret.clone()]);
+        let (redacted, changed) =
+            redact_payload_with_secrets(&payload, std::slice::from_ref(&secret));
 
         assert!(changed);
         let rendered = redacted.to_string();

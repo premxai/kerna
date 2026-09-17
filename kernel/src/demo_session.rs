@@ -210,6 +210,7 @@ pub async fn start(repo: &Path, port: u16) -> Result<()> {
         route_mode: RouteMode::Auto,
         shadow_enabled: true,
         anthropic_api_key: Some(anthropic),
+        openai_api_key: None,
         route_decisions: Arc::new(tokio::sync::Mutex::new(Default::default())),
     };
     let dashboard_state = state.clone();
