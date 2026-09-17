@@ -342,8 +342,8 @@ pub async fn launch_claude(
     }
     drop(cloud_key);
     cleanup.broker = Some(broker);
-    docker_status(&["network", "connect", &egress_network, &broker_name])?;
     wait_for_container(&broker_name)?;
+    docker_status(&["network", "connect", &egress_network, &broker_name])?;
 
     let executable = std::env::current_exe()?;
     let dashboard_port = available_loopback_port(DASHBOARD_PORT)?;
