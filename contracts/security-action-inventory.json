@@ -1,7 +1,7 @@
 {
   "$schema": "./security-action-inventory.schema.json",
   "version": 1,
-  "reviewed_commit": "5d4b218",
+  "reviewed_commit": "39cf367",
   "statuses": ["governed", "contained", "trusted-host-only", "intentionally-excluded", "open-bypass"],
   "sensitive_patterns": ["Command::new", "reqwest::", "TcpStream", "std::fs::", "tokio::fs::", "rusqlite", "docker", "wasmer", "env::var", "set_var", "remove_var"],
   "entries": [
@@ -398,12 +398,12 @@
       "receipt_coverage": "Prompts and model prose are intentionally not persisted; only a non-sensitive token count is printed to stderr.",
       "failure_behavior": "Empty questions, missing credentials, provider errors, action-bearing replies, and empty replies terminate without executing an action.",
       "platforms": ["windows", "macos", "linux"],
-      "tests": ["scheduler::tests::toolless_ask_accepts_text_and_rejects_action_or_empty_output", "kerna ask --provider mock smoke"],
-      "source_files": ["kernel/src/main.rs", "kernel/src/scheduler.rs", "kernel/src/providers.rs"],
+      "tests": ["native_cli::tests::event_json_is_stable_and_contains_no_prompt_field", "native_cli::tests::terminal_event_vocabulary_is_explicit", "scheduler::tests::toolless_ask_accepts_text_and_rejects_action_or_empty_output", "kerna ask --provider mock --json smoke"],
+      "source_files": ["kernel/src/main.rs", "kernel/src/native_cli.rs", "kernel/src/scheduler.rs", "kernel/src/providers.rs"],
       "status": "trusted-host-only",
       "risk": "P2",
       "remediation_task": null,
-      "evidence": "The deterministic mock smoke returned plain text with no TUI, and the response validator rejects any attempted tool call. Moving provider traffic and key custody into the broker is required before this path gains tools."
+      "evidence": "The deterministic mock smoke returned canonical JSONL with no TUI or prompt field, and the response validator rejects any attempted tool call. Current adapters emit the complete answer as one delta. Moving provider traffic and key custody into the broker is required before this path gains tools."
     }
   ]
 }
