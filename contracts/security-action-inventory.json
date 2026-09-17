@@ -1,7 +1,7 @@
 {
   "$schema": "./security-action-inventory.schema.json",
   "version": 1,
-  "reviewed_commit": "ec9c54e",
+  "reviewed_commit": "bc23f3f",
   "statuses": ["governed", "contained", "trusted-host-only", "intentionally-excluded", "open-bypass"],
   "sensitive_patterns": ["Command::new", "reqwest::", "TcpStream", "std::fs::", "tokio::fs::", "rusqlite", "docker", "wasmer", "env::var", "set_var", "remove_var"],
   "entries": [
@@ -193,17 +193,17 @@
       "controlled_inputs": ["provider key", "plugin secret declaration", "process environment"],
       "operation": ["credential", "filesystem", "process"],
       "privileges": "Trusted Kerna process reads or injects declared secrets into the intended broker or plugin process.",
-      "enforcement_point": "Declared-secret filtering, raw-key persistence prohibition, redaction, separate agent/control credentials",
+      "enforcement_point": "Declared-secret filtering, secret-name-only Docker arguments, raw-key persistence prohibition, value-aware output redaction, separate agent/control credentials",
       "containment_boundary": "Process boundary; effective only if the receiving process is itself contained.",
       "receipt_coverage": "Secret values are redacted; presence and routing may be represented without value retention.",
-      "failure_behavior": "Undeclared secrets are withheld and raw API keys are not written to kerna.toml.",
+      "failure_behavior": "Undeclared secrets are withheld, secret values are absent from Docker command arguments, plugin output containing raw or reversibly encoded credentials is redacted, and raw API keys are not written to kerna.toml.",
       "platforms": ["windows", "macos", "linux"],
-      "tests": ["trust_layer_validation::test_declared_secret_reaches_plugin_undeclared_does_not", "config::tests::test_raw_api_keys_are_never_written_to_kerna_toml", "events::tests::redacts_nested_credentials_and_json_encoded_arguments"],
-      "source_files": ["kernel/src/config.rs", "kernel/src/events.rs", "kernel/src/main.rs", "kernel/src/demo_session.rs"],
+      "tests": ["trust_layer_validation::test_declared_secret_reaches_plugin_undeclared_does_not", "mcp::containment_tests::docker_arguments_contain_secret_names_never_values", "config::tests::test_raw_api_keys_are_never_written_to_kerna_toml", "events::tests::redacts_nested_credentials_and_json_encoded_arguments", "events::tests::redacts_raw_and_reversibly_encoded_secret_values"],
+      "source_files": ["kernel/src/config.rs", "kernel/src/events.rs", "kernel/src/gateway.rs", "kernel/src/main.rs", "kernel/src/mcp.rs", "kernel/src/mockmcp.rs", "kernel/src/demo_session.rs"],
       "status": "governed",
       "risk": "P1",
       "remediation_task": 6,
-      "evidence": "Host-launched recipients remain a secret-exposure concern until structurally contained."
+      "evidence": "Production plugins receive only doubly declared secrets in their contained process. Secret values are excluded from host Docker argv, undeclared values are withheld, and raw/base64/URL-safe-base64/hex/percent-encoded echoes are removed before agent delivery or receipt persistence. Native plugin mode remains development-only."
     },
     {
       "id": "SB-011",
