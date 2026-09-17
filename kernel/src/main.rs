@@ -1484,12 +1484,16 @@ async fn async_main() -> Result<()> {
                     model: event_model,
                     tool_authority: "none",
                 })?;
-                match scheduler.ask_text(&question).await {
-                    Ok((answer, tokens)) => {
+                match scheduler
+                    .ask_stream(&question, |text| {
                         renderer.emit(&native_cli::NativeEvent::AssistantDelta {
                             session_id: session_id.clone(),
-                            text: answer,
-                        })?;
+                            text: text.to_string(),
+                        })
+                    })
+                    .await
+                {
+                    Ok(tokens) => {
                         renderer.emit(&native_cli::NativeEvent::SessionCompleted {
                             session_id,
                             tokens,

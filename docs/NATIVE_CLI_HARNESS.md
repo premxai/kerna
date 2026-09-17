@@ -28,9 +28,10 @@ schemas, cannot mutate the workspace, and rejects any action-bearing provider re
 and model prose are not written to Kerna's task or evidence database.
 
 `--json` emits JSON Lines using the stable `session.started`, `assistant.delta`,
-`session.completed`, and `session.failed` vocabulary. Current provider adapters emit the completed
-answer as one `assistant.delta`; true provider-delta streaming is the next checkpoint. Human output
-and JSON output are renderings of the same internal events.
+`session.completed`, and `session.failed` vocabulary. Anthropic and OpenAI-compatible SSE text is
+decoded incrementally and emitted as provider deltas. Human output and JSON output are renderings of
+the same internal events. Malformed JSON, action-bearing events, and streams ending mid-event fail
+closed.
 
 This checkpoint uses the trusted host process for provider I/O. It must move provider traffic and
 key custody into the trusted broker before any native path receives tools.

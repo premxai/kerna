@@ -141,6 +141,117 @@ enum ApprovalMode {
     Queue,
 }
 
+#[derive(Clone, Copy)]
+enum TextStreamProtocol {
+    OpenAi,
+    Anthropic,
+}
+
+struct TextStreamDecoder {
+    protocol: TextStreamProtocol,
+    buffer: Vec<u8>,
+    tokens: u64,
+    saw_text: bool,
+}
+
+impl TextStreamDecoder {
+    fn new(protocol: TextStreamProtocol) -> Self {
+        Self {
+            protocol,
+            buffer: Vec::new(),
+            tokens: 0,
+            saw_text: false,
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>> {
+        self.buffer.extend_from_slice(chunk);
+        let mut output = Vec::new();
+        while let Some((end, delimiter)) = next_sse_frame(&self.buffer) {
+            let frame = self.buffer[..end].to_vec();
+            self.buffer.drain(..end + delimiter);
+            if let Some(text) = self.decode_frame(&frame)? {
+                self.saw_text = true;
+                output.push(text);
+            }
+        }
+        Ok(output)
+    }
+
+    fn finish(self) -> Result<u64> {
+        if !self.buffer.iter().all(u8::is_ascii_whitespace) {
+            return Err(anyhow!("provider stream ended mid-event"));
+        }
+        if !self.saw_text {
+            return Err(anyhow!("provider stream returned no text"));
+        }
+        Ok(self.tokens)
+    }
+
+    fn decode_frame(&mut self, frame: &[u8]) -> Result<Option<String>> {
+        let frame =
+            std::str::from_utf8(frame).map_err(|_| anyhow!("provider stream was not UTF-8"))?;
+        let data = frame
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if data.is_empty() || data == "[DONE]" {
+            return Ok(None);
+        }
+        let value: Value = serde_json::from_str(&data)
+            .map_err(|_| anyhow!("provider stream contained malformed JSON"))?;
+        if contains_stream_action(&value) {
+            return Err(anyhow!(
+                "provider returned an action on the tool-less `kerna ask` path"
+            ));
+        }
+        match self.protocol {
+            TextStreamProtocol::OpenAi => {
+                if let Some(total) = value["usage"]["total_tokens"].as_u64() {
+                    self.tokens = total;
+                }
+                Ok(value["choices"][0]["delta"]["content"]
+                    .as_str()
+                    .map(str::to_string))
+            }
+            TextStreamProtocol::Anthropic => {
+                if let Some(input) = value["message"]["usage"]["input_tokens"].as_u64() {
+                    self.tokens = self.tokens.saturating_add(input);
+                }
+                if let Some(output) = value["usage"]["output_tokens"].as_u64() {
+                    self.tokens = self.tokens.saturating_add(output);
+                }
+                Ok((value["delta"]["type"] == "text_delta")
+                    .then(|| value["delta"]["text"].as_str().map(str::to_string))
+                    .flatten())
+            }
+        }
+    }
+}
+
+fn next_sse_frame(buffer: &[u8]) -> Option<(usize, usize)> {
+    buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| (index, 2))
+        .or_else(|| {
+            buffer
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|index| (index, 4))
+        })
+}
+
+fn contains_stream_action(value: &Value) -> bool {
+    value.get("tool_calls").is_some()
+        || value["choices"][0]["delta"].get("tool_calls").is_some()
+        || matches!(
+            value["content_block"]["type"].as_str(),
+            Some("tool_use" | "server_tool_use")
+        )
+}
+
 impl TaskScheduler {
     pub fn new(
         mut config: Config,
@@ -184,21 +295,122 @@ impl TaskScheduler {
         })
     }
 
-    /// Run one tool-less model turn for the native Kerna CLI. This path does
-    /// not create a task record or persist the prompt/model prose. Supplying no
-    /// tool schemas also means the provider has no action authority.
-    pub async fn ask_text(&self, prompt: &str) -> Result<(String, u64)> {
+    /// Stream one tool-less model turn. Every emitted string is provider text;
+    /// action-shaped stream items fail closed before the caller receives them.
+    pub async fn ask_stream<F>(&self, prompt: &str, mut emit: F) -> Result<u64>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
         if prompt.trim().is_empty() {
             return Err(anyhow!("the question cannot be empty"));
         }
-        let messages = vec![ChatMessage {
-            role: "user".to_string(),
-            content: Some(prompt.to_string()),
-            tool_calls: None,
-            tool_call_id: None,
-        }];
-        let (reply, tokens) = self.call_llm(Uuid::new_v4(), &messages, &[]).await?;
-        validate_toolless_reply(reply, tokens)
+        let resolved = crate::providers::resolve(
+            &self.config,
+            &self.config.llm_provider,
+            Some(&self.config.llm_model),
+            &self.config.llm_api_key,
+        )?;
+        match resolved.protocol {
+            crate::providers::WireProtocol::Mock => {
+                let messages = vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: Some(prompt.to_string()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                }];
+                let (text, tokens) = validate_toolless_reply(call_mock(&messages)?.0, 10)?;
+                emit(&text)?;
+                Ok(tokens)
+            }
+            crate::providers::WireProtocol::OpenAiCompat => {
+                self.stream_openai_compat(&resolved, prompt, &mut emit)
+                    .await
+            }
+            crate::providers::WireProtocol::Anthropic => {
+                self.stream_anthropic(&resolved, prompt, &mut emit).await
+            }
+        }
+    }
+
+    async fn stream_openai_compat<F>(
+        &self,
+        resolved: &crate::providers::ResolvedProvider,
+        prompt: &str,
+        emit: &mut F,
+    ) -> Result<u64>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        let url = format!(
+            "{}/chat/completions",
+            resolved.base_url.trim_end_matches('/')
+        );
+        let body = json!({
+            "model": resolved.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": true,
+            "stream_options": {"include_usage": true}
+        });
+        let mut request = self
+            .http_client
+            .post(url)
+            .header(TURN_HEADER, turn_header_value(Uuid::new_v4()))
+            .json(&body);
+        if !resolved.api_key.is_empty() {
+            request = request.bearer_auth(&resolved.api_key);
+        }
+        let mut response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response.text().await.unwrap_or_default();
+            return Err(anyhow!("provider HTTP error {status}: {detail}"));
+        }
+        let mut decoder = TextStreamDecoder::new(TextStreamProtocol::OpenAi);
+        while let Some(chunk) = response.chunk().await? {
+            for text in decoder.push(&chunk)? {
+                emit(&text)?;
+            }
+        }
+        decoder.finish()
+    }
+
+    async fn stream_anthropic<F>(
+        &self,
+        resolved: &crate::providers::ResolvedProvider,
+        prompt: &str,
+        emit: &mut F,
+    ) -> Result<u64>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        let url = format!("{}/v1/messages", resolved.base_url.trim_end_matches('/'));
+        let body = json!({
+            "model": resolved.model,
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": true
+        });
+        let mut response = self
+            .http_client
+            .post(url)
+            .header("x-api-key", &resolved.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header(TURN_HEADER, turn_header_value(Uuid::new_v4()))
+            .json(&body)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Anthropic HTTP error {status}: {detail}"));
+        }
+        let mut decoder = TextStreamDecoder::new(TextStreamProtocol::Anthropic);
+        while let Some(chunk) = response.chunk().await? {
+            for text in decoder.push(&chunk)? {
+                emit(&text)?;
+            }
+        }
+        decoder.finish()
     }
 
     /// Mark this scheduler as running without a human at a terminal (messaging
@@ -1822,6 +2034,54 @@ mod tests {
             .to_string()
             .contains("tool-less"));
         assert!(validate_toolless_reply(msg("assistant", Some("   ")), 1).is_err());
+    }
+
+    fn decode_in_chunks(
+        protocol: TextStreamProtocol,
+        fixture: &[u8],
+        chunk_size: usize,
+    ) -> Result<(String, u64)> {
+        let mut decoder = TextStreamDecoder::new(protocol);
+        let mut text = String::new();
+        for chunk in fixture.chunks(chunk_size) {
+            for delta in decoder.push(chunk)? {
+                text.push_str(&delta);
+            }
+        }
+        let tokens = decoder.finish()?;
+        Ok((text, tokens))
+    }
+
+    #[test]
+    fn openai_text_stream_is_exact_across_every_chunk_size() {
+        let fixture = b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"total_tokens\":9}}\n\ndata: [DONE]\n\n";
+        for size in 1..=fixture.len() {
+            assert_eq!(
+                decode_in_chunks(TextStreamProtocol::OpenAi, fixture, size).unwrap(),
+                ("Hello world".to_string(), 9)
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_text_stream_is_exact_across_every_chunk_size() {
+        let fixture = b"event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":4}}}\n\nevent: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"Safe \"}}\n\nevent: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}\n\nevent: message_delta\ndata: {\"usage\":{\"output_tokens\":3}}\n\n";
+        for size in 1..=fixture.len() {
+            assert_eq!(
+                decode_in_chunks(TextStreamProtocol::Anthropic, fixture, size).unwrap(),
+                ("Safe answer".to_string(), 7)
+            );
+        }
+    }
+
+    #[test]
+    fn toolless_stream_rejects_actions_malformed_json_and_truncation() {
+        let action = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"x\"}]}}]}\n\n";
+        assert!(decode_in_chunks(TextStreamProtocol::OpenAi, action, 1).is_err());
+        let malformed = b"data: {bad}\n\n";
+        assert!(decode_in_chunks(TextStreamProtocol::OpenAi, malformed, 2).is_err());
+        let truncated = b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}";
+        assert!(decode_in_chunks(TextStreamProtocol::OpenAi, truncated, 3).is_err());
     }
 
     #[test]
