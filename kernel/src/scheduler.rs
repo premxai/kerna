@@ -184,6 +184,23 @@ impl TaskScheduler {
         })
     }
 
+    /// Run one tool-less model turn for the native Kerna CLI. This path does
+    /// not create a task record or persist the prompt/model prose. Supplying no
+    /// tool schemas also means the provider has no action authority.
+    pub async fn ask_text(&self, prompt: &str) -> Result<(String, u64)> {
+        if prompt.trim().is_empty() {
+            return Err(anyhow!("the question cannot be empty"));
+        }
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(prompt.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        let (reply, tokens) = self.call_llm(Uuid::new_v4(), &messages, &[]).await?;
+        validate_toolless_reply(reply, tokens)
+    }
+
     /// Mark this scheduler as running without a human at a terminal (messaging
     /// channel / daemon). Approval-required tools are then denied fail-closed
     /// rather than blocking on an interactive prompt that no one can answer.
@@ -1474,6 +1491,23 @@ fn flush_tool_results(pending: &mut Vec<serde_json::Value>, out: &mut Vec<serde_
 /// form. Assistant `tool_calls` become `tool_use` blocks; consecutive `tool`-role
 /// results are coalesced into one following user turn of `tool_result` blocks so
 /// the required user/assistant alternation is preserved.
+fn validate_toolless_reply(reply: ChatMessage, tokens: u64) -> Result<(String, u64)> {
+    if reply
+        .tool_calls
+        .as_ref()
+        .is_some_and(|calls| !calls.is_empty())
+    {
+        return Err(anyhow!(
+            "provider returned an action on the tool-less `kerna ask` path"
+        ));
+    }
+    let text = reply
+        .content
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| anyhow!("provider returned no text"))?;
+    Ok((text, tokens))
+}
+
 pub fn convert_to_anthropic(messages: &[ChatMessage]) -> (String, Vec<serde_json::Value>) {
     let mut system_prompt = String::new();
     let mut out: Vec<serde_json::Value> = Vec::new();
@@ -1767,6 +1801,27 @@ mod tests {
         assert_eq!(provider_to_runtime["fs_read"], "fs.read");
         assert_eq!(provider_to_runtime["fs_read_2"], "fs_read");
         assert_eq!(provider_to_runtime["calendar_send"], "calendar/send");
+    }
+
+    #[test]
+    fn toolless_ask_accepts_text_and_rejects_action_or_empty_output() {
+        let text = validate_toolless_reply(msg("assistant", Some("safe answer")), 12).unwrap();
+        assert_eq!(text, ("safe answer".to_string(), 12));
+
+        let mut action = msg("assistant", Some("trying an action"));
+        action.tool_calls = Some(vec![ToolCallRequest {
+            id: "call-1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "run_command".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }]);
+        assert!(validate_toolless_reply(action, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("tool-less"));
+        assert!(validate_toolless_reply(msg("assistant", Some("   ")), 1).is_err());
     }
 
     #[test]

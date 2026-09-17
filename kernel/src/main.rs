@@ -91,6 +91,15 @@ struct QuickCli {
 
 #[derive(Subcommand, Debug)]
 enum QuickCommand {
+    /// Ask a model a tool-less question through Kerna's native provider path.
+    Ask {
+        /// Question to send. Prompts and model prose are not persisted.
+        question: String,
+        #[arg(long, default_value = "anthropic")]
+        provider: String,
+        #[arg(long)]
+        model: Option<String>,
+    },
     /// Scan system, model, sandbox, and repository readiness.
     Doctor {
         #[arg(long, default_value = ".")]
@@ -1368,6 +1377,7 @@ fn print_quick_help() {
     println!("Usage:");
     println!("  kerna                         Start governed Claude (auto route + local shadow)");
     println!("  kerna doctor                  Check hardware, models, keys, and sandboxes");
+    println!("  kerna ask \"<question>\"       Ask a model without granting tools");
     println!("  kerna claude --route local   Force private local inference");
     println!("  kerna sandbox                Run bounded Python in Wasmer");
     println!("  kerna replay <evidence.json> Open signed read-only evidence");
@@ -1418,11 +1428,50 @@ async fn async_main() -> Result<()> {
     }
     let uses_quick_parser = matches!(
         first,
-        Some("claude" | "sandbox" | "replay" | "skills" | "dashboard")
+        Some("ask" | "claude" | "sandbox" | "replay" | "skills" | "dashboard")
     ) || (first == Some("doctor")
         && !arguments.iter().any(|arg| arg == "--gateway"));
     if uses_quick_parser {
         match QuickCli::parse().command {
+            QuickCommand::Ask {
+                question,
+                provider,
+                model,
+            } => {
+                let mut config = Config::load();
+                config.llm_provider = provider.clone();
+                if let Some(model) = model {
+                    config.llm_model = model;
+                } else if let Some(preset) = providers::preset_info(&provider) {
+                    config.llm_model = preset.default_model;
+                }
+                let key_env = providers::api_key_env_for(&config, &provider);
+                if provider != "mock"
+                    && std::env::var(&key_env)
+                        .ok()
+                        .filter(|key| !key.trim().is_empty())
+                        .is_none()
+                {
+                    config.llm_api_key = dialoguer::Password::new()
+                        .with_prompt(format!(
+                            "{} API key (held in trusted Kerna memory for this request only)",
+                            provider
+                        ))
+                        .interact()?;
+                } else {
+                    config.llm_api_key.clear();
+                }
+                let memory = Arc::new(MemoryEngine::new(&config.db_path)?);
+                let scheduler = TaskScheduler::new(
+                    config,
+                    memory,
+                    Arc::new(Mutex::new(McpRegistry::new())),
+                    None,
+                )?;
+                let (answer, tokens) = scheduler.ask_text(&question).await?;
+                println!("{answer}");
+                eprintln!("[i] tool-less response · {tokens} tokens · prompt not persisted");
+            }
             QuickCommand::Doctor { repo, brief } => {
                 if !(if brief {
                     guard_launcher::print_doctor_brief(true, Some(&repo)).await
