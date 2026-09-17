@@ -1,7 +1,7 @@
 {
   "$schema": "./security-action-inventory.schema.json",
   "version": 1,
-  "reviewed_commit": "a23692d",
+  "reviewed_commit": "5d4b218",
   "statuses": ["governed", "contained", "trusted-host-only", "intentionally-excluded", "open-bypass"],
   "sensitive_patterns": ["Command::new", "reqwest::", "TcpStream", "std::fs::", "tokio::fs::", "rusqlite", "docker", "wasmer", "env::var", "set_var", "remove_var"],
   "entries": [
@@ -163,7 +163,7 @@
       "status": "intentionally-excluded",
       "risk": "P1",
       "remediation_task": 8,
-      "evidence": "The MVP explicitly excludes the existing agent loop as its front door."
+      "evidence": "The legacy action-capable agent loop remains excluded as a product front door. Its new ask_text entrypoint supplies no tool schemas and rejects any provider-returned action."
     },
     {
       "id": "SB-009",
@@ -384,6 +384,26 @@
       "risk": "P1",
       "remediation_task": 4,
       "evidence": "Windows live proof showed workspace-only write access, no evidence mount, no host home, no Docker socket, no provider/browser/plugin credential, broker reachability, and no public network. Physical macOS proof remains required before pilot GO."
+    },
+    {
+      "id": "SB-020",
+      "title": "Native tool-less model question",
+      "entrypoint": "kerna ask <question>",
+      "initiator": "operator",
+      "controlled_inputs": ["question", "provider", "model", "provider API key"],
+      "operation": ["network", "credential", "external-service"],
+      "privileges": "The trusted Kerna CLI can send an operator-authored question to the selected provider; the model receives no tool schemas or execution authority.",
+      "enforcement_point": "Provider resolution, hidden credential prompt, empty tool catalog, and fail-closed rejection of action-bearing or empty responses",
+      "containment_boundary": "Trusted host process only. No agent container, filesystem tool, process tool, MCP tool, or repository mutation is available on this first native path.",
+      "receipt_coverage": "Prompts and model prose are intentionally not persisted; only a non-sensitive token count is printed to stderr.",
+      "failure_behavior": "Empty questions, missing credentials, provider errors, action-bearing replies, and empty replies terminate without executing an action.",
+      "platforms": ["windows", "macos", "linux"],
+      "tests": ["scheduler::tests::toolless_ask_accepts_text_and_rejects_action_or_empty_output", "kerna ask --provider mock smoke"],
+      "source_files": ["kernel/src/main.rs", "kernel/src/scheduler.rs", "kernel/src/providers.rs"],
+      "status": "trusted-host-only",
+      "risk": "P2",
+      "remediation_task": null,
+      "evidence": "The deterministic mock smoke returned plain text with no TUI, and the response validator rejects any attempted tool call. Moving provider traffic and key custody into the broker is required before this path gains tools."
     }
   ]
 }
