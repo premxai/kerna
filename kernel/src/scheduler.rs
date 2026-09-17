@@ -317,7 +317,7 @@ impl TaskScheduler {
         &self,
         prompt: &str,
         resolved: &crate::providers::ResolvedProvider,
-        mut emit: F,
+        emit: F,
     ) -> Result<u64>
     where
         F: FnMut(&str) -> Result<()>,
@@ -325,31 +325,64 @@ impl TaskScheduler {
         if prompt.trim().is_empty() {
             return Err(anyhow!("the question cannot be empty"));
         }
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(prompt.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        self.ask_messages_stream_resolved(&messages, resolved, emit)
+            .await
+    }
+
+    pub async fn ask_messages_stream_resolved<F>(
+        &self,
+        messages: &[ChatMessage],
+        resolved: &crate::providers::ResolvedProvider,
+        mut emit: F,
+    ) -> Result<u64>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        if messages
+            .last()
+            .and_then(|message| message.content.as_deref())
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            return Err(anyhow!("the question cannot be empty"));
+        }
+        if messages.iter().any(|message| {
+            message.tool_calls.is_some()
+                || message.tool_call_id.is_some()
+                || !matches!(message.role.as_str(), "user" | "assistant" | "system")
+        }) {
+            return Err(anyhow!(
+                "native chat history must remain text-only and tool-less"
+            ));
+        }
         match resolved.protocol {
             crate::providers::WireProtocol::Mock => {
-                let messages = vec![ChatMessage {
-                    role: "user".to_string(),
-                    content: Some(prompt.to_string()),
-                    tool_calls: None,
-                    tool_call_id: None,
-                }];
-                let (text, tokens) = validate_toolless_reply(call_mock(&messages)?.0, 10)?;
+                let (text, tokens) = validate_toolless_reply(call_mock(messages)?.0, 10)?;
                 emit(&text)?;
                 Ok(tokens)
             }
             crate::providers::WireProtocol::OpenAiCompat => {
-                self.stream_openai_compat(resolved, prompt, &mut emit).await
+                self.stream_openai_compat_messages(resolved, messages, &mut emit)
+                    .await
             }
             crate::providers::WireProtocol::Anthropic => {
-                self.stream_anthropic(resolved, prompt, &mut emit).await
+                self.stream_anthropic_messages(resolved, messages, &mut emit)
+                    .await
             }
         }
     }
 
-    async fn stream_openai_compat<F>(
+    async fn stream_openai_compat_messages<F>(
         &self,
         resolved: &crate::providers::ResolvedProvider,
-        prompt: &str,
+        messages: &[ChatMessage],
         emit: &mut F,
     ) -> Result<u64>
     where
@@ -361,7 +394,7 @@ impl TaskScheduler {
         );
         let body = json!({
             "model": resolved.model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "stream": true,
             "stream_options": {"include_usage": true}
         });
@@ -388,22 +421,26 @@ impl TaskScheduler {
         decoder.finish()
     }
 
-    async fn stream_anthropic<F>(
+    async fn stream_anthropic_messages<F>(
         &self,
         resolved: &crate::providers::ResolvedProvider,
-        prompt: &str,
+        messages: &[ChatMessage],
         emit: &mut F,
     ) -> Result<u64>
     where
         F: FnMut(&str) -> Result<()>,
     {
         let url = format!("{}/v1/messages", resolved.base_url.trim_end_matches('/'));
-        let body = json!({
+        let (system_prompt, anthropic_messages) = convert_to_anthropic(messages);
+        let mut body = json!({
             "model": resolved.model,
             "max_tokens": 4096,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": anthropic_messages,
             "stream": true
         });
+        if !system_prompt.is_empty() {
+            body["system"] = json!(system_prompt);
+        }
         let mut response = self
             .http_client
             .post(url)
@@ -2048,6 +2085,63 @@ mod tests {
             .to_string()
             .contains("tool-less"));
         assert!(validate_toolless_reply(msg("assistant", Some("   ")), 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn mock_chat_history_remains_text_only() {
+        let mut config = Config::default();
+        let temp = std::env::temp_dir().join(format!("kerna-chat-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        config.db_path = temp.join("memory.db").to_string_lossy().to_string();
+        config.sandbox_dir = temp.join("sandbox").to_string_lossy().to_string();
+        config.llm_provider = "mock".to_string();
+        config.llm_model = "mock".to_string();
+        let memory = Arc::new(MemoryEngine::new(&config.db_path).unwrap());
+        let scheduler = TaskScheduler::new(
+            config,
+            memory,
+            Arc::new(Mutex::new(McpRegistry::new())),
+            None,
+        )
+        .unwrap();
+        let resolved = crate::providers::ResolvedProvider {
+            name: "mock".to_string(),
+            protocol: crate::providers::WireProtocol::Mock,
+            base_url: "mock://local".to_string(),
+            api_key: String::new(),
+            model: "mock".to_string(),
+        };
+        let messages = vec![
+            msg("user", Some("hello")),
+            msg("assistant", Some("hi")),
+            msg("user", Some("continue")),
+        ];
+        let mut output = String::new();
+        let tokens = scheduler
+            .ask_messages_stream_resolved(&messages, &resolved, |delta| {
+                output.push_str(delta);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(tokens, 10);
+        assert_eq!(output, "Mock finished");
+
+        let mut action = msg("assistant", Some("attempting a tool"));
+        action.tool_calls = Some(vec![ToolCallRequest {
+            id: "call-1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "run_command".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }]);
+        let error = scheduler
+            .ask_messages_stream_resolved(&[msg("user", Some("go")), action], &resolved, |_| Ok(()))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("tool-less"));
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     fn decode_in_chunks(

@@ -14,8 +14,15 @@ pub enum NativeEvent {
     },
     #[serde(rename = "assistant.delta")]
     AssistantDelta { session_id: String, text: String },
+    #[serde(rename = "context.cleared")]
+    ContextCleared { session_id: String },
     #[serde(rename = "session.completed")]
     SessionCompleted { session_id: String, tokens: u64 },
+    #[serde(rename = "session.interrupted")]
+    SessionInterrupted {
+        session_id: String,
+        reason: &'static str,
+    },
     #[serde(rename = "session.failed")]
     SessionFailed {
         session_id: String,
@@ -43,9 +50,15 @@ impl EventRenderer {
                 print!("{text}");
                 io::stdout().flush()?;
             }
+            NativeEvent::ContextCleared { .. } => {
+                eprintln!("[i] in-memory context cleared");
+            }
             NativeEvent::SessionCompleted { tokens, .. } => {
                 println!();
-                eprintln!("[i] tool-less response · {tokens} tokens · prompt not persisted");
+                eprintln!("[i] tool-less response - {tokens} tokens - prompt not persisted");
+            }
+            NativeEvent::SessionInterrupted { .. } => {
+                eprintln!("\n[-] model request interrupted; broker cleanup is running");
             }
             NativeEvent::SessionFailed { .. } => {
                 eprintln!("[-] model request failed safely; prompt not persisted");
@@ -81,12 +94,29 @@ mod tests {
             tokens: 7,
         })
         .unwrap();
+        let interrupted = serde_json::to_value(NativeEvent::SessionInterrupted {
+            session_id: "session-1".to_string(),
+            reason: "ctrl_c",
+        })
+        .unwrap();
         let failed = serde_json::to_value(NativeEvent::SessionFailed {
             session_id: "session-1".to_string(),
             error_class: "provider_error",
         })
         .unwrap();
         assert_eq!(completed["type"], "session.completed");
+        assert_eq!(interrupted["type"], "session.interrupted");
         assert_eq!(failed["type"], "session.failed");
+    }
+
+    #[test]
+    fn context_clear_event_is_explicit_and_contains_no_transcript() {
+        let value = serde_json::to_value(NativeEvent::ContextCleared {
+            session_id: "session-1".to_string(),
+        })
+        .unwrap();
+        assert_eq!(value["type"], "context.cleared");
+        assert!(value.get("messages").is_none());
+        assert!(value.get("prompt").is_none());
     }
 }

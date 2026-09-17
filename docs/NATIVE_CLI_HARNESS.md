@@ -9,10 +9,10 @@ terminal interfaces.
 
 The implementation sequence is intentionally narrow:
 
-1. `kerna ask` — one tool-less question; no prompt or model-prose persistence.
-2. `kerna chat` — resumable text sessions with explicit context controls.
-3. `kerna code` — contained repository tools, receipts, approvals, diff review, and explicit apply.
-4. `--engine claude|codex` — optional certified headless harness adapters behind the same events.
+1. `kerna ask` - one tool-less question; no prompt or model-prose persistence.
+2. `kerna chat` - in-memory text sessions with explicit context controls.
+3. `kerna code` - contained repository tools, receipts, approvals, diff review, and explicit apply.
+4. `--engine claude|codex` - optional certified headless harness adapters behind the same events.
 
 ## First checkpoint: `kerna ask`
 
@@ -29,20 +29,38 @@ tool schemas, cannot mutate the workspace, and rejects any action-bearing provid
 Questions and model prose are not written to Kerna's task or evidence database.
 
 `--json` emits JSON Lines using the stable `session.started`, `assistant.delta`,
-`session.completed`, and `session.failed` vocabulary. Anthropic and OpenAI-compatible SSE text is
-decoded incrementally and emitted as provider deltas. Human output and JSON output are renderings of
-the same internal events. Malformed JSON, action-bearing events, and streams ending mid-event fail
-closed.
+`context.cleared`, `session.completed`, `session.interrupted`, and `session.failed` vocabulary.
+Anthropic and OpenAI-compatible SSE text is decoded incrementally and emitted as provider deltas.
+Human output and JSON output are renderings of the same internal events. Malformed JSON,
+action-bearing events, and streams ending mid-event fail closed.
 
 Provider I/O now leaves only from the broker's dedicated egress network. The CLI connects to a
 loopback-only published port using a random session credential; the broker accepts only the exact
 Anthropic Messages or OpenAI Chat Completions endpoint and provider domain. The provider key is
 held only in broker memory and never enters Docker metadata. Container and network cleanup is
-RAII-bound to success, provider failure, malformed streams, and early CLI exit.
+RAII-bound to success, provider failure, malformed streams, Ctrl+C, and early CLI exit.
 
 This completes the credential and egress boundary for the tool-less command. It does not authorize
 tools: adding tools requires canonical actions, containment, policy, approval, and pre-release
 receipts as a separate checkpoint.
+
+## Second checkpoint: `kerna chat`
+
+```text
+kerna chat --provider anthropic
+kerna chat --provider openai --model <model>
+kerna chat --provider mock --json
+```
+
+`kerna chat` keeps one broker alive for one terminal session and rotates the scoped provider
+credential on the next launch. Chat history is held only in process memory. `/clear` discards that
+in-memory history and emits `context.cleared`; `/exit` and EOF end the session. There is no default
+transcript file, task row, or evidence row containing prompts or model prose.
+
+The chat path still accepts only text turns. Any tool-shaped history, provider tool delta, malformed
+SSE, empty answer, provider failure, or Ctrl+C terminates fail-closed. No tools, repository writes,
+MCP calls, shell commands, browser mutations, or package/network authority are introduced by this
+checkpoint.
 
 ## Stable internal event direction
 
@@ -51,6 +69,7 @@ Later interactive and automated clients will consume one structured event vocabu
 ```text
 session.started
 assistant.delta
+context.cleared
 tool.requested
 approval.required
 tool.released

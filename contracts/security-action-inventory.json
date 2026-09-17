@@ -387,23 +387,23 @@
     },
     {
       "id": "SB-020",
-      "title": "Native tool-less model question",
-      "entrypoint": "kerna ask <question>",
+      "title": "Native tool-less model question and chat",
+      "entrypoint": "kerna ask <question>; kerna chat",
       "initiator": "operator",
-      "controlled_inputs": ["question", "provider", "model", "provider API key"],
+      "controlled_inputs": ["question", "chat turns", "provider", "model", "provider API key"],
       "operation": ["network", "credential", "external-service"],
-      "privileges": "The trusted Kerna CLI can send an operator-authored question through a scoped localhost session; only the short-lived broker receives the provider key and provider-network egress, while the model receives no tool schemas or execution authority.",
-      "enforcement_point": "Provider allowlist, hidden credential prompt, stdin-only broker key injection, scoped session authentication, loopback-only publication, empty tool catalog, incremental SSE validation, and fail-closed rejection of action-bearing, malformed, truncated, or empty responses",
-      "containment_boundary": "Provider credentials and outbound provider traffic are contained in a hardened broker container on a dedicated egress network. The host CLI holds only the operator prompt and scoped broker credential; no filesystem tool, process tool, MCP tool, or repository mutation is available.",
-      "receipt_coverage": "Prompts and model prose are intentionally not persisted. Stable session events report start, deltas, completion, or a redacted failure class without retaining content.",
-      "failure_behavior": "Empty questions, missing credentials, broker startup failure, provider errors, action-bearing replies, malformed or empty replies terminate without executing an action; the exact broker container and network are removed on every return path.",
+      "privileges": "The trusted Kerna CLI can send operator-authored text through a scoped localhost session; only the short-lived broker receives the provider key and provider-network egress, while the model receives no tool schemas or execution authority.",
+      "enforcement_point": "Provider allowlist, hidden credential prompt, stdin-only broker key injection, scoped session authentication, loopback-only publication, empty tool catalog, text-only chat history validation, incremental SSE validation, and fail-closed rejection of action-bearing, malformed, truncated, or empty responses",
+      "containment_boundary": "Provider credentials and outbound provider traffic are contained in a hardened broker container on a dedicated egress network. The host CLI holds only the operator prompt/history, scoped broker credential, and renderer state; no filesystem tool, process tool, MCP tool, or repository mutation is available.",
+      "receipt_coverage": "Prompts, chat history, and model prose are intentionally not persisted. Stable session events report start, deltas, context clearing, completion, interruption, or a redacted failure class without retaining content.",
+      "failure_behavior": "Empty questions, non-text/tool-shaped chat history, missing credentials, broker startup failure, Ctrl+C, provider errors, action-bearing replies, malformed or empty replies terminate without executing an action; the exact broker container and network are removed on every return path.",
       "platforms": ["windows", "macos", "linux"],
-      "tests": ["native_cli::tests::event_json_is_stable_and_contains_no_prompt_field", "native_cli::tests::terminal_event_vocabulary_is_explicit", "scheduler::tests::toolless_ask_accepts_text_and_rejects_action_or_empty_output", "scheduler::tests::openai_text_stream_is_exact_across_every_chunk_size", "scheduler::tests::anthropic_text_stream_is_exact_across_every_chunk_size", "scheduler::tests::toolless_stream_rejects_actions_malformed_json_and_truncation", "server::tests::native_model_plane_accepts_only_well_formed_toolless_requests", "guard_launcher::tests::native_broker_is_loopback_only_and_provider_key_never_enters_metadata", "kerna ask --provider mock --json smoke", "Windows inert-key broker lifecycle probe"],
+      "tests": ["native_cli::tests::event_json_is_stable_and_contains_no_prompt_field", "native_cli::tests::terminal_event_vocabulary_is_explicit", "native_cli::tests::context_clear_event_is_explicit_and_contains_no_transcript", "scheduler::tests::toolless_ask_accepts_text_and_rejects_action_or_empty_output", "scheduler::tests::mock_chat_history_remains_text_only", "scheduler::tests::openai_text_stream_is_exact_across_every_chunk_size", "scheduler::tests::anthropic_text_stream_is_exact_across_every_chunk_size", "scheduler::tests::toolless_stream_rejects_actions_malformed_json_and_truncation", "server::tests::native_model_plane_accepts_only_well_formed_toolless_requests", "guard_launcher::tests::native_broker_is_loopback_only_and_provider_key_never_enters_metadata", "kerna ask --provider mock --json smoke", "kerna chat --provider mock --json smoke", "Windows inert-key broker lifecycle probe"],
       "source_files": ["kernel/src/main.rs", "kernel/src/native_cli.rs", "kernel/src/scheduler.rs", "kernel/src/providers.rs", "kernel/src/guard_launcher.rs", "kernel/src/server.rs"],
       "status": "contained",
       "risk": "P2",
       "remediation_task": null,
-      "evidence": "The deterministic mock smoke returned canonical JSONL with no TUI or prompt field. Anthropic and OpenAI-compatible fixtures produce exact text across every fixed chunk size, while action-bearing, malformed, and truncated streams fail closed. A Windows inert-key probe reached only the loopback broker, emitted a redacted terminal failure, and left zero native broker containers or egress networks; the provider key was supplied over stdin and absent from container arguments. Provider-backed success remains a separate live acceptance gate before release."
+      "evidence": "The deterministic ask/chat mock smokes returned canonical JSONL with no TUI, prompt, transcript, or tool field. Anthropic and OpenAI-compatible fixtures produce exact text across every fixed chunk size, while action-bearing, malformed, truncated, and tool-shaped history paths fail closed. Ctrl+C emits session.interrupted and drops the same RAII broker guard used by provider failure. A Windows inert-key probe reached only the loopback broker, emitted a redacted terminal failure, and left zero native broker containers or egress networks; the provider key was supplied over stdin and absent from container arguments. Provider-backed success remains a separate live acceptance gate before release."
     }
   ]
 }

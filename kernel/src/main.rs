@@ -104,6 +104,16 @@ enum QuickCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Chat with a model through one tool-less native broker session.
+    Chat {
+        #[arg(long, default_value = "anthropic", value_parser = ["anthropic", "openai", "mock"])]
+        provider: String,
+        #[arg(long)]
+        model: Option<String>,
+        /// Emit stable JSON Lines events instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Scan system, model, sandbox, and repository readiness.
     Doctor {
         #[arg(long, default_value = ".")]
@@ -1386,6 +1396,7 @@ fn print_quick_help() {
     println!("  kerna                         Start governed Claude (auto route + local shadow)");
     println!("  kerna doctor                  Check hardware, models, keys, and sandboxes");
     println!("  kerna ask \"<question>\"       Ask a model without granting tools");
+    println!("  kerna chat                   Chat with in-memory context and no tools");
     println!("  kerna claude --route local   Force private local inference");
     println!("  kerna sandbox                Run bounded Python in Wasmer");
     println!("  kerna replay <evidence.json> Open signed read-only evidence");
@@ -1412,6 +1423,305 @@ fn main() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("Kerna runtime thread panicked"))?
 }
 
+fn build_native_toolless_runtime(
+    provider: &str,
+    model: Option<String>,
+) -> Result<(
+    TaskScheduler,
+    Option<guard_launcher::NativeAskBroker>,
+    Option<providers::ResolvedProvider>,
+    String,
+)> {
+    let mut config = Config::load();
+    config.llm_provider = provider.to_string();
+    if let Some(model) = model {
+        config.llm_model = model;
+    } else if provider == "mock" {
+        config.llm_model = "mock".to_string();
+    } else if let Some(preset) = providers::preset_info(provider) {
+        config.llm_model = preset.default_model;
+    }
+    let key_env = providers::api_key_env_for(&config, provider);
+    let provider_key = if provider == "mock" {
+        zeroize::Zeroizing::new(String::new())
+    } else if let Some(key) = std::env::var(&key_env)
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+    {
+        zeroize::Zeroizing::new(key)
+    } else {
+        zeroize::Zeroizing::new(
+            dialoguer::Password::new()
+                .with_prompt(format!(
+                    "{} API key (sent to the trusted broker over stdin)",
+                    provider
+                ))
+                .interact()?,
+        )
+    };
+    if provider != "mock" && provider_key.trim().is_empty() {
+        return Err(anyhow::anyhow!("{provider} API key cannot be empty"));
+    }
+    config.llm_api_key.clear();
+    let event_model = config.llm_model.clone();
+    let memory = Arc::new(MemoryEngine::new(&config.db_path)?);
+    let scheduler = TaskScheduler::new(
+        config,
+        memory,
+        Arc::new(Mutex::new(McpRegistry::new())),
+        None,
+    )?;
+    let broker = if provider == "mock" {
+        None
+    } else {
+        Some(guard_launcher::start_native_ask_broker(
+            std::path::Path::new("."),
+            provider,
+            provider_key.as_str(),
+        )?)
+    };
+    drop(provider_key);
+    let broker_provider = broker.as_ref().map(|broker| providers::ResolvedProvider {
+        name: provider.to_string(),
+        protocol: if provider == "anthropic" {
+            providers::WireProtocol::Anthropic
+        } else {
+            providers::WireProtocol::OpenAiCompat
+        },
+        base_url: broker.base_url.clone(),
+        api_key: broker.session_token.clone(),
+        model: event_model.clone(),
+    });
+    Ok((scheduler, broker, broker_provider, event_model))
+}
+
+fn emit_native_event(
+    renderer: &Arc<std::sync::Mutex<native_cli::EventRenderer>>,
+    event: &native_cli::NativeEvent,
+) -> Result<()> {
+    renderer
+        .lock()
+        .map_err(|_| anyhow::anyhow!("native event renderer lock poisoned"))?
+        .emit(event)
+}
+
+async fn run_native_ask(
+    question: String,
+    provider: String,
+    model: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let (scheduler, broker, broker_provider, event_model) =
+        build_native_toolless_runtime(&provider, model)?;
+    let session_id = format!("ask-{}", uuid::Uuid::new_v4());
+    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
+    emit_native_event(
+        &renderer,
+        &native_cli::NativeEvent::SessionStarted {
+            session_id: session_id.clone(),
+            provider,
+            model: event_model,
+            tool_authority: "none",
+        },
+    )?;
+    let stream_session = session_id.clone();
+    let stream_renderer = Arc::clone(&renderer);
+    let stream = move |text: &str| {
+        emit_native_event(
+            &stream_renderer,
+            &native_cli::NativeEvent::AssistantDelta {
+                session_id: stream_session.clone(),
+                text: text.to_string(),
+            },
+        )
+    };
+    let request = async {
+        if let Some(resolved) = broker_provider.as_ref() {
+            scheduler
+                .ask_stream_resolved(&question, resolved, stream)
+                .await
+        } else {
+            scheduler.ask_stream(&question, stream).await
+        }
+    };
+    let result = tokio::select! {
+        result = request => result,
+        interrupt = tokio::signal::ctrl_c() => {
+            let _ = interrupt;
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::SessionInterrupted {
+                    session_id,
+                    reason: "ctrl_c",
+                },
+            )?;
+            drop(broker);
+            return Err(anyhow::anyhow!("native model request interrupted"));
+        }
+    };
+    let _broker_guard = broker.as_ref();
+    match result {
+        Ok(tokens) => emit_native_event(
+            &renderer,
+            &native_cli::NativeEvent::SessionCompleted { session_id, tokens },
+        )?,
+        Err(error) => {
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::SessionFailed {
+                    session_id,
+                    error_class: "provider_error",
+                },
+            )?;
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+async fn run_native_chat(provider: String, model: Option<String>, json: bool) -> Result<()> {
+    use std::io::{self, Write};
+
+    let (scheduler, broker, broker_provider, event_model) =
+        build_native_toolless_runtime(&provider, model)?;
+    let session_id = format!("chat-{}", uuid::Uuid::new_v4());
+    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
+    emit_native_event(
+        &renderer,
+        &native_cli::NativeEvent::SessionStarted {
+            session_id: session_id.clone(),
+            provider,
+            model: event_model,
+            tool_authority: "none",
+        },
+    )?;
+    if !json {
+        eprintln!("[i] /clear forgets in-memory context; /exit quits; transcripts are not stored");
+    }
+    let mut messages: Vec<scheduler::ChatMessage> = Vec::new();
+    let mut total_tokens = 0_u64;
+    loop {
+        if !json {
+            print!("kerna> ");
+            io::stdout().flush()?;
+        }
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input)? == 0 {
+            break;
+        }
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
+        if matches!(input, "/exit" | "/quit") {
+            break;
+        }
+        if input == "/clear" {
+            messages.clear();
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::ContextCleared {
+                    session_id: session_id.clone(),
+                },
+            )?;
+            continue;
+        }
+        if input == "/help" {
+            if !json {
+                eprintln!("/clear forgets context; /exit quits; no tools are available");
+            }
+            continue;
+        }
+        messages.push(scheduler::ChatMessage {
+            role: "user".to_string(),
+            content: Some(input.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        let mut assistant_text = String::new();
+        let stream_session = session_id.clone();
+        let stream_renderer = Arc::clone(&renderer);
+        let stream = |text: &str| {
+            assistant_text.push_str(text);
+            emit_native_event(
+                &stream_renderer,
+                &native_cli::NativeEvent::AssistantDelta {
+                    session_id: stream_session.clone(),
+                    text: text.to_string(),
+                },
+            )
+        };
+        let request = async {
+            if let Some(resolved) = broker_provider.as_ref() {
+                scheduler
+                    .ask_messages_stream_resolved(&messages, resolved, stream)
+                    .await
+            } else {
+                let resolved = providers::ResolvedProvider {
+                    name: "mock".to_string(),
+                    protocol: providers::WireProtocol::Mock,
+                    base_url: "mock://local".to_string(),
+                    api_key: String::new(),
+                    model: "mock".to_string(),
+                };
+                scheduler
+                    .ask_messages_stream_resolved(&messages, &resolved, stream)
+                    .await
+            }
+        };
+        let result = tokio::select! {
+            result = request => result,
+            interrupt = tokio::signal::ctrl_c() => {
+                let _ = interrupt;
+                emit_native_event(
+                    &renderer,
+                    &native_cli::NativeEvent::SessionInterrupted {
+                        session_id,
+                        reason: "ctrl_c",
+                    },
+                )?;
+                drop(broker);
+                return Err(anyhow::anyhow!("native chat interrupted"));
+            }
+        };
+        let _broker_guard = broker.as_ref();
+        match result {
+            Ok(tokens) => {
+                total_tokens = total_tokens.saturating_add(tokens);
+                if !json {
+                    println!();
+                }
+                messages.push(scheduler::ChatMessage {
+                    role: "assistant".to_string(),
+                    content: Some(assistant_text),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+            Err(error) => {
+                messages.pop();
+                emit_native_event(
+                    &renderer,
+                    &native_cli::NativeEvent::SessionFailed {
+                        session_id: session_id.clone(),
+                        error_class: "provider_error",
+                    },
+                )?;
+                return Err(error);
+            }
+        }
+    }
+    emit_native_event(
+        &renderer,
+        &native_cli::NativeEvent::SessionCompleted {
+            session_id,
+            tokens: total_tokens,
+        },
+    )?;
+    drop(broker);
+    Ok(())
+}
+
 async fn async_main() -> Result<()> {
     // We rely on the local ctrl_c wait in Daemon instead of global exit(0)
     let arguments = std::env::args_os().collect::<Vec<_>>();
@@ -1436,7 +1746,7 @@ async fn async_main() -> Result<()> {
     }
     let uses_quick_parser = matches!(
         first,
-        Some("ask" | "claude" | "sandbox" | "replay" | "skills" | "dashboard")
+        Some("ask" | "chat" | "claude" | "sandbox" | "replay" | "skills" | "dashboard")
     ) || (first == Some("doctor")
         && !arguments.iter().any(|arg| arg == "--gateway"));
     if uses_quick_parser {
@@ -1446,104 +1756,12 @@ async fn async_main() -> Result<()> {
                 provider,
                 model,
                 json,
-            } => {
-                let mut config = Config::load();
-                config.llm_provider = provider.clone();
-                if let Some(model) = model {
-                    config.llm_model = model;
-                } else if provider == "mock" {
-                    config.llm_model = "mock".to_string();
-                } else if let Some(preset) = providers::preset_info(&provider) {
-                    config.llm_model = preset.default_model;
-                }
-                let key_env = providers::api_key_env_for(&config, &provider);
-                let provider_key = if provider == "mock" {
-                    zeroize::Zeroizing::new(String::new())
-                } else if let Some(key) = std::env::var(&key_env)
-                    .ok()
-                    .filter(|key| !key.trim().is_empty())
-                {
-                    zeroize::Zeroizing::new(key)
-                } else {
-                    zeroize::Zeroizing::new(
-                        dialoguer::Password::new()
-                            .with_prompt(format!(
-                                "{} API key (sent to the trusted broker over stdin)",
-                                provider
-                            ))
-                            .interact()?,
-                    )
-                };
-                config.llm_api_key.clear();
-                let event_model = config.llm_model.clone();
-                let memory = Arc::new(MemoryEngine::new(&config.db_path)?);
-                let scheduler = TaskScheduler::new(
-                    config,
-                    memory,
-                    Arc::new(Mutex::new(McpRegistry::new())),
-                    None,
-                )?;
-                let broker = if provider == "mock" {
-                    None
-                } else {
-                    Some(guard_launcher::start_native_ask_broker(
-                        std::path::Path::new("."),
-                        &provider,
-                        provider_key.as_str(),
-                    )?)
-                };
-                drop(provider_key);
-                let broker_provider = broker.as_ref().map(|broker| providers::ResolvedProvider {
-                    name: provider.clone(),
-                    protocol: if provider == "anthropic" {
-                        providers::WireProtocol::Anthropic
-                    } else {
-                        providers::WireProtocol::OpenAiCompat
-                    },
-                    base_url: broker.base_url.clone(),
-                    api_key: broker.session_token.clone(),
-                    model: event_model.clone(),
-                });
-                let session_id = format!("ask-{}", uuid::Uuid::new_v4());
-                let mut renderer = native_cli::EventRenderer::new(json);
-                renderer.emit(&native_cli::NativeEvent::SessionStarted {
-                    session_id: session_id.clone(),
-                    provider,
-                    model: event_model,
-                    tool_authority: "none",
-                })?;
-                let stream = |text: &str| {
-                    renderer.emit(&native_cli::NativeEvent::AssistantDelta {
-                        session_id: session_id.clone(),
-                        text: text.to_string(),
-                    })
-                };
-                let result = if let Some(resolved) = broker_provider.as_ref() {
-                    scheduler
-                        .ask_stream_resolved(&question, resolved, stream)
-                        .await
-                } else {
-                    scheduler.ask_stream(&question, stream).await
-                };
-                // Keep the broker/container RAII guard alive until the response
-                // body has been consumed or the request has failed terminally.
-                let _broker_guard = broker.as_ref();
-                match result {
-                    Ok(tokens) => {
-                        renderer.emit(&native_cli::NativeEvent::SessionCompleted {
-                            session_id,
-                            tokens,
-                        })?;
-                    }
-                    Err(error) => {
-                        renderer.emit(&native_cli::NativeEvent::SessionFailed {
-                            session_id,
-                            error_class: "provider_error",
-                        })?;
-                        return Err(error);
-                    }
-                }
-            }
+            } => run_native_ask(question, provider, model, json).await?,
+            QuickCommand::Chat {
+                provider,
+                model,
+                json,
+            } => run_native_chat(provider, model, json).await?,
             QuickCommand::Doctor { repo, brief } => {
                 if !(if brief {
                     guard_launcher::print_doctor_brief(true, Some(&repo)).await
