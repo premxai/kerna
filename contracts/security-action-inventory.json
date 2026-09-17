@@ -1,7 +1,7 @@
 {
   "$schema": "./security-action-inventory.schema.json",
   "version": 1,
-  "reviewed_commit": "184fbc8",
+  "reviewed_commit": "97a5dc1",
   "statuses": ["governed", "contained", "trusted-host-only", "intentionally-excluded", "open-bypass"],
   "sensitive_patterns": ["Command::new", "reqwest::", "TcpStream", "std::fs::", "tokio::fs::", "rusqlite", "docker", "wasmer", "env::var", "set_var", "remove_var"],
   "entries": [
@@ -333,17 +333,17 @@
       "controlled_inputs": ["redacted metadata", "digests", "state transitions", "database path"],
       "operation": ["filesystem", "evidence"],
       "privileges": "Trusted Kerna process writes the configured local SQLite evidence database.",
-      "enforcement_point": "Prepared statements, mandatory pre-action transactions, redaction, append-only receipt hash chain",
-      "containment_boundary": "Trusted local evidence store outside agent write authority.",
+      "enforcement_point": "Broker-only state mount, trusted KERNA_DB_PATH override, prepared statements, mandatory pre-action transactions, redaction, append-only receipt hash chain",
+      "containment_boundary": "The evidence directory is a sibling of the disposable worktree, mounted only at /kerna-state in the broker. The agent receives only the worktree mount.",
       "receipt_coverage": "This is the receipt system of record.",
       "failure_behavior": "Receipt persistence failure blocks action release and visibly degrades or halts the session.",
       "platforms": ["windows", "macos", "linux"],
-      "tests": ["memory::tests::test_sabotage_db_concurrency", "memory::tests::test_event_payload_credentials_are_redacted_before_persistence", "trust_layer_validation::test_queued_approval_is_recorded_before_tool_execution"],
-      "source_files": ["kernel/src/memory.rs", "kernel/src/events.rs"],
+      "tests": ["guard_launcher::tests::production_evidence_state_is_outside_the_agent_workspace", "guard_launcher::tests::evidence_mount_is_broker_only_and_never_part_of_agent_arguments", "memory::tests::test_sabotage_db_concurrency", "memory::tests::test_event_payload_credentials_are_redacted_before_persistence", "trust_layer_validation::test_queued_approval_is_recorded_before_tool_execution", "scripts/test-claude-container-boundary.ps1", "scripts/test-claude-container-boundary.sh"],
+      "source_files": ["kernel/src/guard_launcher.rs", "kernel/src/memory.rs", "kernel/src/events.rs"],
       "status": "governed",
       "risk": "P1",
       "remediation_task": 8,
-      "evidence": "Database integrity is tested; filesystem ACL and agent non-access must be proven in the final container topology."
+      "evidence": "The production broker gets a dedicated evidence mount outside the worktree. Static argument tests and the live Windows container probe prove the agent has neither /kerna-state nor the former workspace database path. Database concurrency, redaction, mandatory pre-release commit, and hash-chain tests remain green. Physical macOS proof is a release gate."
     },
     {
       "id": "SB-018",
@@ -370,20 +370,20 @@
       "title": "Production Claude agent container",
       "entrypoint": "kerna claude and kerna guard claude without --host-demo",
       "initiator": "agent",
-      "controlled_inputs": ["native shell and file tools", "repository instructions", "MCP configuration", "model-issued actions"],
+      "controlled_inputs": ["native shell and file tools", "repository instructions", "model-issued actions"],
       "operation": ["filesystem", "process", "network", "credential", "container", "evidence"],
       "privileges": "The agent can write only the disposable workspace and can connect only to the Kerna broker on an internal Docker network.",
       "enforcement_point": "Digest-pinned base images, exact package/base provenance labels, canonical image ID, one bind mount, read-only root, dropped capabilities, no-new-privileges, scoped session credential, and separate Docker networks",
       "containment_boundary": "Claude runs in an agent container attached only to an internal network; the broker runs separately on both the internal and egress networks.",
-      "receipt_coverage": "Protocol and MCP actions retain existing receipt coverage; native execution remains confined to the disposable container workspace.",
+      "receipt_coverage": "Production native actions are protocol-gated and receipt-bound; execution remains confined to the disposable workspace. Production no longer launches an agent-local MCP gateway with evidence-store access.",
       "failure_behavior": "Missing or mislabeled image, unsupported local/shadow route, Docker failure, broker failure, or network setup failure aborts before Claude starts.",
       "platforms": ["windows", "macos"],
-      "tests": ["guard_launcher::tests::agent_image_provenance_rejects_relabelled_or_mutable_inputs", "guard_launcher::tests::production_container_contract_exposes_only_the_disposable_workspace", "guard_launcher::tests::container_contract_uses_only_container_paths", "guard_launcher::tests::production_launch_refuses_routes_that_need_host_services", "scripts/build-claude-agent-image.ps1", "scripts/build-claude-agent-image.sh", "scripts/test-claude-container-boundary.ps1", "scripts/test-claude-container-boundary.sh"],
+      "tests": ["guard_launcher::tests::agent_image_provenance_rejects_relabelled_or_mutable_inputs", "guard_launcher::tests::production_container_contract_exposes_only_the_disposable_workspace", "guard_launcher::tests::production_evidence_state_is_outside_the_agent_workspace", "guard_launcher::tests::evidence_mount_is_broker_only_and_never_part_of_agent_arguments", "guard_launcher::tests::production_launch_refuses_routes_that_need_host_services", "scripts/build-claude-agent-image.ps1", "scripts/build-claude-agent-image.sh", "scripts/test-claude-container-boundary.ps1", "scripts/test-claude-container-boundary.sh"],
       "source_files": ["kernel/src/guard_launcher.rs", "kernel/src/main.rs"],
       "status": "contained",
       "risk": "P1",
       "remediation_task": 4,
-      "evidence": "Windows live proof showed workspace-only write access, no host home, no Docker socket, no provider key, broker reachability, and no public network. Physical macOS proof remains required before pilot GO."
+      "evidence": "Windows live proof showed workspace-only write access, no evidence mount, no host home, no Docker socket, no provider/browser/plugin credential, broker reachability, and no public network. Physical macOS proof remains required before pilot GO."
     }
   ]
 }
