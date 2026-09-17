@@ -1,3 +1,4 @@
+mod artifact;
 pub mod budget;
 mod client;
 mod config;

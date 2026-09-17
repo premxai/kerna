@@ -12,6 +12,12 @@ use zeroize::Zeroizing;
 pub const PINNED_CLAUDE_CODE_VERSION: &str = "2.1.270";
 pub const CLAUDE_AGENT_IMAGE: &str = "kerna-claude-agent:0.2.9-claude-2.1.270";
 const CLAUDE_AGENT_CONTRACT: &str = "claude-agent-v1";
+const CLAUDE_PACKAGE_SPEC: &str = "@anthropic-ai/claude-code@2.1.270";
+const CLAUDE_PACKAGE_INTEGRITY: &str = "sha512-0zMkfIWQu7/SG56VP8r780HZWvrNShzK28AbAnhKRK0ns+ToGXPT0W8UqyZmZCUKAkJDd5//TrwSOhk1+hysiw==";
+const RUST_BASE_DIGEST: &str =
+    "sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0";
+const NODE_BASE_DIGEST: &str =
+    "sha256:8a34c4ab3ea2c5cd194f07e317b2a8f09461d3c8b05c4e34c8ccd56d56024c4d";
 const BROKER_PORT: u16 = 8766;
 const DASHBOARD_PORT: u16 = 8877;
 
@@ -695,7 +701,7 @@ fn verified_agent_image_id() -> Result<String> {
             "inspect",
             CLAUDE_AGENT_IMAGE,
             "--format",
-            "{{.Id}}|{{index .Config.Labels \"dev.kerna.contract\"}}|{{index .Config.Labels \"dev.kerna.claude-code-version\"}}",
+            "{{.Id}}|{{index .Config.Labels \"dev.kerna.contract\"}}|{{index .Config.Labels \"dev.kerna.claude-code-version\"}}|{{index .Config.Labels \"dev.kerna.claude-package\"}}|{{index .Config.Labels \"dev.kerna.claude-package-integrity\"}}|{{index .Config.Labels \"dev.kerna.rust-base-digest\"}}|{{index .Config.Labels \"dev.kerna.node-base-digest\"}}",
         ])
         .output()
         .context("could not inspect the pinned Kerna Claude agent image")?;
@@ -704,17 +710,33 @@ fn verified_agent_image_id() -> Result<String> {
             "the contained Claude image is unavailable; run scripts/build-claude-agent-image before a production session"
         ));
     }
-    let rendered = String::from_utf8(output.stdout)?;
+    validate_agent_image_inspection(&String::from_utf8(output.stdout)?)
+}
+
+fn validate_agent_image_inspection(rendered: &str) -> Result<String> {
     let mut fields = rendered.trim().split('|');
     let image_id = fields.next().unwrap_or_default();
     let contract = fields.next().unwrap_or_default();
     let version = fields.next().unwrap_or_default();
+    let package = fields.next().unwrap_or_default();
+    let package_integrity = fields.next().unwrap_or_default();
+    let rust_base = fields.next().unwrap_or_default();
+    let node_base = fields.next().unwrap_or_default();
     if !image_id.starts_with("sha256:")
+        || image_id.len() != 71
+        || !image_id[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         || contract != CLAUDE_AGENT_CONTRACT
         || version != PINNED_CLAUDE_CODE_VERSION
+        || package != CLAUDE_PACKAGE_SPEC
+        || package_integrity != CLAUDE_PACKAGE_INTEGRITY
+        || rust_base != RUST_BASE_DIGEST
+        || node_base != NODE_BASE_DIGEST
+        || fields.next().is_some()
     {
         return Err(anyhow!(
-            "Claude agent image labels do not match the reviewed Kerna contract"
+            "Claude agent image provenance does not match the reviewed Kerna contract"
         ));
     }
     Ok(image_id.to_string())
@@ -1277,6 +1299,32 @@ mod tests {
         assert_eq!(route_name(RouteMode::Auto), "auto");
         assert_eq!(route_name(RouteMode::Local), "local");
         assert_eq!(route_name(RouteMode::Cloud), "cloud");
+    }
+
+    #[test]
+    fn agent_image_provenance_rejects_relabelled_or_mutable_inputs() {
+        let valid = format!(
+            "sha256:{}|{}|{}|{}|{}|{}|{}",
+            "1".repeat(64),
+            CLAUDE_AGENT_CONTRACT,
+            PINNED_CLAUDE_CODE_VERSION,
+            CLAUDE_PACKAGE_SPEC,
+            CLAUDE_PACKAGE_INTEGRITY,
+            RUST_BASE_DIGEST,
+            NODE_BASE_DIGEST
+        );
+        assert!(validate_agent_image_inspection(&valid).is_ok());
+        assert!(validate_agent_image_inspection(
+            &valid.replace(CLAUDE_PACKAGE_SPEC, "@anthropic-ai/claude-code@latest")
+        )
+        .is_err());
+        assert!(validate_agent_image_inspection(
+            &valid.replace(NODE_BASE_DIGEST, "sha256:tampered")
+        )
+        .is_err());
+        assert!(
+            validate_agent_image_inspection(&valid.replace("sha256:1111", "tag:1111")).is_err()
+        );
     }
 
     #[test]
