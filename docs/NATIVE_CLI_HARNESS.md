@@ -19,12 +19,18 @@ The implementation sequence is intentionally narrow:
 ```text
 kerna ask "Explain this error" --provider anthropic
 kerna ask "Summarize this design" --provider openai --model <model>
+kerna ask "Summarize this design" --provider mock --json
 ```
 
 The selected provider key comes from that provider's declared environment variable or a hidden
 per-request prompt. It is never accepted as a command-line argument. The request contains no tool
 schemas, cannot mutate the workspace, and rejects any action-bearing provider response. Questions
 and model prose are not written to Kerna's task or evidence database.
+
+`--json` emits JSON Lines using the stable `session.started`, `assistant.delta`,
+`session.completed`, and `session.failed` vocabulary. Current provider adapters emit the completed
+answer as one `assistant.delta`; true provider-delta streaming is the next checkpoint. Human output
+and JSON output are renderings of the same internal events.
 
 This checkpoint uses the trusted host process for provider I/O. It must move provider traffic and
 key custody into the trusted broker before any native path receives tools.

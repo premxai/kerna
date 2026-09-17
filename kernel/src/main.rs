@@ -21,6 +21,7 @@ mod mcp_registry;
 mod memory;
 mod mockmcp;
 mod models;
+mod native_cli;
 mod onboarding;
 mod packs;
 mod permissions;
@@ -99,6 +100,9 @@ enum QuickCommand {
         provider: String,
         #[arg(long)]
         model: Option<String>,
+        /// Emit stable JSON Lines events instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
     /// Scan system, model, sandbox, and repository readiness.
     Doctor {
@@ -1437,11 +1441,14 @@ async fn async_main() -> Result<()> {
                 question,
                 provider,
                 model,
+                json,
             } => {
                 let mut config = Config::load();
                 config.llm_provider = provider.clone();
                 if let Some(model) = model {
                     config.llm_model = model;
+                } else if provider == "mock" {
+                    config.llm_model = "mock".to_string();
                 } else if let Some(preset) = providers::preset_info(&provider) {
                     config.llm_model = preset.default_model;
                 }
@@ -1461,6 +1468,7 @@ async fn async_main() -> Result<()> {
                 } else {
                     config.llm_api_key.clear();
                 }
+                let event_model = config.llm_model.clone();
                 let memory = Arc::new(MemoryEngine::new(&config.db_path)?);
                 let scheduler = TaskScheduler::new(
                     config,
@@ -1468,9 +1476,33 @@ async fn async_main() -> Result<()> {
                     Arc::new(Mutex::new(McpRegistry::new())),
                     None,
                 )?;
-                let (answer, tokens) = scheduler.ask_text(&question).await?;
-                println!("{answer}");
-                eprintln!("[i] tool-less response · {tokens} tokens · prompt not persisted");
+                let session_id = format!("ask-{}", uuid::Uuid::new_v4());
+                let mut renderer = native_cli::EventRenderer::new(json);
+                renderer.emit(&native_cli::NativeEvent::SessionStarted {
+                    session_id: session_id.clone(),
+                    provider,
+                    model: event_model,
+                    tool_authority: "none",
+                })?;
+                match scheduler.ask_text(&question).await {
+                    Ok((answer, tokens)) => {
+                        renderer.emit(&native_cli::NativeEvent::AssistantDelta {
+                            session_id: session_id.clone(),
+                            text: answer,
+                        })?;
+                        renderer.emit(&native_cli::NativeEvent::SessionCompleted {
+                            session_id,
+                            tokens,
+                        })?;
+                    }
+                    Err(error) => {
+                        renderer.emit(&native_cli::NativeEvent::SessionFailed {
+                            session_id,
+                            error_class: "provider_error",
+                        })?;
+                        return Err(error);
+                    }
+                }
             }
             QuickCommand::Doctor { repo, brief } => {
                 if !(if brief {
