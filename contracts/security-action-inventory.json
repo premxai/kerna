@@ -1,7 +1,7 @@
 {
   "$schema": "./security-action-inventory.schema.json",
   "version": 1,
-  "reviewed_commit": "97a5dc1",
+  "reviewed_commit": "a23692d",
   "statuses": ["governed", "contained", "trusted-host-only", "intentionally-excluded", "open-bypass"],
   "sensitive_patterns": ["Command::new", "reqwest::", "TcpStream", "std::fs::", "tokio::fs::", "rusqlite", "docker", "wasmer", "env::var", "set_var", "remove_var"],
   "entries": [
