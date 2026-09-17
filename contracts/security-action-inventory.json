@@ -178,12 +178,12 @@
       "receipt_coverage": "Session and route outcomes are recorded; provider prose and keys are not persisted.",
       "failure_behavior": "Missing keys, invalid routes, remote local-only endpoints, and timeouts fail closed.",
       "platforms": ["windows", "macos", "linux"],
-      "tests": ["providers::tests::synthetic_local_only_route_rejects_remote_endpoint", "providers::tests::remote_provider_without_key_errors", "server::tests::provider_urls_append_exactly_one_path_separator"],
-      "source_files": ["kernel/src/providers.rs", "kernel/src/models.rs", "kernel/src/guard_routing.rs", "kernel/src/server.rs"],
+      "tests": ["providers::tests::synthetic_local_only_route_rejects_remote_endpoint", "providers::tests::remote_provider_without_key_errors", "server::tests::provider_urls_append_exactly_one_path_separator", "egress::tests::rejects_private_reserved_and_metadata_addresses", "egress::tests::one_private_dns_answer_fails_the_whole_destination", "egress::tests::cloud_policy_rejects_scheme_host_port_and_userinfo_before_dns", "egress::tests::loopback_policy_rejects_wildcard_and_private_lan", "egress::tests::hardened_client_never_follows_redirects"],
+      "source_files": ["kernel/src/egress.rs", "kernel/src/providers.rs", "kernel/src/models.rs", "kernel/src/guard_routing.rs", "kernel/src/server.rs"],
       "status": "governed",
       "risk": "P1",
       "remediation_task": 5,
-      "evidence": "Destination allowlisting and redirect/DNS-rebinding resistance need explicit production proof."
+      "evidence": "Guard broker traffic now uses exact host allowlists, HTTPS/port enforcement, one-time DNS validation with pinned addresses, ambient-proxy removal, redirect refusal, and private/reserved address denial. Legacy provider clients remain outside the Guard production path."
     },
     {
       "id": "SB-010",

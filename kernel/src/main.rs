@@ -4,6 +4,7 @@ mod config;
 mod contract;
 mod cron;
 mod demo_session;
+mod egress;
 pub mod embeddings;
 pub mod events;
 pub mod folders;

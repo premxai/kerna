@@ -442,13 +442,31 @@ async fn handle_guard_anthropic(
         .ok()
         .and_then(|payload| payload.get("stream").and_then(Value::as_bool))
         .unwrap_or(false);
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(PROVIDER_REQUEST_TIMEOUT)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-    let mut request = client
-        .post(provider_url(base, "v1/messages"))
+    let target = provider_url(base, "v1/messages");
+    let validated = if decision.is_local() {
+        crate::egress::loopback_client(&target, Duration::from_secs(10), PROVIDER_REQUEST_TIMEOUT)
+            .await
+    } else {
+        crate::egress::cloud_client(
+            &target,
+            &["api.anthropic.com"],
+            Duration::from_secs(10),
+            PROVIDER_REQUEST_TIMEOUT,
+        )
+        .await
+    };
+    let validated = match validated {
+        Ok(validated) => validated,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "Anthropic destination was refused by Kerna egress policy.",
+            )
+        }
+    };
+    let mut request = validated
+        .client
+        .post(validated.url)
         .header(header::CONTENT_TYPE, "application/json")
         .header("x-api-key", key)
         .header("anthropic-version", "2023-06-01")
@@ -459,6 +477,10 @@ async fn handle_guard_anthropic(
         }
     }
     match request.send().await {
+        Ok(upstream) if upstream.status().is_redirection() => error_response(
+            StatusCode::BAD_GATEWAY,
+            "Anthropic redirect was refused by Kerna egress policy.",
+        ),
         Ok(upstream) => {
             let relay = AnthropicRelayContext {
                 policy: state.guard_policy,
@@ -490,15 +512,14 @@ async fn handle_guard_anthropic(
 }
 
 async fn ollama_model_available(model: &str) -> bool {
-    let Ok(response) = reqwest::Client::new()
-        .get(format!(
-            "{}/api/tags",
-            crate::guard_routing::DEFAULT_LOCAL_BASE_URL
-        ))
-        .timeout(Duration::from_secs(2))
-        .send()
-        .await
+    let target = format!("{}/api/tags", crate::guard_routing::DEFAULT_LOCAL_BASE_URL);
+    let Ok(validated) =
+        crate::egress::loopback_client(&target, Duration::from_secs(2), Duration::from_secs(2))
+            .await
     else {
+        return false;
+    };
+    let Ok(response) = validated.client.get(validated.url).send().await else {
         return false;
     };
     let Ok(payload) = response.json::<Value>().await else {
@@ -554,20 +575,29 @@ fn spawn_local_shadow(
             Ok(body) => body,
             Err(_) => return,
         };
-        let result = reqwest::Client::new()
-            .post(provider_url(
-                crate::guard_routing::DEFAULT_LOCAL_BASE_URL,
-                "v1/messages",
-            ))
-            .header(header::CONTENT_TYPE, "application/json")
-            .header("x-api-key", "ollama")
-            .header("anthropic-version", "2023-06-01")
-            .body(shadow_body)
-            .timeout(Duration::from_secs(120))
-            .send()
-            .await;
+        let target = provider_url(crate::guard_routing::DEFAULT_LOCAL_BASE_URL, "v1/messages");
+        let validated = crate::egress::loopback_client(
+            &target,
+            Duration::from_secs(10),
+            Duration::from_secs(120),
+        )
+        .await;
+        let result = match validated {
+            Ok(validated) => Some(
+                validated
+                    .client
+                    .post(validated.url)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-api-key", "ollama")
+                    .header("anthropic-version", "2023-06-01")
+                    .body(shadow_body)
+                    .send()
+                    .await,
+            ),
+            Err(_) => None,
+        };
         let (status, digest, bytes) = match result {
-            Ok(response) => match response.bytes().await {
+            Some(Ok(response)) => match response.bytes().await {
                 Ok(output) => (
                     "completed",
                     format!("{:x}", Sha256::digest(&output)),
@@ -575,7 +605,7 @@ fn spawn_local_shadow(
                 ),
                 Err(_) => ("failed", String::new(), 0),
             },
-            Err(_) => ("failed", String::new(), 0),
+            Some(Err(_)) | None => ("failed", String::new(), 0),
         };
         let _ = memory.record(Event {
             event_id: Uuid::new_v4().to_string(),
@@ -684,12 +714,34 @@ async fn handle_guard_openai(
     };
     let base = std::env::var("KERNA_OPENAI_UPSTREAM")
         .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-    let request = reqwest::Client::new()
-        .post(provider_url(&base, "responses"))
+    let target = provider_url(&base, "responses");
+    let validated = match crate::egress::cloud_client(
+        &target,
+        &["api.openai.com"],
+        Duration::from_secs(10),
+        PROVIDER_REQUEST_TIMEOUT,
+    )
+    .await
+    {
+        Ok(validated) => validated,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "OpenAI destination was refused by Kerna egress policy.",
+            )
+        }
+    };
+    let request = validated
+        .client
+        .post(validated.url)
         .header(header::CONTENT_TYPE, "application/json")
         .bearer_auth(key)
         .body(body);
     match request.send().await {
+        Ok(upstream) if upstream.status().is_redirection() => error_response(
+            StatusCode::BAD_GATEWAY,
+            "OpenAI redirect was refused by Kerna egress policy.",
+        ),
         Ok(upstream) => relay_openai(upstream, state.guard_policy, state.memory),
         Err(_) => error_response(StatusCode::BAD_GATEWAY, "OpenAI upstream is unavailable."),
     }
