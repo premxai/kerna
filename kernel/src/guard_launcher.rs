@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 pub const PINNED_CLAUDE_CODE_VERSION: &str = "2.1.270";
 pub const CLAUDE_AGENT_IMAGE: &str = "kerna-claude-agent:0.2.9-claude-2.1.270";
@@ -298,11 +299,13 @@ pub async fn launch_claude(
     let suffix = &session_token[..8];
     let session_dir = create_disposable_clone(repo, &session_token)?;
     let (contract_dir, mcp_config) = prepare_container_contract(&session_dir)?;
-    let cloud_key = Password::new()
-        .with_prompt(
-            "Anthropic API key (sent to the broker over stdin; never stored in container metadata)",
-        )
-        .interact()?;
+    let cloud_key = Zeroizing::new(
+        Password::new()
+            .with_prompt(
+                "Anthropic API key (sent to the broker over stdin; never stored in container metadata)",
+            )
+            .interact()?,
+    );
     if cloud_key.trim().is_empty() {
         return Err(anyhow!("Anthropic API key cannot be empty"));
     }
@@ -394,11 +397,11 @@ pub async fn launch_claude_host_demo(
     let cloud_key = if route == RouteMode::Local {
         None
     } else {
-        Some(
+        Some(Zeroizing::new(
             Password::new()
                 .with_prompt("Anthropic API key (kept only in trusted broker memory)")
                 .interact()?,
-        )
+        ))
     };
     let executable = std::env::current_exe()?;
     let mut broker = Command::new(&executable)
@@ -423,7 +426,7 @@ pub async fn launch_claude_host_demo(
         .spawn()
         .context("could not start the Kerna broker")?;
     if let Some(mut stdin) = broker.stdin.take() {
-        stdin.write_all(cloud_key.as_deref().unwrap_or_default().as_bytes())?;
+        stdin.write_all(cloud_key.as_deref().map_or(b"", String::as_bytes))?;
         stdin.write_all(b"\n")?;
     }
     drop(cloud_key);

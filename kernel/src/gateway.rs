@@ -87,7 +87,7 @@ pub struct Gateway {
     registry: Arc<Mutex<McpRegistry>>,
     permissions: PermissionManager,
     memory: Arc<MemoryEngine>,
-    task_id: Uuid,
+    pub(crate) task_id: Uuid,
     session_id: String,
     sequence: i64,
     client_name: Option<String>,
@@ -451,7 +451,10 @@ impl Gateway {
     }
 
     /// The governed tool-call path: policy check → record → forward → record.
-    async fn handle_tool_call(&mut self, params: serde_json::Value) -> serde_json::Value {
+    pub(crate) async fn handle_tool_call(
+        &mut self,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
         let started = Instant::now();
         let call_id = Uuid::new_v4().to_string();
         let tool_name = params
@@ -683,13 +686,33 @@ impl Gateway {
 
         match forward {
             Ok(result) => {
+                let raw_size = serde_json::to_string(&result)
+                    .map(|serialized| serialized.len())
+                    .unwrap_or(0) as u64;
+                let secret_values = server_name
+                    .as_deref()
+                    .and_then(|name| {
+                        self.config
+                            .mcp_servers
+                            .iter()
+                            .find(|server| server.name == name)
+                    })
+                    .map(|server| {
+                        server
+                            .secrets
+                            .iter()
+                            .filter_map(|name| std::env::var(name).ok())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let (result, _) =
+                    crate::events::redact_payload_with_secrets(&result, &secret_values);
                 // The result exists, so the work is already done and the budget
                 // cannot undo it. What it can still do is stop the payload
                 // reaching the client, which is the thing `max_output_bytes`
                 // is actually protecting: an agent's context, and the bill for
                 // carrying it on every later turn.
-                let size = serde_json::to_string(&result).map(|s| s.len()).unwrap_or(0) as u64;
-                if let Err(error) = self.budget.record_output_bytes(size) {
+                if let Err(error) = self.budget.record_output_bytes(raw_size) {
                     return self.refuse_on_budget(
                         &call_id,
                         &tool_name,

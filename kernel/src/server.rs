@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -47,7 +48,7 @@ pub struct AppState {
     pub auth_token: Option<String>,
     pub route_mode: RouteMode,
     pub shadow_enabled: bool,
-    pub anthropic_api_key: Option<Arc<String>>,
+    pub anthropic_api_key: Option<Arc<Zeroizing<String>>>,
     pub route_decisions: Arc<Mutex<HashMap<String, RouteDecision>>>,
 }
 
@@ -468,7 +469,7 @@ async fn handle_guard_anthropic(
         .client
         .post(validated.url)
         .header(header::CONTENT_TYPE, "application/json")
-        .header("x-api-key", key)
+        .header("x-api-key", key.as_str())
         .header("anthropic-version", "2023-06-01")
         .body(routed_body);
     for name in ["anthropic-version", "anthropic-beta"] {

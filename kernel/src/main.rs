@@ -1751,12 +1751,15 @@ async fn async_main() -> Result<()> {
                 println!("[i] No --token set: this server is loopback-only and unauthenticated.");
             }
             let anthropic_api_key = if provider_key_stdin {
-                let mut key = String::new();
+                let mut key = zeroize::Zeroizing::new(String::new());
                 std::io::stdin().read_line(&mut key)?;
-                let key = key.trim_end().to_string();
+                let key = zeroize::Zeroizing::new(key.trim_end().to_string());
                 (!key.is_empty()).then(|| Arc::new(key))
             } else {
-                std::env::var("ANTHROPIC_API_KEY").ok().map(Arc::new)
+                std::env::var("ANTHROPIC_API_KEY")
+                    .ok()
+                    .map(zeroize::Zeroizing::new)
+                    .map(Arc::new)
             };
             let state = server::AppState {
                 config: config.clone(),
