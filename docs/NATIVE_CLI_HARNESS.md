@@ -62,6 +62,27 @@ SSE, empty answer, provider failure, or Ctrl+C terminates fail-closed. No tools,
 MCP calls, shell commands, browser mutations, or package/network authority are introduced by this
 checkpoint.
 
+## Third checkpoint: `kerna code` dry-run
+
+```text
+kerna code "Plan the parser refactor" --repo . --provider anthropic
+kerna code "Plan the parser refactor" --repo . --provider mock --json
+```
+
+The first `kerna code` checkpoint is proposal-only. Kerna reads Git metadata from the trusted host:
+repository root, HEAD, short status, and a bounded tracked-file list. It does not read file contents,
+does not execute repository code, does not apply patches, and does not expose filesystem, process,
+MCP, browser, package-manager, or network tools to the model.
+
+The provider still runs through the broker-contained native path. The prompt explicitly tells the
+model it is in dry-run mode and must return a proposal, likely files to inspect, security boundary
+notes, and the approval/receipt/containment requirements that would be needed before execution.
+Prompts, repository metadata, proposals, and model prose are not persisted by default.
+
+This checkpoint creates the product surface for repository work without pretending that model text is
+an executable plan. The next checkpoint may add contained tool proposals only after each proposed
+action normalizes into `ActionIntent`, passes policy, and has a receipt/approval path before release.
+
 ## Stable internal event direction
 
 Later interactive and automated clients will consume one structured event vocabulary:

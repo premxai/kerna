@@ -1905,6 +1905,18 @@ fn call_mock(messages: &[ChatMessage]) -> Result<(ChatMessage, u64)> {
         ));
     }
 
+    if last_user_msg.starts_with("You are Kerna code planner in dry-run mode.") {
+        return Ok((
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some("Mock code proposal".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            10,
+        ));
+    }
+
     let (cmd, args) = if last_user_msg.contains("echo") {
         ("echo".to_string(), "{}".to_string())
     } else if last_user_msg.contains("hang") {

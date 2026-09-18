@@ -1,7 +1,7 @@
 {
   "$schema": "./security-action-inventory.schema.json",
   "version": 1,
-  "reviewed_commit": "5dadfae",
+  "reviewed_commit": "407ae55",
   "statuses": ["governed", "contained", "trusted-host-only", "intentionally-excluded", "open-bypass"],
   "sensitive_patterns": ["Command::new", "reqwest::", "TcpStream", "std::fs::", "tokio::fs::", "rusqlite", "docker", "wasmer", "env::var", "set_var", "remove_var"],
   "entries": [
@@ -404,6 +404,26 @@
       "risk": "P2",
       "remediation_task": null,
       "evidence": "The deterministic ask/chat mock smokes returned canonical JSONL with no TUI, prompt, transcript, or tool field. Anthropic and OpenAI-compatible fixtures produce exact text across every fixed chunk size, while action-bearing, malformed, truncated, and tool-shaped history paths fail closed. Ctrl+C emits session.interrupted and drops the same RAII broker guard used by provider failure. A Windows inert-key probe reached only the loopback broker, emitted a redacted terminal failure, and left zero native broker containers or egress networks; the provider key was supplied over stdin and absent from container arguments. Provider-backed success remains a separate live acceptance gate before release."
+    },
+    {
+      "id": "SB-021",
+      "title": "Native code dry-run proposal",
+      "entrypoint": "kerna code <goal> --repo <path>",
+      "initiator": "operator",
+      "controlled_inputs": ["goal", "repository path", "provider", "model", "provider API key"],
+      "operation": ["filesystem", "process", "network", "credential", "external-service"],
+      "privileges": "The trusted Kerna CLI runs read-only Git metadata commands on the selected repository, then asks the broker-contained model for a proposal with no tools, no patch authority, and no repository mutation authority.",
+      "enforcement_point": "Git repository resolution, bounded status/file-list metadata, explicit dry-run prompt, no file-content reads, empty tool catalog, text-only SSE validation, broker scoped authentication, stdin-only provider key injection, and fail-closed terminal events",
+      "containment_boundary": "Trusted host Git metadata reads are operator-authorized administration. Provider credentials and outbound provider traffic remain in the hardened broker container. The model receives no filesystem, process, MCP, browser, package-manager, patch, or apply authority.",
+      "receipt_coverage": "Goal, repository metadata, prompt, proposal text, and model prose are intentionally not persisted. Stable session events record start, deltas, completion, interruption, or redacted failure class only.",
+      "failure_behavior": "Empty goals, non-Git repositories, Git metadata failures, missing credentials, broker startup failure, Ctrl+C, provider errors, action-bearing replies, malformed streams, and empty output fail without executing a repository action; broker container and network cleanup follows the native RAII path.",
+      "platforms": ["windows", "macos", "linux"],
+      "tests": ["native_code::tests::dry_run_prompt_is_explicitly_non_executing", "native_code::tests::dry_run_messages_contain_no_tool_authority", "scheduler::tests::toolless_stream_rejects_actions_malformed_json_and_truncation", "server::tests::native_model_plane_accepts_only_well_formed_toolless_requests", "guard_launcher::tests::native_broker_is_loopback_only_and_provider_key_never_enters_metadata", "kerna code --provider mock --json smoke"],
+      "source_files": ["kernel/src/main.rs", "kernel/src/native_code.rs", "kernel/src/native_cli.rs", "kernel/src/scheduler.rs", "kernel/src/providers.rs", "kernel/src/guard_launcher.rs", "kernel/src/server.rs"],
+      "status": "trusted-host-only",
+      "risk": "P2",
+      "remediation_task": null,
+      "evidence": "The dry-run prompt builder exposes only bounded Git metadata, states that no tools/shell/network/patch authority is available, and emits a normal tool-less native model stream. This is not execution and does not claim that a proposal has been approved, receipted, or applied."
     }
   ]
 }

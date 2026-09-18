@@ -22,6 +22,7 @@ mod memory;
 mod mockmcp;
 mod models;
 mod native_cli;
+mod native_code;
 mod onboarding;
 mod packs;
 mod permissions;
@@ -106,6 +107,20 @@ enum QuickCommand {
     },
     /// Chat with a model through one tool-less native broker session.
     Chat {
+        #[arg(long, default_value = "anthropic", value_parser = ["anthropic", "openai", "mock"])]
+        provider: String,
+        #[arg(long)]
+        model: Option<String>,
+        /// Emit stable JSON Lines events instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Produce a contained dry-run implementation proposal; no tools or patches.
+    Code {
+        /// Engineering goal to plan. Prompts and model prose are not persisted.
+        goal: String,
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
         #[arg(long, default_value = "anthropic", value_parser = ["anthropic", "openai", "mock"])]
         provider: String,
         #[arg(long)]
@@ -1397,6 +1412,7 @@ fn print_quick_help() {
     println!("  kerna doctor                  Check hardware, models, keys, and sandboxes");
     println!("  kerna ask \"<question>\"       Ask a model without granting tools");
     println!("  kerna chat                   Chat with in-memory context and no tools");
+    println!("  kerna code \"<goal>\"         Plan repo work without granting tools");
     println!("  kerna claude --route local   Force private local inference");
     println!("  kerna sandbox                Run bounded Python in Wasmer");
     println!("  kerna replay <evidence.json> Open signed read-only evidence");
@@ -1424,6 +1440,7 @@ fn main() -> Result<()> {
 }
 
 fn build_native_toolless_runtime(
+    repo: &std::path::Path,
     provider: &str,
     model: Option<String>,
 ) -> Result<(
@@ -1475,7 +1492,7 @@ fn build_native_toolless_runtime(
         None
     } else {
         Some(guard_launcher::start_native_ask_broker(
-            std::path::Path::new("."),
+            repo,
             provider,
             provider_key.as_str(),
         )?)
@@ -1512,7 +1529,7 @@ async fn run_native_ask(
     json: bool,
 ) -> Result<()> {
     let (scheduler, broker, broker_provider, event_model) =
-        build_native_toolless_runtime(&provider, model)?;
+        build_native_toolless_runtime(std::path::Path::new("."), &provider, model)?;
     let session_id = format!("ask-{}", uuid::Uuid::new_v4());
     let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
     emit_native_event(
@@ -1583,7 +1600,7 @@ async fn run_native_chat(provider: String, model: Option<String>, json: bool) ->
     use std::io::{self, Write};
 
     let (scheduler, broker, broker_provider, event_model) =
-        build_native_toolless_runtime(&provider, model)?;
+        build_native_toolless_runtime(std::path::Path::new("."), &provider, model)?;
     let session_id = format!("chat-{}", uuid::Uuid::new_v4());
     let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
     emit_native_event(
@@ -1722,6 +1739,102 @@ async fn run_native_chat(provider: String, model: Option<String>, json: bool) ->
     Ok(())
 }
 
+async fn run_native_code(
+    goal: String,
+    repo: PathBuf,
+    provider: String,
+    model: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let context = native_code::build_code_dry_run_context(&repo, &goal)?;
+    let (scheduler, broker, broker_provider, event_model) =
+        build_native_toolless_runtime(&context.repo_root, &provider, model)?;
+    let session_id = format!("code-{}", uuid::Uuid::new_v4());
+    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
+    emit_native_event(
+        &renderer,
+        &native_cli::NativeEvent::SessionStarted {
+            session_id: session_id.clone(),
+            provider,
+            model: event_model,
+            tool_authority: "none",
+        },
+    )?;
+    if !json {
+        eprintln!(
+            "[i] code dry-run only - no tools, no patch, no repository mutation; HEAD {} status {} ({} status lines, {} tracked files)",
+            context.head,
+            context.status_digest,
+            context.status_line_count,
+            context.tracked_file_count
+        );
+    }
+    let messages = native_code::dry_run_messages(context.prompt);
+    let stream_session = session_id.clone();
+    let stream_renderer = Arc::clone(&renderer);
+    let stream = move |text: &str| {
+        emit_native_event(
+            &stream_renderer,
+            &native_cli::NativeEvent::AssistantDelta {
+                session_id: stream_session.clone(),
+                text: text.to_string(),
+            },
+        )
+    };
+    let request = async {
+        if let Some(resolved) = broker_provider.as_ref() {
+            scheduler
+                .ask_messages_stream_resolved(&messages, resolved, stream)
+                .await
+        } else {
+            let resolved = providers::ResolvedProvider {
+                name: "mock".to_string(),
+                protocol: providers::WireProtocol::Mock,
+                base_url: "mock://local".to_string(),
+                api_key: String::new(),
+                model: "mock".to_string(),
+            };
+            scheduler
+                .ask_messages_stream_resolved(&messages, &resolved, stream)
+                .await
+        }
+    };
+    let result = tokio::select! {
+        result = request => result,
+        interrupt = tokio::signal::ctrl_c() => {
+            let _ = interrupt;
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::SessionInterrupted {
+                    session_id,
+                    reason: "ctrl_c",
+                },
+            )?;
+            drop(broker);
+            return Err(anyhow::anyhow!("native code dry-run interrupted"));
+        }
+    };
+    let _broker_guard = broker.as_ref();
+    match result {
+        Ok(tokens) => emit_native_event(
+            &renderer,
+            &native_cli::NativeEvent::SessionCompleted { session_id, tokens },
+        )?,
+        Err(error) => {
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::SessionFailed {
+                    session_id,
+                    error_class: "provider_error",
+                },
+            )?;
+            return Err(error);
+        }
+    }
+    drop(broker);
+    Ok(())
+}
+
 async fn async_main() -> Result<()> {
     // We rely on the local ctrl_c wait in Daemon instead of global exit(0)
     let arguments = std::env::args_os().collect::<Vec<_>>();
@@ -1746,7 +1859,7 @@ async fn async_main() -> Result<()> {
     }
     let uses_quick_parser = matches!(
         first,
-        Some("ask" | "chat" | "claude" | "sandbox" | "replay" | "skills" | "dashboard")
+        Some("ask" | "chat" | "code" | "claude" | "sandbox" | "replay" | "skills" | "dashboard",)
     ) || (first == Some("doctor")
         && !arguments.iter().any(|arg| arg == "--gateway"));
     if uses_quick_parser {
@@ -1762,6 +1875,13 @@ async fn async_main() -> Result<()> {
                 model,
                 json,
             } => run_native_chat(provider, model, json).await?,
+            QuickCommand::Code {
+                goal,
+                repo,
+                provider,
+                model,
+                json,
+            } => run_native_code(goal, repo, provider, model, json).await?,
             QuickCommand::Doctor { repo, brief } => {
                 if !(if brief {
                     guard_launcher::print_doctor_brief(true, Some(&repo)).await
