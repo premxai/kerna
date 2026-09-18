@@ -984,6 +984,7 @@ fn start_guard_stream(
     let agent_name = match agent {
         AgentKind::ClaudeCode => "claude_code",
         AgentKind::Codex => "codex",
+        AgentKind::KernaNative => "kerna_native",
     };
     let agent_version =
         std::env::var("KERNA_GUARD_AGENT_VERSION").unwrap_or_else(|_| "unknown".to_owned());
@@ -1418,6 +1419,7 @@ fn guard_binding(
     let agent = match context.agent {
         AgentKind::ClaudeCode => "claude_code",
         AgentKind::Codex => "codex",
+        AgentKind::KernaNative => "kerna_native",
     };
     let policy_digest = policy.digest();
     let canonical_action_digest = intent.canonical_digest();

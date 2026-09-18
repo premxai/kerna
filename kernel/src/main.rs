@@ -1770,9 +1770,17 @@ async fn run_native_code(
         );
     }
     let messages = native_code::dry_run_messages(context.prompt);
+    let policy_path = context.repo_root.join("kerna.policy.toml");
+    let guard_policy = if policy_path.exists() {
+        GuardPolicy::load(&policy_path).map_err(anyhow::Error::from)?
+    } else {
+        GuardPolicy::balanced()
+    };
+    let mut assistant_text = String::new();
     let stream_session = session_id.clone();
     let stream_renderer = Arc::clone(&renderer);
-    let stream = move |text: &str| {
+    let stream = |text: &str| {
+        assistant_text.push_str(text);
         emit_native_event(
             &stream_renderer,
             &native_cli::NativeEvent::AssistantDelta {
@@ -1816,10 +1824,36 @@ async fn run_native_code(
     };
     let _broker_guard = broker.as_ref();
     match result {
-        Ok(tokens) => emit_native_event(
-            &renderer,
-            &native_cli::NativeEvent::SessionCompleted { session_id, tokens },
-        )?,
+        Ok(tokens) => {
+            let preflight = match native_code::parse_proposal_preflight(
+                &assistant_text,
+                &guard_policy,
+                &session_id,
+            ) {
+                Ok(preflight) => preflight,
+                Err(error) => {
+                    emit_native_event(
+                        &renderer,
+                        &native_cli::NativeEvent::SessionFailed {
+                            session_id,
+                            error_class: "proposal_parse_error",
+                        },
+                    )?;
+                    return Err(error);
+                }
+            };
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::ProposalPreflight {
+                    session_id: session_id.clone(),
+                    preflight,
+                },
+            )?;
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::SessionCompleted { session_id, tokens },
+            )?;
+        }
         Err(error) => {
             emit_native_event(
                 &renderer,

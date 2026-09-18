@@ -14,6 +14,7 @@ pub const POLICY_VERSION: u32 = 1;
 pub enum AgentKind {
     ClaudeCode,
     Codex,
+    KernaNative,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

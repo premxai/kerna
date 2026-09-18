@@ -16,6 +16,11 @@ pub enum NativeEvent {
     AssistantDelta { session_id: String, text: String },
     #[serde(rename = "context.cleared")]
     ContextCleared { session_id: String },
+    #[serde(rename = "proposal.preflight")]
+    ProposalPreflight {
+        session_id: String,
+        preflight: crate::native_code::ProposalPreflight,
+    },
     #[serde(rename = "session.completed")]
     SessionCompleted { session_id: String, tokens: u64 },
     #[serde(rename = "session.interrupted")]
@@ -52,6 +57,25 @@ impl EventRenderer {
             }
             NativeEvent::ContextCleared { .. } => {
                 eprintln!("[i] in-memory context cleared");
+            }
+            NativeEvent::ProposalPreflight { preflight, .. } => {
+                eprintln!(
+                    "[i] proposal preflight - {} actions - no execution, no receipt requested",
+                    preflight.actions.len()
+                );
+                for action in &preflight.actions {
+                    eprintln!(
+                        "    [{}] {} {} via {} ({})",
+                        action.policy_effect,
+                        action.proposed_kind,
+                        action
+                            .canonical_resource
+                            .as_deref()
+                            .unwrap_or("(no single resource)"),
+                        action.raw_tool_name,
+                        action.required_containment
+                    );
+                }
             }
             NativeEvent::SessionCompleted { tokens, .. } => {
                 println!();
@@ -107,6 +131,28 @@ mod tests {
         assert_eq!(completed["type"], "session.completed");
         assert_eq!(interrupted["type"], "session.interrupted");
         assert_eq!(failed["type"], "session.failed");
+    }
+
+    #[test]
+    fn proposal_preflight_event_is_explicitly_non_executing() {
+        let preflight = crate::native_code::ProposalPreflight {
+            schema_version: 1,
+            mode: "preflight_only",
+            receipt_state: "preflight_only_not_requested",
+            actions: vec![],
+        };
+        let value = serde_json::to_value(NativeEvent::ProposalPreflight {
+            session_id: "session-1".to_string(),
+            preflight,
+        })
+        .unwrap();
+        assert_eq!(value["type"], "proposal.preflight");
+        assert_eq!(value["preflight"]["mode"], "preflight_only");
+        assert_eq!(
+            value["preflight"]["receipt_state"],
+            "preflight_only_not_requested"
+        );
+        assert!(value.get("prompt").is_none());
     }
 
     #[test]

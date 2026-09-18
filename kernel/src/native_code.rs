@@ -1,11 +1,18 @@
+use crate::guard_policy::{ActionIntent, AgentKind, GuardPolicy};
+use crate::guard_protocol::{ActionCandidate, Protocol};
 use crate::scheduler::ChatMessage;
 use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const TRACKED_FILE_LIMIT: usize = 160;
 const STATUS_LINE_LIMIT: usize = 80;
+const PROPOSAL_ACTION_LIMIT: usize = 20;
+const PROPOSAL_BEGIN: &str = "KERNA_PROPOSAL_JSON_BEGIN";
+const PROPOSAL_END: &str = "KERNA_PROPOSAL_JSON_END";
 
 #[derive(Debug, Clone)]
 pub struct CodeDryRunContext {
@@ -15,6 +22,55 @@ pub struct CodeDryRunContext {
     pub tracked_file_count: usize,
     pub status_line_count: usize,
     pub prompt: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProposalPreflight {
+    pub schema_version: u32,
+    pub mode: &'static str,
+    pub receipt_state: &'static str,
+    pub actions: Vec<ProposalActionPreflight>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProposalActionPreflight {
+    pub id: String,
+    pub proposed_kind: String,
+    pub reason: String,
+    pub raw_tool_name: String,
+    pub action_kind: String,
+    pub canonical_resource: Option<String>,
+    pub canonical_action_digest: String,
+    pub policy_effect: String,
+    pub policy_rule: Option<String>,
+    pub policy_reason: String,
+    pub required_containment: &'static str,
+    pub executable: bool,
+    pub receipt_state: &'static str,
+    pub risk_tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProposalEnvelope {
+    actions: Vec<ProposalActionInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProposalActionInput {
+    kind: String,
+    reason: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    package: Option<String>,
+    #[serde(default)]
+    manager: Option<String>,
 }
 
 pub fn build_code_dry_run_context(repo: &Path, goal: &str) -> Result<CodeDryRunContext> {
@@ -60,6 +116,158 @@ pub fn dry_run_messages(prompt: String) -> Vec<ChatMessage> {
         tool_calls: None,
         tool_call_id: None,
     }]
+}
+
+pub fn parse_proposal_preflight(
+    assistant_text: &str,
+    policy: &GuardPolicy,
+    session_id: &str,
+) -> Result<ProposalPreflight> {
+    let raw = extract_proposal_json(assistant_text)?;
+    let envelope: ProposalEnvelope =
+        serde_json::from_str(raw).context("proposal envelope was malformed")?;
+    if envelope.actions.is_empty() {
+        return Err(anyhow!("proposal envelope contained no actions"));
+    }
+    if envelope.actions.len() > PROPOSAL_ACTION_LIMIT {
+        return Err(anyhow!(
+            "proposal envelope contained more than {PROPOSAL_ACTION_LIMIT} actions"
+        ));
+    }
+    let actions = envelope
+        .actions
+        .iter()
+        .enumerate()
+        .map(|(index, action)| preflight_action(index, action, policy, session_id))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(ProposalPreflight {
+        schema_version: 1,
+        mode: "preflight_only",
+        receipt_state: "preflight_only_not_requested",
+        actions,
+    })
+}
+
+fn extract_proposal_json(text: &str) -> Result<&str> {
+    let (_, tail) = text
+        .split_once(PROPOSAL_BEGIN)
+        .ok_or_else(|| anyhow!("proposal envelope missing {PROPOSAL_BEGIN}"))?;
+    let (json, _) = tail
+        .split_once(PROPOSAL_END)
+        .ok_or_else(|| anyhow!("proposal envelope missing {PROPOSAL_END}"))?;
+    let json = json.trim();
+    if json.is_empty() {
+        return Err(anyhow!("proposal envelope was empty"));
+    }
+    Ok(json)
+}
+
+fn preflight_action(
+    index: usize,
+    action: &ProposalActionInput,
+    policy: &GuardPolicy,
+    session_id: &str,
+) -> Result<ProposalActionPreflight> {
+    let proposed_kind = action.kind.trim().to_ascii_lowercase();
+    let reason = bounded_text("reason", &action.reason)?;
+    let (raw_tool_name, arguments, required_containment) = match proposed_kind.as_str() {
+        "file_read" => (
+            "Read".to_string(),
+            json!({"file_path": required_field("path", action.path.as_deref())?}),
+            "future contained worktree read",
+        ),
+        "file_write" => (
+            "Write".to_string(),
+            json!({"file_path": required_field("path", action.path.as_deref())?}),
+            "future contained worktree write plus review/apply",
+        ),
+        "shell" => (
+            "Bash".to_string(),
+            json!({"command": required_field("command", action.command.as_deref())?}),
+            "future contained Docker process plus receipt-bound approval",
+        ),
+        "network" => (
+            "WebFetch".to_string(),
+            json!({"url": required_field("url", action.url.as_deref())?}),
+            "future broker egress allowlist plus receipt-bound approval",
+        ),
+        "package" => (
+            "Bash".to_string(),
+            json!({"command": package_command(action)?}),
+            "future contained package-manager execution plus receipt-bound approval",
+        ),
+        _ => return Err(anyhow!("unsupported proposal action kind: {proposed_kind}")),
+    };
+    let candidate = ActionCandidate {
+        protocol: Protocol::AnthropicMessages,
+        id: format!("proposal_{}", index + 1),
+        raw_tool_name,
+        arguments,
+    };
+    let intent = ActionIntent::from_candidate(
+        &candidate,
+        session_id,
+        AgentKind::KernaNative,
+        env!("CARGO_PKG_VERSION"),
+    );
+    let decision = policy.evaluate(&intent);
+    let canonical_action_digest = intent.canonical_digest();
+    Ok(ProposalActionPreflight {
+        id: candidate.id,
+        proposed_kind,
+        reason,
+        raw_tool_name: intent.raw_tool_name,
+        action_kind: stable_label(intent.kind)?,
+        canonical_resource: intent.canonical_resource,
+        canonical_action_digest,
+        policy_effect: stable_label(decision.effect)?,
+        policy_rule: decision.rule_id,
+        policy_reason: decision.reason,
+        required_containment,
+        executable: false,
+        receipt_state: "preflight_only_not_requested",
+        risk_tags: intent.risk_tags,
+    })
+}
+
+fn stable_label<T: Serialize>(value: T) -> Result<String> {
+    serde_json::to_value(value)?
+        .as_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow!("stable label did not serialize as a string"))
+}
+
+fn required_field<'a>(name: &str, value: Option<&'a str>) -> Result<&'a str> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("proposal action missing required field {name}"))?;
+    if value.len() > 512 {
+        return Err(anyhow!("proposal action field {name} is too long"));
+    }
+    Ok(value)
+}
+
+fn bounded_text(name: &str, value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(anyhow!("proposal action missing required field {name}"));
+    }
+    if value.len() > 512 {
+        return Err(anyhow!("proposal action field {name} is too long"));
+    }
+    Ok(value.to_string())
+}
+
+fn package_command(action: &ProposalActionInput) -> Result<String> {
+    let manager = required_field("manager", action.manager.as_deref())?.to_ascii_lowercase();
+    let package = required_field("package", action.package.as_deref())?;
+    match manager.as_str() {
+        "npm" => Ok(format!("npm install {package}")),
+        "cargo" => Ok(format!("cargo add {package}")),
+        "pip" => Ok(format!("pip install {package}")),
+        other => Err(anyhow!("unsupported package manager in proposal: {other}")),
+    }
 }
 
 fn git_text(repo: &Path, args: &[&str]) -> Result<String> {
@@ -115,7 +323,11 @@ fn render_prompt(
          1. likely files or areas to inspect,\n\
          2. proposed steps,\n\
          3. security boundary notes,\n\
-         4. what approval/receipt/containment would be required before execution.\n\n\
+         4. what approval/receipt/containment would be required before execution.\n\
+         After the prose, output one strict JSON object between {PROPOSAL_BEGIN} and {PROPOSAL_END}.\n\
+         The JSON shape is:\n\
+         {{\"actions\":[{{\"kind\":\"file_read|file_write|shell|network|package\",\"reason\":\"why\",\"path\":\"relative/path\",\"command\":\"command\",\"url\":\"https://example.com\",\"manager\":\"npm|cargo|pip\",\"package\":\"name\"}}]}}\n\
+         Include only actions you propose for future review. Do not include unknown fields.\n\n\
          Goal:\n{goal}\n\n\
          Repository snapshot, metadata only:\n\
          HEAD: {head}\n\
@@ -156,5 +368,49 @@ mod tests {
         assert_eq!(messages[0].role, "user");
         assert!(messages[0].tool_calls.is_none());
         assert!(messages[0].tool_call_id.is_none());
+    }
+
+    #[test]
+    fn proposal_preflight_normalizes_actions_without_execution() {
+        let text = r#"Plan first.
+KERNA_PROPOSAL_JSON_BEGIN
+{"actions":[
+  {"kind":"file_write","path":"src/lib.rs","reason":"update parser"},
+  {"kind":"shell","command":"cargo test","reason":"verify"}
+]}
+KERNA_PROPOSAL_JSON_END"#;
+        let preflight =
+            parse_proposal_preflight(text, &GuardPolicy::balanced(), "session-1").unwrap();
+        assert_eq!(preflight.mode, "preflight_only");
+        assert_eq!(preflight.receipt_state, "preflight_only_not_requested");
+        assert_eq!(preflight.actions.len(), 2);
+        assert!(preflight.actions.iter().all(|action| !action.executable));
+        assert!(preflight
+            .actions
+            .iter()
+            .all(|action| action.receipt_state == "preflight_only_not_requested"));
+        assert_eq!(
+            preflight.actions[0].canonical_resource.as_deref(),
+            Some("src/lib.rs")
+        );
+        assert_eq!(
+            preflight.actions[1].canonical_resource.as_deref(),
+            Some("cargo")
+        );
+    }
+
+    #[test]
+    fn malformed_or_unknown_proposals_fail_closed() {
+        assert!(
+            parse_proposal_preflight("no envelope", &GuardPolicy::balanced(), "session-1").is_err()
+        );
+        let unknown = r#"KERNA_PROPOSAL_JSON_BEGIN
+{"actions":[{"kind":"docker","reason":"escape"}]}
+KERNA_PROPOSAL_JSON_END"#;
+        assert!(parse_proposal_preflight(unknown, &GuardPolicy::balanced(), "session-1").is_err());
+        let extra = r#"KERNA_PROPOSAL_JSON_BEGIN
+{"actions":[{"kind":"file_read","path":"src/lib.rs","reason":"inspect","extra":true}]}
+KERNA_PROPOSAL_JSON_END"#;
+        assert!(parse_proposal_preflight(extra, &GuardPolicy::balanced(), "session-1").is_err());
     }
 }

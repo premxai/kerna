@@ -1909,7 +1909,9 @@ fn call_mock(messages: &[ChatMessage]) -> Result<(ChatMessage, u64)> {
         return Ok((
             ChatMessage {
                 role: "assistant".to_string(),
-                content: Some("Mock code proposal".to_string()),
+                content: Some(
+                    "Mock code proposal\nKERNA_PROPOSAL_JSON_BEGIN\n{\"actions\":[{\"kind\":\"file_write\",\"path\":\"README.md\",\"reason\":\"document the requested change\"},{\"kind\":\"shell\",\"command\":\"cargo test\",\"reason\":\"verify after a future contained edit\"}]}\nKERNA_PROPOSAL_JSON_END".to_string(),
+                ),
                 tool_calls: None,
                 tool_call_id: None,
             },

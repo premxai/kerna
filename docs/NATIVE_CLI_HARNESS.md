@@ -62,7 +62,7 @@ SSE, empty answer, provider failure, or Ctrl+C terminates fail-closed. No tools,
 MCP calls, shell commands, browser mutations, or package/network authority are introduced by this
 checkpoint.
 
-## Third checkpoint: `kerna code` dry-run
+## Third checkpoint: `kerna code` dry-run and proposal preflight
 
 ```text
 kerna code "Plan the parser refactor" --repo . --provider anthropic
@@ -75,13 +75,21 @@ does not execute repository code, does not apply patches, and does not expose fi
 MCP, browser, package-manager, or network tools to the model.
 
 The provider still runs through the broker-contained native path. The prompt explicitly tells the
-model it is in dry-run mode and must return a proposal, likely files to inspect, security boundary
-notes, and the approval/receipt/containment requirements that would be needed before execution.
-Prompts, repository metadata, proposals, and model prose are not persisted by default.
+model it is in dry-run mode and must return ordinary prose plus one strict proposal envelope between
+`KERNA_PROPOSAL_JSON_BEGIN` and `KERNA_PROPOSAL_JSON_END`. The envelope can describe only
+`file_read`, `file_write`, `shell`, `network`, or `package` actions. Unknown fields, missing fields,
+unknown action kinds, malformed JSON, missing envelopes, and oversized proposals fail closed.
 
-This checkpoint creates the product surface for repository work without pretending that model text is
-an executable plan. The next checkpoint may add contained tool proposals only after each proposed
-action normalizes into `ActionIntent`, passes policy, and has a receipt/approval path before release.
+Kerna normalizes each proposed action through the canonical `ActionIntent` contract and emits a
+`proposal.preflight` event containing policy effect, canonical resource, canonical action digest,
+required future containment, receipt state, and risk tags. These events are explicitly
+non-executable: `executable=false` and `receipt_state=preflight_only_not_requested`. No action is
+released, receipted as requested, approved, applied, or executed by this checkpoint.
+
+Prompts, repository metadata, proposals, and model prose are not persisted by default. This
+checkpoint creates the product surface for repository work without pretending that model text is an
+executable plan. The next checkpoint may add contained inspection only after each action has a
+receipt/approval path before release.
 
 ## Stable internal event direction
 
@@ -90,6 +98,7 @@ Later interactive and automated clients will consume one structured event vocabu
 ```text
 session.started
 assistant.delta
+proposal.preflight
 context.cleared
 tool.requested
 approval.required
