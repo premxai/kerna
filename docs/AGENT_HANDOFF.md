@@ -8,6 +8,12 @@ Last updated: 2026-09-18
 - Kerna implementation repo: `F:\Kerna-MVP\repos\kerna`
 - Kerna branch: `mvp/kerna-guard`
 - Kerna latest pushed implementation commit before this handoff: `0263a60` (`Add native code contained read-only inspection`)
+- This handoff ships as the Kerna commit `feat: make the contained rehearsal provable` and contains:
+  `scripts/accept-contained-run.ps1`, the rehearsal fixture under
+  `kernel/tests/rehearsal-fixtures/`, `docs/DEMO_READINESS.md`, the
+  `KERNA_ANTHROPIC_KEY_FILE` launch affordance, the label-scoped crash sweep with
+  `kerna guard cleanup`, a stale-resource check in `guard doctor`, and a start-here
+  printout for bare `kerna`.
 - Root docs latest local commit: `24a11f6` (`Record native proposal preflight completion`)
 - LocalM branch: `mvp/reference-baseline`
 - LocalM latest commit: `9570339`
@@ -17,11 +23,25 @@ Last updated: 2026-09-18
 
 ## Product priority
 
-Continue `PROJECT_STATE.md` `CURRENT_TASK`.
+The pitch is imminent and the demo centerpiece is a live end-to-end contained run. Current
+priority is therefore `docs/DEMO_READINESS.md`: keep the rehearsal green, and flip `RG-004` in
+`contracts/claude-pilot-release-gate.json` **only** after
+`reports/contained-run-proof.json` exists from a provider-backed run.
 
-The active work is Native CLI Harness Phase 8: add the first approval surface for native
-`kerna code`, so `ask`-policy inspection reads can be released only through an explicit one-time
-receipt-bound decision.
+One step is operator-only and deliberately not faked: the rehearsal needs a real Anthropic key.
+
+```powershell
+$env:CARGO_TARGET_DIR='C:\Temp\kerna-pitch-target'
+cargo build --locked
+powershell -ExecutionPolicy Bypass -File scripts/accept-contained-run.ps1 -KeyFile <path outside any repo>
+```
+
+Until that run exists, `kerna guard doctor`, `scripts/test-claude-container-boundary.ps1`, and
+`scripts/accept-contained-run.ps1 -SelfTest` are the proofs available without a key, and all three
+pass on this machine. `RG-004` still says `pending`; the release decision is still NO-GO.
+
+The previous thread, Native CLI Harness Phase 8 (an approval surface for native `kerna code`
+inspection reads), resumes after the pitch and is described below.
 
 Phase 7 is complete and pushed in Kerna at `0263a60`:
 
@@ -86,6 +106,46 @@ Required behavior:
   - SB-022 native inspection entry
 - `docs/NATIVE_CLI_HARNESS.md`
   - human-readable native harness contract
+
+## Verification baseline from the pitch-readiness checkpoint
+
+Verified on Windows, Docker Desktop running, no provider key available to the agent:
+
+```powershell
+$env:CARGO_TARGET_DIR='C:\Temp\kerna-pitch-target'
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked -- --test-threads=1
+cargo test --locked --test security_action_inventory -- --test-threads=1
+cargo build --locked
+powershell -ExecutionPolicy Bypass -File scripts/test-claude-container-boundary.ps1
+powershell -ExecutionPolicy Bypass -File scripts/accept-contained-run.ps1 -SelfTest
+& "$env:CARGO_TARGET_DIR\debug\kerna.exe" guard doctor
+```
+
+Results:
+
+- strict Clippy (including test targets) passed; 251 unit tests and all 4 inventory tests passed
+- the boundary probe reported `workspace=true, broker=true` and
+  `evidence_store/host_home/docker_socket/provider_key/browser_key/unrelated_plugin_key/public_network=false`
+  at `uid=10001`
+- the rehearsal self test passed 5/5: uncommitted-diff detection, CSRF-and-Origin-bound apply into a
+  separate clean clone, the edit present in that clone, signed bundle export, and `kerna replay`
+  verifying the Ed25519 signature
+- `guard doctor` exited 0 and reported the pinned contained image
+  `sha256:35948e59cf7f` plus the new stale managed-resource check
+- an inert-key `kerna claude --route cloud` launch reached the provider and stopped at a redacted
+  `401`, which proves the key-file read, the launch sweep, the broker egress path, and the
+  dashboard/CSRF advertisement without spending credit
+
+Two Windows PowerShell traps worth remembering, both now handled by helpers in
+`scripts/accept-contained-run.ps1`:
+
+- `Invoke-WebRequest`.Content rewrites embedded newlines to CRLF, so a signed evidence bundle saved
+  from it no longer matches the signed bytes and replay fails with a signature error. The harness
+  downloads bytes with `System.Net.WebClient.DownloadData` instead.
+- `Set-Content -Encoding UTF8` writes a byte-order mark, and `serde_json` rejects it as
+  `expected value at line 1 column 1`. JSON artifacts are written BOM-free.
 
 ## Verification baseline from Phase 7
 

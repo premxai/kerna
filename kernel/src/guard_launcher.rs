@@ -20,6 +20,11 @@ const NODE_BASE_DIGEST: &str =
     "sha256:8a34c4ab3ea2c5cd194f07e317b2a8f09461d3c8b05c4e34c8ccd56d56024c4d";
 const BROKER_PORT: u16 = 8766;
 const DASHBOARD_PORT: u16 = 8877;
+/// Docker label scope for every Kerna-managed container and network. The
+/// crash sweep finds resources by this label, so a half-dead session can never
+/// hide from it behind an unexpected name.
+const MANAGED_LABEL: &str = "dev.kerna.managed=true";
+const MANAGED_SESSION_LABEL_PREFIX: &str = "dev.kerna.session=";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DoctorCheck {
@@ -234,8 +239,13 @@ pub async fn doctor_checks(demo: bool, repo: Option<&Path>) -> Vec<DoctorCheck> 
         name: "Cloud model".to_string(),
         status: "optional".to_string(),
         detail: format!(
-            "{}; key requested in a hidden launch prompt",
-            crate::guard_routing::DEFAULT_CLOUD_MODEL
+            "{}; key from {}",
+            crate::guard_routing::DEFAULT_CLOUD_MODEL,
+            if std::env::var_os("KERNA_ANTHROPIC_KEY_FILE").is_some() {
+                "KERNA_ANTHROPIC_KEY_FILE"
+            } else {
+                "a hidden prompt at launch"
+            }
         ),
         required: false,
     });
@@ -268,6 +278,44 @@ pub async fn doctor_checks(demo: bool, repo: Option<&Path>) -> Vec<DoctorCheck> 
         },
         required: false,
     });
+    let stale_containers = list_labeled(&[
+        "ps",
+        "-a",
+        "--filter",
+        MANAGED_LABEL,
+        "--format",
+        "{{.Names}}",
+    ])
+    .unwrap_or_default();
+    let stale_networks = list_labeled(&[
+        "network",
+        "ls",
+        "--filter",
+        MANAGED_LABEL,
+        "--format",
+        "{{.Name}}",
+    ])
+    .unwrap_or_default();
+    let retained_worktrees = retained_session_worktrees().len();
+    checks.push(DoctorCheck {
+        name: "Managed resources".to_string(),
+        status: if stale_containers.is_empty() && stale_networks.is_empty() {
+            "ready"
+        } else {
+            "degraded"
+        }
+        .to_string(),
+        detail: if stale_containers.is_empty() && stale_networks.is_empty() {
+            format!("{retained_worktrees} disposable worktree(s) retained for review")
+        } else {
+            format!(
+                "{} container(s) and {} network(s) left by a crashed session; run kerna guard cleanup",
+                stale_containers.len(),
+                stale_networks.len()
+            )
+        },
+        required: false,
+    });
     if let Some(repo) = repo {
         checks.push(DoctorCheck {
             name: "Repository".to_string(),
@@ -282,6 +330,37 @@ pub async fn doctor_checks(demo: bool, repo: Option<&Path>) -> Vec<DoctorCheck> 
         });
     }
     checks
+}
+
+/// Provider key source for a contained session.
+///
+/// Default is the hidden terminal prompt. `KERNA_ANTHROPIC_KEY_FILE` exists for
+/// the unattended rehearsal harness only: the value still travels to the broker
+/// over stdin, is held in a zeroizing buffer, and never reaches argv, Docker
+/// metadata, logs, or the repository. Keep the file outside any project tree.
+fn read_provider_key() -> Result<Zeroizing<String>> {
+    read_provider_key_from(std::env::var_os("KERNA_ANTHROPIC_KEY_FILE").as_deref())
+}
+
+fn read_provider_key_from(key_file: Option<&std::ffi::OsStr>) -> Result<Zeroizing<String>> {
+    if let Some(path) = key_file {
+        let raw = std::fs::read_to_string(path).map_err(|error| {
+            // The path is deliberately omitted: it is operator-controlled and a
+            // diagnostic must not become a second disclosure channel for it.
+            anyhow!(
+                "KERNA_ANTHROPIC_KEY_FILE could not be read ({})",
+                error.kind()
+            )
+        })?;
+        return Ok(Zeroizing::new(raw.trim().to_string()));
+    }
+    Ok(Zeroizing::new(
+        Password::new()
+            .with_prompt(
+                "Anthropic API key (sent to the broker over stdin; never stored in container metadata)",
+            )
+            .interact()?,
+    ))
 }
 
 /// Production Claude launch. The agent and trusted broker run in separate
@@ -300,19 +379,27 @@ pub async fn launch_claude(
     if !git_root(repo)?.is_dir() {
         return Err(anyhow!("repository is unavailable"));
     }
+    // Rehearsals and provider faults can leave a labeled broker holding the
+    // loopback port this session is about to allocate.
+    match sweep_stale_sessions() {
+        Ok(report) if !report.is_empty() => {
+            println!(
+                "[i] swept {} stale managed container(s) and {} network(s); {} disposable worktree(s) retained for review",
+                report.containers.len(),
+                report.networks.len(),
+                report.retained_worktrees.len()
+            );
+        }
+        Ok(_) => {}
+        Err(error) => println!("[!] could not sweep stale managed resources: {error}"),
+    }
     let image_id = verified_agent_image_id()?;
     let session_token = Uuid::new_v4().to_string();
     let suffix = &session_token[..8];
     let session_dir = create_disposable_clone(repo, &session_token)?;
     let state_dir = prepare_broker_state(&session_token)?;
     let evidence_db = state_dir.join("evidence.db");
-    let cloud_key = Zeroizing::new(
-        Password::new()
-            .with_prompt(
-                "Anthropic API key (sent to the broker over stdin; never stored in container metadata)",
-            )
-            .interact()?,
-    );
+    let cloud_key = read_provider_key()?;
     if cloud_key.trim().is_empty() {
         return Err(anyhow!("Anthropic API key cannot be empty"));
     }
@@ -502,6 +589,7 @@ fn native_broker_container_args(spec: &NativeBrokerContainerSpec<'_>) -> Vec<Str
         Some(spec.container_name),
         spec.network_name,
         spec.session_dir,
+        spec.session_token,
     );
     args.extend([
         "--mount".to_string(),
@@ -923,9 +1011,9 @@ fn create_network(name: &str, internal: bool, session_token: &str) -> Result<()>
         "network".to_string(),
         "create".to_string(),
         "--label".to_string(),
-        "dev.kerna.managed=true".to_string(),
+        MANAGED_LABEL.to_string(),
         "--label".to_string(),
-        format!("dev.kerna.session={}", &session_token[..8]),
+        format!("{MANAGED_SESSION_LABEL_PREFIX}{}", &session_token[..8]),
     ];
     if internal {
         args.push("--internal".to_string());
@@ -952,11 +1040,24 @@ fn container_user() -> String {
     "10001:10001".to_string()
 }
 
-fn common_container_args(name: Option<&str>, network: &str, session_dir: &Path) -> Vec<String> {
+fn common_container_args(
+    name: Option<&str>,
+    network: &str,
+    session_dir: &Path,
+    session_token: &str,
+) -> Vec<String> {
     let mut args = vec!["run".to_string(), "--rm".to_string(), "-i".to_string()];
     if let Some(name) = name {
         args.extend(["--name".to_string(), name.to_string()]);
     }
+    // Same label convention create_network already uses, so a crash-swept
+    // session's containers are discoverable and removable by label alone.
+    args.extend([
+        "--label".to_string(),
+        MANAGED_LABEL.to_string(),
+        "--label".to_string(),
+        format!("{MANAGED_SESSION_LABEL_PREFIX}{}", &session_token[..8]),
+    ]);
     args.extend([
         "--network".to_string(),
         network.to_string(),
@@ -1015,7 +1116,7 @@ fn broker_container_args(
     name: &str,
     session_token: &str,
 ) -> Vec<String> {
-    let mut args = common_container_args(Some(name), network, session_dir);
+    let mut args = common_container_args(Some(name), network, session_dir, session_token);
     args.extend([
         "--mount".to_string(),
         format!(
@@ -1064,7 +1165,7 @@ fn run_claude_container(
     session_token: &str,
     prompt: Option<&str>,
 ) -> Result<()> {
-    let mut args = common_container_args(None, network, session_dir);
+    let mut args = common_container_args(None, network, session_dir, session_token);
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         args.insert(3, "-t".to_string());
     }
@@ -1142,6 +1243,97 @@ impl Drop for ContainerCleanup {
                 .status();
         }
     }
+}
+
+/// Label-scoped crash cleanup. A rehearsal or a provider fault can leave a
+/// broker container and its two networks behind, and a half-dead broker then
+/// steals the loopback port the next session allocates. Managed resources are
+/// found by label, never by name prefix. Disposable worktrees are deliberately
+/// NOT deleted: a crash must preserve reviewable work.
+pub struct SweepReport {
+    pub containers: Vec<String>,
+    pub networks: Vec<String>,
+    pub retained_worktrees: Vec<PathBuf>,
+}
+
+impl SweepReport {
+    pub fn is_empty(&self) -> bool {
+        self.containers.is_empty() && self.networks.is_empty() && self.retained_worktrees.is_empty()
+    }
+}
+
+pub fn sweep_stale_sessions() -> Result<SweepReport> {
+    let mut report = SweepReport {
+        containers: Vec::new(),
+        networks: Vec::new(),
+        retained_worktrees: Vec::new(),
+    };
+    for name in list_labeled(&[
+        "ps",
+        "-a",
+        "--filter",
+        MANAGED_LABEL,
+        "--format",
+        "{{.Names}}",
+    ])? {
+        docker_command()
+            .args(["rm", "--force", &name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        report.containers.push(name);
+    }
+    for name in list_labeled(&[
+        "network",
+        "ls",
+        "--filter",
+        MANAGED_LABEL,
+        "--format",
+        "{{.Name}}",
+    ])? {
+        docker_command()
+            .args(["network", "rm", &name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        report.networks.push(name);
+    }
+    report.retained_worktrees = retained_session_worktrees();
+    Ok(report)
+}
+
+/// Disposable session worktrees on disk. A crash preserves reviewable work, so
+/// neither the sweep nor doctor ever deletes these.
+fn retained_session_worktrees() -> Vec<PathBuf> {
+    let mut worktrees = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(session_root()) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("session-"))
+            {
+                worktrees.push(path);
+            }
+        }
+    }
+    worktrees.sort();
+    worktrees
+}
+
+fn list_labeled(args: &[&str]) -> Result<Vec<String>> {
+    let output = docker_command().args(args).output()?;
+    if !output.status.success() {
+        // Docker may simply not be running yet; that is not a sweep failure.
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 fn prepare_broker_state(session_token: &str) -> Result<PathBuf> {
@@ -1449,6 +1641,55 @@ mod tests {
         assert_eq!(route_name(RouteMode::Cloud), "cloud");
     }
 
+    fn scratch_key_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "kerna-provider-key-{}-{label}.tmp",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn key_file_source_trims_the_value_and_nothing_else() {
+        let path = scratch_key_path("valid");
+        std::fs::write(&path, "  sk-rehearsal-token\n\n").unwrap();
+        let key = read_provider_key_from(Some(path.as_os_str())).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(&*key, "sk-rehearsal-token");
+    }
+
+    #[test]
+    fn unreadable_key_file_reports_only_the_io_kind() {
+        let path = scratch_key_path("missing");
+        let _ = std::fs::remove_file(&path);
+        let error = match read_provider_key_from(Some(path.as_os_str())) {
+            Ok(_) => panic!("a missing key file must fail closed"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("KERNA_ANTHROPIC_KEY_FILE"));
+        assert!(
+            !message.contains(&path.display().to_string()),
+            "the operator-controlled path must not leak into diagnostics"
+        );
+    }
+
+    #[test]
+    fn sweep_report_is_empty_only_with_no_managed_resources_or_worktrees() {
+        let mut report = SweepReport {
+            containers: Vec::new(),
+            networks: Vec::new(),
+            retained_worktrees: Vec::new(),
+        };
+        assert!(report.is_empty());
+        report
+            .retained_worktrees
+            .push(PathBuf::from("session-deadbeef"));
+        assert!(
+            !report.is_empty(),
+            "retained worktrees must still be reported to the operator"
+        );
+    }
+
     #[test]
     fn agent_image_provenance_rejects_relabelled_or_mutable_inputs() {
         let valid = format!(
@@ -1493,13 +1734,18 @@ mod tests {
     fn production_container_contract_exposes_only_the_disposable_workspace() {
         let session_dir = std::env::temp_dir().join(format!("kerna-agent-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&session_dir).unwrap();
-        let args = common_container_args(None, "kerna-agent-test", &session_dir);
+        let args = common_container_args(None, "kerna-agent-test", &session_dir, "abcdef01-token");
         let rendered = args.join(" ");
         assert!(rendered.contains("--network kerna-agent-test"));
         assert!(rendered.contains("--read-only"));
         assert!(rendered.contains("--cap-drop=ALL"));
         assert!(rendered.contains("--security-opt=no-new-privileges:true"));
         assert!(rendered.contains("dst=/workspace"));
+        // Crash-sweep discoverability: containers must carry the same label
+        // scope that managed networks already use.
+        assert!(rendered.contains("--label dev.kerna.managed=true"));
+        assert!(rendered.contains("--label dev.kerna.session=abcdef01"));
+        assert!(!rendered.contains("abcdef01-token"));
         assert_eq!(
             args.iter().filter(|arg| arg.as_str() == "--mount").count(),
             1
@@ -1544,7 +1790,8 @@ mod tests {
             "12345678-session",
         )
         .join(" ");
-        let agent = common_container_args(None, "agent-net", &workspace).join(" ");
+        let agent =
+            common_container_args(None, "agent-net", &workspace, "12345678-session").join(" ");
         assert!(broker.contains("dst=/kerna-state"));
         assert!(broker.contains("KERNA_DB_PATH=/kerna-state/evidence.db"));
         assert!(!agent.contains("kerna-state"));

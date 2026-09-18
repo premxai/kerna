@@ -886,6 +886,9 @@ pub enum GuardCommands {
         #[arg(long)]
         host_demo: bool,
     },
+    /// Remove Kerna-managed containers and networks left by a crashed session.
+    /// Disposable worktrees are reported for review and never deleted.
+    Cleanup,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1409,12 +1412,21 @@ fn print_kerna_skills() {
 fn print_quick_help() {
     println!("Kerna — route, govern, and prove AI-agent work.\n");
     println!("Usage:");
-    println!("  kerna                         Start governed Claude (auto route + local shadow)");
     println!("  kerna doctor                  Check hardware, models, keys, and sandboxes");
+    println!("  kerna claude --repo . --route cloud --no-shadow");
+    println!(
+        "                                Start a Docker-contained, receipt-governed Claude session"
+    );
+    println!("  kerna guard doctor            Verify the pinned agent image and containment prerequisites");
+    println!(
+        "  kerna guard cleanup           Remove containers/networks left by a crashed session"
+    );
     println!("  kerna ask \"<question>\"       Ask a model without granting tools");
     println!("  kerna chat                   Chat with in-memory context and no tools");
     println!("  kerna code \"<goal>\"         Plan repo work without granting tools");
-    println!("  kerna claude --route local   Force private local inference");
+    println!(
+        "  kerna claude --host-demo      Legacy host-launched demo; not production containment"
+    );
     println!("  kerna sandbox                Run bounded Python in Wasmer");
     println!("  kerna replay <evidence.json> Open signed read-only evidence");
     println!("  kerna skills                 Show active governance capabilities");
@@ -2039,13 +2051,13 @@ async fn async_main() -> Result<()> {
     let arguments = std::env::args_os().collect::<Vec<_>>();
     let first = arguments.get(1).and_then(|arg| arg.to_str());
     if first.is_none() {
-        guard_launcher::launch_claude(
-            std::path::Path::new("."),
-            guard_routing::RouteMode::Auto,
-            true,
-            None,
-        )
-        .await?;
+        // Production containment is cloud-routed with no shadow, so the old
+        // bare `kerna` auto-route + shadow call always failed closed and read
+        // as a crash. Print the working invocation instead.
+        print_quick_help();
+        println!("\nStart a contained session:");
+        println!("  kerna claude --repo . --route cloud --no-shadow");
+        println!("Check prerequisites first: kerna guard doctor");
         return Ok(());
     }
     if matches!(first, Some("--help" | "-h" | "help")) {
@@ -2233,6 +2245,21 @@ async fn async_main() -> Result<()> {
                     } else {
                         guard_launcher::launch_claude(repo, *route, *shadow, prompt.as_deref())
                             .await?;
+                    }
+                }
+                GuardCommands::Cleanup => {
+                    let report = guard_launcher::sweep_stale_sessions()?;
+                    for name in &report.containers {
+                        println!("[-] removed managed container {name}");
+                    }
+                    for name in &report.networks {
+                        println!("[-] removed managed network {name}");
+                    }
+                    for worktree in &report.retained_worktrees {
+                        println!("[i] retained disposable worktree {}", worktree.display());
+                    }
+                    if report.is_empty() {
+                        println!("[+] nothing to clean; no managed resources or worktrees found");
                     }
                 }
             }
