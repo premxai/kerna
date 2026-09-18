@@ -7,7 +7,7 @@ Last updated: 2026-09-18
 - Workspace root: `F:\Kerna-MVP`
 - Kerna implementation repo: `F:\Kerna-MVP\repos\kerna`
 - Kerna branch: `mvp/kerna-guard`
-- Kerna latest pushed implementation commit before this handoff: `ba1f80e` (`Add native code proposal preflight`)
+- Kerna latest pushed implementation commit before this handoff: `0263a60` (`Add native code contained read-only inspection`)
 - Root docs latest local commit: `24a11f6` (`Record native proposal preflight completion`)
 - LocalM branch: `mvp/reference-baseline`
 - LocalM latest commit: `9570339`
@@ -19,20 +19,25 @@ Last updated: 2026-09-18
 
 Continue `PROJECT_STATE.md` `CURRENT_TASK`.
 
-The active work is Native CLI Harness Phase 7: add the first read-only inspection path for
-`kerna code`.
+The active work is Native CLI Harness Phase 8: add the first approval surface for native
+`kerna code`, so `ask`-policy inspection reads can be released only through an explicit one-time
+receipt-bound decision.
 
-Phase 6 is complete and pushed in Kerna at `ba1f80e`:
+Phase 7 is complete and pushed in Kerna at `0263a60`:
 
-- `kerna code` emits ordinary assistant prose plus one strict proposal envelope between
-  `KERNA_PROPOSAL_JSON_BEGIN` and `KERNA_PROPOSAL_JSON_END`.
-- Supported proposed action kinds are `file_read`, `file_write`, `shell`, `network`, and `package`.
-- Proposed actions normalize through `ActionIntent` and emit `proposal.preflight`.
-- Preflight actions are explicitly non-executable:
-  - `executable=false`
-  - `receipt_state=preflight_only_not_requested`
-- Malformed, missing, unknown, extra-field, and oversized proposal envelopes fail closed.
-- No proposal is executed, approved, released, applied, or receipted as requested yet.
+- Eligible `file_read` proposal actions convert into receipt-bound, contained, read-only inspection.
+- Every other action kind stays preflight-only and non-executable.
+- Inspection lifecycle events: `inspection.requested`, `inspection.blocked`, `inspection.released`,
+  `inspection.result_observed`, `inspection.outcome_unknown`.
+- The guard binding commits `requested` plus `released` before any read happens; the result is
+  recorded `result_observed` with digest-only details (bytes, SHA-256, truncated flag).
+- Read failures after release mark the receipt `outcome_unknown`, never executed.
+- Targets fail closed on absolute/drive/home/`..`/device-name paths, `.git` internals, secret
+  paths, evidence-database sidecars, symlink escapes, missing, non-regular, and >512 KiB files.
+- Reads return an 8 KiB preview plus full-content SHA-256; file content is never persisted.
+- Containment label is `trusted_cli_worktree_read`; no container containment is claimed.
+- Policy `deny` blocks; policy `ask` stays preflight-only because Phase 7 has no approval surface.
+- SB-022 classifies the new surface; SB-021 now defers file-content reads to it.
 
 ## Important boundary rules
 
@@ -40,79 +45,76 @@ Phase 6 is complete and pushed in Kerna at `ba1f80e`:
 - Do not claim Codex certification.
 - Do not publish a release without explicit authorization.
 - Do not broaden `kerna code` into writes, shell, package installs, network fetches, patch
-  application, or original-repository mutation during Phase 7.
+  application, or original-repository mutation during Phase 8.
 - Keep trusted-host Kerna administration separate from model-controlled actions.
 - Credit Docker/container containment only when there is runtime proof.
 - Preserve unrelated user files and existing LocalM history.
 
-## Phase 7 target
+## Phase 8 target
 
-Implement only read-only file inspection for eligible `file_read` proposals from
-`proposal.preflight`.
+Implement only the approval surface for contained read-only inspection. The command remains
+read-only: no writes, shell, package, network, patch apply, or original-repository mutation.
 
 Required behavior:
 
-1. Convert eligible `file_read` proposals into a receipt-bound read action.
-2. Record a clear lifecycle:
-   - `requested`
-   - `released`
-   - `result_observed`
-   - or fail closed
-3. Read only repository files inside the allowed worktree boundary.
-4. Block:
-   - absolute paths
-   - `..` traversal
-   - symlink escapes
-   - host home access
-   - sibling repositories
-   - secrets/evidence database paths
-   - oversized files
-5. Return bounded read results only; do not persist raw customer code/model prose by default.
-6. Keep non-`file_read` proposals preflight-only for now.
-7. Update SB-021 or add SB-022 so the machine-readable inventory covers the new action surface.
+1. `ask`-policy `file_read` inspection requests create a pending approval bound to the existing
+   `GuardActionBinding` machinery (session, agent version, policy digest, worktree baseline,
+   canonical action digest, expiry).
+2. The approval decision happens in the trusted CLI process (for example a terminal
+   `dialoguer` confirm) — never model-controlled.
+3. Release only after the decision receipt commits; approvals are one-time.
+4. Denial, expiry, mismatch, or persistence failure leaves the read blocked and unreleased.
+5. `allow`-policy reads keep the existing auto-release path; `deny` stays blocked.
+6. Keep the `inspection.*` event vocabulary; add approval-shaped events only if needed.
+7. Update SB-022 (or add SB-023) so the machine-readable inventory covers the approval surface.
 
 ## Good starting files
 
+- `kernel/src/native_inspect.rs`
+  - inspection boundary, receipt lifecycle, and tests
 - `kernel/src/native_code.rs`
-  - proposal envelope parsing
-  - `ProposalPreflight`
-  - `ProposalActionPreflight`
-  - Phase 6 tests
+  - proposal envelope parsing and parsed actions
 - `kernel/src/main.rs`
-  - `run_native_code`
-  - emits `proposal.preflight`
+  - `run_native_code` inspection orchestration
 - `kernel/src/native_cli.rs`
   - stable JSON events and human rendering
 - `kernel/src/memory.rs`
-  - existing guard receipt event lifecycle
+  - guard receipts, approvals, `create_guard_action` ask path
 - `kernel/src/server.rs`
-  - existing `ActionIntent` + receipt binding helpers for governed actions
+  - existing approval binding and one-time release proofs
 - `contracts/security-action-inventory.json`
-  - SB-021 native code proposal preflight entry
+  - SB-022 native inspection entry
 - `docs/NATIVE_CLI_HARNESS.md`
   - human-readable native harness contract
 
-## Verification baseline from Phase 6
+## Verification baseline from Phase 7
 
 Last verified on Windows before this handoff:
 
 ```powershell
-$env:CARGO_TARGET_DIR='C:\Temp\kerna-phase6-target'
+$env:CARGO_TARGET_DIR='C:\Temp\kerna-phase7-target'
 cargo clippy --locked -- -D warnings
 cargo test --locked -- --test-threads=1
+cargo test --locked --test security_action_inventory -- --test-threads=1
 cargo build --locked
-& 'C:\Temp\kerna-phase6-target\debug\kerna.exe' code 'Plan a safe README update' --repo . --provider mock --json
+& 'C:\Temp\kerna-phase7-target\debug\kerna.exe' code 'Plan a safe README update' --repo . --provider mock --json
 ```
 
 Results:
 
 - strict Clippy passed
-- 232 unit/integration tests passed
+- 248 unit/integration tests passed
 - 4 inventory tests passed
 - build passed
-- mock `kerna code` emitted `proposal.preflight`
+- mock `kerna code` emitted the full inspection lifecycle
+  (`inspection.requested` → `inspection.released` → `inspection.result_observed`)
+- the mock smoke receipt chain in `kerna.db` was `requested` → `released` → `result_observed`
+  with digest-only payload and no file content
 - inert-key Anthropic probe failed safely and left zero native broker containers/networks
 - root `scripts/verify-project.ps1` passed with expected warnings
+- pre-existing non-native gateway Docker resources (`kerna-broker-*`, `kerna-agent-*`,
+  `kerna-egress-*` networks) predate this work; they are not created by the native path and
+  were left untouched
 
 ## Before ending the next checkpoint
 
@@ -120,7 +122,7 @@ Results:
 2. Run:
 
    ```powershell
-   $env:CARGO_TARGET_DIR='C:\Temp\kerna-phase7-target'
+   $env:CARGO_TARGET_DIR='C:\Temp\kerna-phase8-target'
    cargo clippy --locked -- -D warnings
    cargo test --locked -- --test-threads=1
    cargo test --locked --test security_action_inventory -- --test-threads=1
