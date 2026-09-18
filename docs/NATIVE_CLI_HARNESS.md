@@ -91,6 +91,39 @@ checkpoint creates the product surface for repository work without pretending th
 executable plan. The next checkpoint may add contained inspection only after each action has a
 receipt/approval path before release.
 
+## Fourth checkpoint: `kerna code` contained read-only inspection
+
+```text
+kerna code "Inspect the README before proposing changes" --repo . --provider anthropic
+kerna code "Inspect the README before proposing changes" --repo . --provider mock --json
+```
+
+The second `kerna code` checkpoint converts eligible `file_read` proposal actions into
+receipt-bound, contained, read-only inspection. Every other action kind — `file_write`, `shell`,
+`network`, `package` — stays preflight-only and is never executed.
+
+Each eligible `file_read` becomes a guard action binding (session, agent version, policy digest,
+worktree baseline digest, canonical action digest) whose `requested` plus `released` receipt rows
+commit atomically before any read happens. The read result is then recorded as `result_observed`
+with digest-only details: bytes read, content SHA-256, and a truncation flag. If the read or the
+observation fails after release, the receipt is marked `outcome_unknown` and never reported as
+executed. File content is never persisted to the database; only the bounded preview returned to the
+caller in the event stream carries content.
+
+Inspection is contained to the trusted CLI process and the resolved repository worktree boundary —
+the containment label is `trusted_cli_worktree_read`, and container containment is not claimed or
+credited for this path. Targets fail closed on absolute paths, Windows drive/UNC/verbatim forms,
+home references, `..` traversal, reserved device names, `.git` internals, canonical secret paths,
+the evidence database and its sidecar files, symlink escapes outside the worktree (resolved
+post-canonicalization), missing or unresolvable paths, non-regular files, and files above the
+512 KiB cap. Reads return at most an 8 KiB preview with a full-content SHA-256 digest. Policy `deny`
+blocks the read; policy `ask` stays preflight-only because this checkpoint has no approval surface;
+unreceiptable actions fail closed.
+
+The command remains a dry-run for everything except these contained reads: no writes, shell
+execution, package installs, network fetches, patch apply, or original repository mutation of any
+kind.
+
 ## Stable internal event direction
 
 Later interactive and automated clients will consume one structured event vocabulary:
@@ -99,6 +132,9 @@ Later interactive and automated clients will consume one structured event vocabu
 session.started
 assistant.delta
 proposal.preflight
+inspection.requested | inspection.blocked
+inspection.released
+inspection.result_observed | inspection.outcome_unknown
 context.cleared
 tool.requested
 approval.required
@@ -107,8 +143,11 @@ tool.result_observed
 session.completed | session.failed | session.interrupted
 ```
 
-The ordinary CLI renders these events as line-oriented text. Browser, desktop, IDE, and CI clients
-can consume the same event stream without embedding a third-party full-screen terminal UI.
+The `inspection.*` events are the read-only specialization of the future `tool.*` vocabulary: the
+same requested/released/result-observed lifecycle with an explicit fail-closed blocked state and an
+honest outcome-unknown state. The ordinary CLI renders these events as line-oriented text. Browser,
+desktop, IDE, and CI clients can consume the same event stream without embedding a third-party
+full-screen terminal UI.
 
 ## Non-negotiable boundary
 

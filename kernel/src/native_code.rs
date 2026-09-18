@@ -1,4 +1,4 @@
-use crate::guard_policy::{ActionIntent, AgentKind, GuardPolicy};
+use crate::guard_policy::{ActionIntent, AgentKind, GuardPolicy, PolicyDecision};
 use crate::guard_protocol::{ActionCandidate, Protocol};
 use crate::scheduler::ChatMessage;
 use anyhow::{anyhow, Context, Result};
@@ -30,6 +30,22 @@ pub struct ProposalPreflight {
     pub mode: &'static str,
     pub receipt_state: &'static str,
     pub actions: Vec<ProposalActionPreflight>,
+}
+
+/// Parse result for one assistant proposal: the stable preflight rendering plus
+/// the canonical intent and policy decision that later governed phases need to
+/// bind receipts without re-normalizing raw model text.
+#[derive(Debug, Clone)]
+pub struct ProposalPreflightParsed {
+    pub preflight: ProposalPreflight,
+    pub actions: Vec<ProposalAction>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProposalAction {
+    pub proposed_kind: String,
+    pub intent: ActionIntent,
+    pub decision: PolicyDecision,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -122,7 +138,7 @@ pub fn parse_proposal_preflight(
     assistant_text: &str,
     policy: &GuardPolicy,
     session_id: &str,
-) -> Result<ProposalPreflight> {
+) -> Result<ProposalPreflightParsed> {
     let raw = extract_proposal_json(assistant_text)?;
     let envelope: ProposalEnvelope =
         serde_json::from_str(raw).context("proposal envelope was malformed")?;
@@ -134,16 +150,20 @@ pub fn parse_proposal_preflight(
             "proposal envelope contained more than {PROPOSAL_ACTION_LIMIT} actions"
         ));
     }
-    let actions = envelope
-        .actions
-        .iter()
-        .enumerate()
-        .map(|(index, action)| preflight_action(index, action, policy, session_id))
-        .collect::<Result<Vec<_>>>()?;
-    Ok(ProposalPreflight {
-        schema_version: 1,
-        mode: "preflight_only",
-        receipt_state: "preflight_only_not_requested",
+    let mut preflight_actions = Vec::with_capacity(envelope.actions.len());
+    let mut actions = Vec::with_capacity(envelope.actions.len());
+    for (index, action) in envelope.actions.iter().enumerate() {
+        let (preflight_action, action) = preflight_action(index, action, policy, session_id)?;
+        preflight_actions.push(preflight_action);
+        actions.push(action);
+    }
+    Ok(ProposalPreflightParsed {
+        preflight: ProposalPreflight {
+            schema_version: 1,
+            mode: "preflight_only",
+            receipt_state: "preflight_only_not_requested",
+            actions: preflight_actions,
+        },
         actions,
     })
 }
@@ -167,7 +187,7 @@ fn preflight_action(
     action: &ProposalActionInput,
     policy: &GuardPolicy,
     session_id: &str,
-) -> Result<ProposalActionPreflight> {
+) -> Result<(ProposalActionPreflight, ProposalAction)> {
     let proposed_kind = action.kind.trim().to_ascii_lowercase();
     let reason = bounded_text("reason", &action.reason)?;
     let (raw_tool_name, arguments, required_containment) = match proposed_kind.as_str() {
@@ -212,22 +232,29 @@ fn preflight_action(
     );
     let decision = policy.evaluate(&intent);
     let canonical_action_digest = intent.canonical_digest();
-    Ok(ProposalActionPreflight {
-        id: candidate.id,
-        proposed_kind,
-        reason,
-        raw_tool_name: intent.raw_tool_name,
-        action_kind: stable_label(intent.kind)?,
-        canonical_resource: intent.canonical_resource,
-        canonical_action_digest,
-        policy_effect: stable_label(decision.effect)?,
-        policy_rule: decision.rule_id,
-        policy_reason: decision.reason,
-        required_containment,
-        executable: false,
-        receipt_state: "preflight_only_not_requested",
-        risk_tags: intent.risk_tags,
-    })
+    Ok((
+        ProposalActionPreflight {
+            id: candidate.id,
+            proposed_kind: proposed_kind.clone(),
+            reason,
+            raw_tool_name: intent.raw_tool_name.clone(),
+            action_kind: stable_label(intent.kind)?,
+            canonical_resource: intent.canonical_resource.clone(),
+            canonical_action_digest: canonical_action_digest.clone(),
+            policy_effect: stable_label(decision.effect)?,
+            policy_rule: decision.rule_id.clone(),
+            policy_reason: decision.reason.clone(),
+            required_containment,
+            executable: false,
+            receipt_state: "preflight_only_not_requested",
+            risk_tags: intent.risk_tags.clone(),
+        },
+        ProposalAction {
+            proposed_kind,
+            intent,
+            decision,
+        },
+    ))
 }
 
 fn stable_label<T: Serialize>(value: T) -> Result<String> {
@@ -379,8 +406,8 @@ KERNA_PROPOSAL_JSON_BEGIN
   {"kind":"shell","command":"cargo test","reason":"verify"}
 ]}
 KERNA_PROPOSAL_JSON_END"#;
-        let preflight =
-            parse_proposal_preflight(text, &GuardPolicy::balanced(), "session-1").unwrap();
+        let parsed = parse_proposal_preflight(text, &GuardPolicy::balanced(), "session-1").unwrap();
+        let preflight = parsed.preflight;
         assert_eq!(preflight.mode, "preflight_only");
         assert_eq!(preflight.receipt_state, "preflight_only_not_requested");
         assert_eq!(preflight.actions.len(), 2);
@@ -397,6 +424,15 @@ KERNA_PROPOSAL_JSON_END"#;
             preflight.actions[1].canonical_resource.as_deref(),
             Some("cargo")
         );
+        // The parsed actions keep the canonical intent and decision for governed phases
+        // without exposing raw model text beyond the already-validated envelope fields.
+        assert_eq!(parsed.actions[0].proposed_kind, "file_write");
+        assert_eq!(parsed.actions[0].intent.id, "proposal_1");
+        assert_eq!(
+            parsed.actions[0].intent.canonical_resource.as_deref(),
+            Some("src/lib.rs")
+        );
+        assert!(!parsed.actions[0].intent.canonical_digest().is_empty());
     }
 
     #[test]

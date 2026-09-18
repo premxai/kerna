@@ -1068,6 +1068,87 @@ impl MemoryEngine {
     /// Correlate a later Anthropic `tool_result` to the released action without storing its
     /// content. Only a released action can advance to result_observed.
     pub fn observe_guard_result(&self, session_id: &str, call_id: &str) -> Result<bool> {
+        self.observe_guard_result_with_details(session_id, call_id, r#"{"result":"observed"}"#)
+    }
+
+    /// Correlate a completed governed action to its released receipt without storing raw
+    /// content. `details_json` must carry digests and metadata only; callers validate that
+    /// before reaching this method.
+    pub fn observe_guard_result_with_details(
+        &self,
+        session_id: &str,
+        call_id: &str,
+        details_json: &str,
+    ) -> Result<bool> {
+        let Some((binding, approval_id)) = self.released_receipt_binding(session_id, call_id)?
+        else {
+            return Ok(false);
+        };
+        let conn = self.get_conn();
+        let tx = conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE tool_call_receipts SET result_class = 'result_observed',
+             completed_at = ?1 WHERE session_id = ?2 AND call_id = ?3 AND result_class = 'released'",
+            params![chrono::Utc::now().to_rfc3339(), session_id, call_id],
+        )?;
+        if changed != 1 {
+            tx.rollback()?;
+            return Ok(false);
+        }
+        append_guard_receipt_event(
+            &tx,
+            &binding,
+            "result_observed",
+            approval_id.as_deref(),
+            &chrono::Utc::now().to_rfc3339(),
+            details_json,
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// A released action whose outcome could not be recorded (for example a native inspection
+    /// read that failed after its release receipt committed) is explicitly downgraded to
+    /// outcome_unknown instead of being left claiming an observed or executed result.
+    pub fn mark_guard_outcome_unknown(
+        &self,
+        session_id: &str,
+        call_id: &str,
+        details_json: &str,
+    ) -> Result<bool> {
+        let Some((binding, approval_id)) = self.released_receipt_binding(session_id, call_id)?
+        else {
+            return Ok(false);
+        };
+        let conn = self.get_conn();
+        let tx = conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE tool_call_receipts SET result_class = 'outcome_unknown',
+             completed_at = ?1 WHERE session_id = ?2 AND call_id = ?3 AND result_class = 'released'",
+            params![chrono::Utc::now().to_rfc3339(), session_id, call_id],
+        )?;
+        if changed != 1 {
+            tx.rollback()?;
+            return Ok(false);
+        }
+        append_guard_receipt_event(
+            &tx,
+            &binding,
+            "outcome_unknown",
+            approval_id.as_deref(),
+            &chrono::Utc::now().to_rfc3339(),
+            details_json,
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Rebuild the binding of a still-released receipt row for terminal lifecycle updates.
+    fn released_receipt_binding(
+        &self,
+        session_id: &str,
+        call_id: &str,
+    ) -> Result<Option<(GuardActionBinding, Option<String>)>> {
         let conn = self.get_conn();
         let row: Option<ReleasedGuardReceiptRow> = conn
             .query_row(
@@ -1103,41 +1184,24 @@ impl MemoryEngine {
             approval_id,
         )) = row
         else {
-            return Ok(false);
+            return Ok(None);
         };
-        let tx = conn.unchecked_transaction()?;
-        let changed = tx.execute(
-            "UPDATE tool_call_receipts SET result_class = 'result_observed',
-             completed_at = ?1 WHERE session_id = ?2 AND call_id = ?3 AND result_class = 'released'",
-            params![chrono::Utc::now().to_rfc3339(), session_id, call_id],
-        )?;
-        if changed != 1 {
-            tx.rollback()?;
-            return Ok(false);
-        }
-        let binding = GuardActionBinding {
-            call_id: call_id.to_owned(),
-            session_id: session_id.to_owned(),
-            task_id,
-            agent: agent.unwrap_or_else(|| "claude_code".to_owned()),
-            agent_version: agent_version.unwrap_or_else(|| "unknown".to_owned()),
-            protocol: protocol.unwrap_or_else(|| "anthropic_messages".to_owned()),
-            tool,
-            canonical_action_digest,
-            policy_digest,
-            worktree_baseline,
-            binding_hash: "unknown".to_owned(),
-        };
-        append_guard_receipt_event(
-            &tx,
-            &binding,
-            "result_observed",
-            approval_id.as_deref(),
-            &chrono::Utc::now().to_rfc3339(),
-            r#"{"result":"observed"}"#,
-        )?;
-        tx.commit()?;
-        Ok(true)
+        Ok(Some((
+            GuardActionBinding {
+                call_id: call_id.to_owned(),
+                session_id: session_id.to_owned(),
+                task_id,
+                agent: agent.unwrap_or_else(|| "claude_code".to_owned()),
+                agent_version: agent_version.unwrap_or_else(|| "unknown".to_owned()),
+                protocol: protocol.unwrap_or_else(|| "anthropic_messages".to_owned()),
+                tool,
+                canonical_action_digest,
+                policy_digest,
+                worktree_baseline,
+                binding_hash: "unknown".to_owned(),
+            },
+            approval_id,
+        )))
     }
 
     pub fn start_gateway_session(
@@ -2310,6 +2374,133 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result_class, "result_observed");
+    }
+
+    #[test]
+    fn native_inspection_receipt_lifecycle_is_digest_only() {
+        let mem = setup_test_db("test_native_inspection_receipts");
+        let binding = GuardActionBinding {
+            call_id: "code-session-1:proposal_1".to_owned(),
+            session_id: "code-session-1".to_owned(),
+            task_id: "code-session-1".to_owned(),
+            agent: "kerna_native".to_owned(),
+            agent_version: "0.2.9".to_owned(),
+            protocol: "anthropic_messages".to_owned(),
+            tool: "Read".to_owned(),
+            canonical_action_digest: "sha256:action".to_owned(),
+            policy_digest: "sha256:policy".to_owned(),
+            worktree_baseline: "sha256:baseline".to_owned(),
+            binding_hash: "sha256:binding".to_owned(),
+        };
+        let summary = r#"{"source":"native_code_proposal","resolved_path":"src/lib.rs","file_size_bytes":10}"#;
+        // An allow decision without an approval requirement commits the
+        // requested+released receipt atomically and returns no approval id.
+        assert_eq!(
+            mem.create_guard_action(&binding, "allow", summary, false)
+                .unwrap(),
+            None
+        );
+
+        let details =
+            r#"{"result":"observed","bytes_read":10,"content_sha256":"abc123","truncated":false}"#;
+        assert!(mem
+            .observe_guard_result_with_details(&binding.session_id, &binding.call_id, details)
+            .unwrap());
+        assert!(!mem
+            .observe_guard_result_with_details(&binding.session_id, &binding.call_id, details)
+            .unwrap());
+
+        let conn = mem.get_conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_type, payload_json FROM guard_receipt_events ORDER BY sequence ASC",
+            )
+            .unwrap();
+        let events: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["requested", "released", "result_observed"]
+        );
+        let raw_file_content = "fn main() { secret-customer-source }";
+        assert!(events
+            .iter()
+            .all(|event| !event.1.contains(raw_file_content)));
+        let result_class: String = conn
+            .query_row(
+                "SELECT result_class FROM tool_call_receipts WHERE call_id = ?1",
+                params![binding.call_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(result_class, "result_observed");
+    }
+
+    #[test]
+    fn released_guard_action_can_be_marked_outcome_unknown() {
+        let mem = setup_test_db("test_native_outcome_unknown");
+        let binding = GuardActionBinding {
+            call_id: "code-session-2:proposal_1".to_owned(),
+            session_id: "code-session-2".to_owned(),
+            task_id: "code-session-2".to_owned(),
+            agent: "kerna_native".to_owned(),
+            agent_version: "0.2.9".to_owned(),
+            protocol: "anthropic_messages".to_owned(),
+            tool: "Read".to_owned(),
+            canonical_action_digest: "sha256:action".to_owned(),
+            policy_digest: "sha256:policy".to_owned(),
+            worktree_baseline: "sha256:baseline".to_owned(),
+            binding_hash: "sha256:binding".to_owned(),
+        };
+        mem.create_guard_action(&binding, "allow", "{\"tool\":\"Read\"}", false)
+            .unwrap();
+        // The allow-without-approval path returns no approval id; the receipt
+        // row is already released and can be downgraded on a failed outcome.
+        assert!(mem
+            .mark_guard_outcome_unknown(
+                &binding.session_id,
+                &binding.call_id,
+                r#"{"result":"unknown","reason":"read_failed"}"#
+            )
+            .unwrap());
+        // A terminal outcome cannot be rewritten by a later attempt.
+        assert!(!mem
+            .mark_guard_outcome_unknown(
+                &binding.session_id,
+                &binding.call_id,
+                r#"{"result":"unknown","reason":"read_failed"}"#
+            )
+            .unwrap());
+        assert!(!mem
+            .observe_guard_result(&binding.session_id, &binding.call_id)
+            .unwrap());
+
+        let conn = mem.get_conn();
+        let result_class: String = conn
+            .query_row(
+                "SELECT result_class FROM tool_call_receipts WHERE call_id = ?1",
+                params![binding.call_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(result_class, "outcome_unknown");
+        let event_types: Vec<String> = conn
+            .prepare("SELECT event_type FROM guard_receipt_events ORDER BY sequence ASC")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            event_types,
+            vec!["requested", "released", "outcome_unknown"]
+        );
     }
 
     #[test]

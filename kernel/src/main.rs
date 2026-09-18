@@ -23,6 +23,7 @@ mod mockmcp;
 mod models;
 mod native_cli;
 mod native_code;
+mod native_inspect;
 mod onboarding;
 mod packs;
 mod permissions;
@@ -1439,16 +1440,25 @@ fn main() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("Kerna runtime thread panicked"))?
 }
 
+/// Shared runtime pieces for the native `ask`, `chat`, and `code` commands.
+///
+/// `memory` and `evidence_db_path` exist for the `code` contained read-only
+/// inspection path (SB-022); `ask` and `chat` never persist prompts or model
+/// prose, so they simply drop those fields when destructuring.
+struct NativeRuntime {
+    scheduler: TaskScheduler,
+    broker: Option<guard_launcher::NativeAskBroker>,
+    broker_provider: Option<providers::ResolvedProvider>,
+    event_model: String,
+    memory: Arc<MemoryEngine>,
+    evidence_db_path: std::path::PathBuf,
+}
+
 fn build_native_toolless_runtime(
     repo: &std::path::Path,
     provider: &str,
     model: Option<String>,
-) -> Result<(
-    TaskScheduler,
-    Option<guard_launcher::NativeAskBroker>,
-    Option<providers::ResolvedProvider>,
-    String,
-)> {
+) -> Result<NativeRuntime> {
     let mut config = Config::load();
     config.llm_provider = provider.to_string();
     if let Some(model) = model {
@@ -1481,10 +1491,11 @@ fn build_native_toolless_runtime(
     }
     config.llm_api_key.clear();
     let event_model = config.llm_model.clone();
+    let evidence_db_path = native_inspect::resolve_evidence_db_path(&config.db_path);
     let memory = Arc::new(MemoryEngine::new(&config.db_path)?);
     let scheduler = TaskScheduler::new(
         config,
-        memory,
+        Arc::clone(&memory),
         Arc::new(Mutex::new(McpRegistry::new())),
         None,
     )?;
@@ -1509,7 +1520,14 @@ fn build_native_toolless_runtime(
         api_key: broker.session_token.clone(),
         model: event_model.clone(),
     });
-    Ok((scheduler, broker, broker_provider, event_model))
+    Ok(NativeRuntime {
+        scheduler,
+        broker,
+        broker_provider,
+        event_model,
+        memory,
+        evidence_db_path,
+    })
 }
 
 fn emit_native_event(
@@ -1528,8 +1546,13 @@ async fn run_native_ask(
     model: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let (scheduler, broker, broker_provider, event_model) =
-        build_native_toolless_runtime(std::path::Path::new("."), &provider, model)?;
+    let NativeRuntime {
+        scheduler,
+        broker,
+        broker_provider,
+        event_model,
+        ..
+    } = build_native_toolless_runtime(std::path::Path::new("."), &provider, model)?;
     let session_id = format!("ask-{}", uuid::Uuid::new_v4());
     let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
     emit_native_event(
@@ -1599,8 +1622,13 @@ async fn run_native_ask(
 async fn run_native_chat(provider: String, model: Option<String>, json: bool) -> Result<()> {
     use std::io::{self, Write};
 
-    let (scheduler, broker, broker_provider, event_model) =
-        build_native_toolless_runtime(std::path::Path::new("."), &provider, model)?;
+    let NativeRuntime {
+        scheduler,
+        broker,
+        broker_provider,
+        event_model,
+        ..
+    } = build_native_toolless_runtime(std::path::Path::new("."), &provider, model)?;
     let session_id = format!("chat-{}", uuid::Uuid::new_v4());
     let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
     emit_native_event(
@@ -1747,8 +1775,14 @@ async fn run_native_code(
     json: bool,
 ) -> Result<()> {
     let context = native_code::build_code_dry_run_context(&repo, &goal)?;
-    let (scheduler, broker, broker_provider, event_model) =
-        build_native_toolless_runtime(&context.repo_root, &provider, model)?;
+    let NativeRuntime {
+        scheduler,
+        broker,
+        broker_provider,
+        event_model,
+        memory,
+        evidence_db_path,
+    } = build_native_toolless_runtime(&context.repo_root, &provider, model)?;
     let session_id = format!("code-{}", uuid::Uuid::new_v4());
     let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
     emit_native_event(
@@ -1762,7 +1796,7 @@ async fn run_native_code(
     )?;
     if !json {
         eprintln!(
-            "[i] code dry-run only - no tools, no patch, no repository mutation; HEAD {} status {} ({} status lines, {} tracked files)",
+            "[i] code dry-run plus contained read-only inspection - no writes, shell, network, packages, or patches; HEAD {} status {} ({} status lines, {} tracked files)",
             context.head,
             context.status_digest,
             context.status_line_count,
@@ -1825,12 +1859,12 @@ async fn run_native_code(
     let _broker_guard = broker.as_ref();
     match result {
         Ok(tokens) => {
-            let preflight = match native_code::parse_proposal_preflight(
+            let parsed = match native_code::parse_proposal_preflight(
                 &assistant_text,
                 &guard_policy,
                 &session_id,
             ) {
-                Ok(preflight) => preflight,
+                Ok(parsed) => parsed,
                 Err(error) => {
                     emit_native_event(
                         &renderer,
@@ -1846,9 +1880,140 @@ async fn run_native_code(
                 &renderer,
                 &native_cli::NativeEvent::ProposalPreflight {
                     session_id: session_id.clone(),
-                    preflight,
+                    preflight: parsed.preflight.clone(),
                 },
             )?;
+            let inspection_context = match native_inspect::InspectionContext::new(
+                &context.repo_root,
+                &context.head,
+                &context.status_digest,
+                &evidence_db_path,
+                &session_id,
+            ) {
+                Ok(inspection_context) => inspection_context,
+                Err(error) => {
+                    // Without a canonical worktree boundary no read may
+                    // execute; the whole session fails closed.
+                    emit_native_event(
+                        &renderer,
+                        &native_cli::NativeEvent::SessionFailed {
+                            session_id,
+                            error_class: "inspection_boundary_error",
+                        },
+                    )?;
+                    return Err(error);
+                }
+            };
+            for action in &parsed.actions {
+                if action.proposed_kind != "file_read" {
+                    // Writes, shell, network, and package proposals stay
+                    // preflight-only in this phase.
+                    continue;
+                }
+                let policy_effect = match action.decision.effect {
+                    PolicyEffect::Allow => "allow",
+                    PolicyEffect::Ask => "ask",
+                    PolicyEffect::Deny => "deny",
+                };
+                emit_native_event(
+                    &renderer,
+                    &native_cli::NativeEvent::InspectionRequested {
+                        session_id: session_id.clone(),
+                        action_id: action.intent.id.clone(),
+                        proposed_kind: "file_read",
+                        path: action.intent.canonical_resource.clone().unwrap_or_default(),
+                        canonical_action_digest: action.intent.canonical_digest(),
+                        policy_effect: policy_effect.to_string(),
+                        policy_rule: action.decision.rule_id.clone(),
+                    },
+                )?;
+                let outcome = native_inspect::inspect_file_read(
+                    &memory,
+                    &guard_policy,
+                    &inspection_context,
+                    action,
+                );
+                match outcome {
+                    native_inspect::InspectionOutcome::Blocked {
+                        action_id,
+                        path,
+                        reason,
+                        policy_effect,
+                    } => {
+                        emit_native_event(
+                            &renderer,
+                            &native_cli::NativeEvent::InspectionBlocked {
+                                session_id: session_id.clone(),
+                                action_id,
+                                path,
+                                reason,
+                                policy_effect,
+                            },
+                        )?;
+                    }
+                    native_inspect::InspectionOutcome::Observed {
+                        action_id,
+                        call_id,
+                        canonical_path,
+                        bytes_read,
+                        content_sha256,
+                        truncated,
+                        content,
+                        ..
+                    } => {
+                        emit_native_event(
+                            &renderer,
+                            &native_cli::NativeEvent::InspectionReleased {
+                                session_id: session_id.clone(),
+                                action_id: action_id.clone(),
+                                call_id: call_id.clone(),
+                                path: canonical_path.clone(),
+                                containment: native_inspect::CONTAINMENT_LABEL,
+                            },
+                        )?;
+                        emit_native_event(
+                            &renderer,
+                            &native_cli::NativeEvent::InspectionResultObserved {
+                                session_id: session_id.clone(),
+                                action_id,
+                                call_id,
+                                path: canonical_path,
+                                bytes_read,
+                                content_sha256,
+                                truncated,
+                                content,
+                            },
+                        )?;
+                    }
+                    native_inspect::InspectionOutcome::OutcomeUnknown {
+                        action_id,
+                        call_id,
+                        canonical_path,
+                        reason,
+                    } => {
+                        emit_native_event(
+                            &renderer,
+                            &native_cli::NativeEvent::InspectionReleased {
+                                session_id: session_id.clone(),
+                                action_id: action_id.clone(),
+                                call_id: call_id.clone(),
+                                path: canonical_path.clone(),
+                                containment: native_inspect::CONTAINMENT_LABEL,
+                            },
+                        )?;
+                        emit_native_event(
+                            &renderer,
+                            &native_cli::NativeEvent::InspectionOutcomeUnknown {
+                                session_id: session_id.clone(),
+                                action_id,
+                                call_id: Some(call_id),
+                                path: canonical_path,
+                                reason,
+                            },
+                        )?;
+                    }
+                }
+            }
             emit_native_event(
                 &renderer,
                 &native_cli::NativeEvent::SessionCompleted { session_id, tokens },

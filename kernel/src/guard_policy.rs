@@ -642,7 +642,10 @@ fn risk_tags(
     tags
 }
 
-fn secret_path(path: &str) -> bool {
+/// Canonical secret-path classifier shared by policy evaluation and the native
+/// inspection boundary. The resolved (post-symlink) form of a proposed read is
+/// re-checked against this list before any release.
+pub fn secret_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     [
         "/.ssh/",
