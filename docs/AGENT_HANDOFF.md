@@ -8,7 +8,7 @@ Last updated: 2026-09-18
 - Kerna implementation repo: `F:\Kerna-MVP\repos\kerna`
 - Kerna branch: `mvp/kerna-guard`
 - Kerna latest pushed implementation commit before this handoff: `0263a60` (`Add native code contained read-only inspection`)
-- This handoff ships as the Kerna commit `feat: make the contained rehearsal provable` and contains:
+- This handoff ships as the Kerna commit `e260d53` (`Make the contained rehearsal provable`) and contains:
   `scripts/accept-contained-run.ps1`, the rehearsal fixture under
   `kernel/tests/rehearsal-fixtures/`, `docs/DEMO_READINESS.md`, the
   `KERNA_ANTHROPIC_KEY_FILE` launch affordance, the label-scoped crash sweep with
