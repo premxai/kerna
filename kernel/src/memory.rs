@@ -35,6 +35,11 @@ type ReleasedGuardReceiptRow = (
 
 pub struct MemoryEngine {
     conn: Mutex<Connection>,
+    /// The file this handle was opened on. Reviewers that share the file across
+    /// the containment boundary need it to locate the decision spool beside it.
+    db_path: std::path::PathBuf,
+    /// True when this process may only read the evidence database.
+    reader: bool,
 }
 
 /// Durable lifecycle row for one stdio MCP connection. This is separate from
@@ -104,6 +109,13 @@ impl MemoryEngine {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
+        let shared_flag = std::env::var_os("KERNA_DB_SHARED");
+        let shared = shared_flag.as_deref() == Some(std::ffi::OsStr::new("1"));
+        let reader_flag = std::env::var_os("KERNA_DB_READER");
+        let reader = reader_flag.as_deref() == Some(std::ffi::OsStr::new("1"));
+        if reader {
+            return Self::new_reader(db_path.as_ref());
+        }
         let conn = match Connection::open(&db_path) {
             Ok(c) => c,
             Err(e) => {
@@ -116,8 +128,6 @@ impl MemoryEngine {
 
         // Foreign keys always; the journal mode depends on who else can see the file.
         conn.execute("PRAGMA foreign_keys = ON;", [])?;
-        let shared_flag = std::env::var_os("KERNA_DB_SHARED");
-        let shared = shared_flag.as_deref() == Some(std::ffi::OsStr::new("1"));
         let busy_timeout = if shared { "30000" } else { "5000" };
         conn.execute(&format!("PRAGMA busy_timeout = {busy_timeout};"), [])
             .ok();
@@ -148,9 +158,95 @@ impl MemoryEngine {
 
         let engine = MemoryEngine {
             conn: Mutex::new(conn),
+            db_path: db_path.as_ref().to_path_buf(),
+            reader: false,
         };
         engine.bootstrap()?;
         Ok(engine)
+    }
+
+    /// Open the evidence database the way a reviewer across the containment
+    /// boundary has to open it: read-only, and never as a writer.
+    ///
+    /// A second SQLite user on the other side of a Docker Desktop bind mount is
+    /// not protected by the first user's locks, because the two sides are two
+    /// kernels talking to one file through a translation layer. So when the
+    /// broker has a transaction in flight, its rollback journal looks "hot", and
+    /// an ordinary reader on the host is entitled to conclude that the writer
+    /// died and roll that journal back. That is not a stalled read; it reverts
+    /// receipts the broker already committed. A contained run lost a held
+    /// action's entire `requested` + `approval_pending` transaction this way,
+    /// which is exactly the transaction the waiting gate reads back to decide.
+    ///
+    /// A read-only handle cannot roll a journal back: SQLite returns an error
+    /// instead, and the only cost is one retried poll while the broker is
+    /// mid-write. Reviews therefore see the queue a fraction of a second late
+    /// and never see a lie.
+    fn new_reader(db_path: &Path) -> Result<Self> {
+        // The broker creates the database during its own startup, so a reviewer
+        // that launches alongside it waits for the first schema instead of
+        // declaring the evidence missing.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            // A handle that cannot open yet, or cannot read the schema yet, is
+            // not a failure: the broker is still starting. Anything it does
+            // manage to open is read-only, so a retry can no more damage the
+            // evidence than the first attempt could.
+            if let Ok(conn) = Connection::open_with_flags(
+                db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+            ) {
+                conn.execute("PRAGMA foreign_keys = ON;", []).ok();
+                // A review poll must fail fast and retry rather than sit on a
+                // lock the broker is holding for a few milliseconds.
+                conn.execute("PRAGMA busy_timeout = 5000;", []).ok();
+                conn.execute("PRAGMA query_only = ON;", []).ok();
+                let ready: i64 = conn
+                    .query_row(
+                        "SELECT count(*) FROM sqlite_master WHERE type = 'table' \
+                         AND name = 'pending_approvals'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0);
+                if ready == 1 {
+                    println!("[+] Kerna evidence database open for review, read-only.");
+                    return Ok(MemoryEngine {
+                        conn: Mutex::new(conn),
+                        db_path: db_path.to_path_buf(),
+                        reader: true,
+                    });
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(anyhow::anyhow!(
+                    "the evidence database at {} never became readable. The contained broker \
+                     owns that file; check that the broker is still running.",
+                    db_path.display()
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+
+    /// True when this process may only read evidence, so a caller that wants to
+    /// change a receipt has to hand the decision to the writer instead.
+    pub fn is_reviewer(&self) -> bool {
+        self.reader
+    }
+
+    /// The directory beside the evidence database where a read-only reviewer
+    /// leaves a decision for the broker that owns the database to apply.
+    ///
+    /// Files here are created by the reviewer and never modified or deleted by
+    /// it; the broker only reads them. That keeps the boundary one-way for the
+    /// writer: nothing on the reviewer's side of the mount ever mutates a file
+    /// the broker owns, and no second SQLite connection can reach the journal.
+    pub fn decision_spool(&self) -> std::path::PathBuf {
+        self.db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("decisions")
     }
 
     /// Rollback journal for a database shared across the containment boundary.

@@ -40,13 +40,56 @@ state after that run: four of five required gates pass and the decision is still
 NO-GO solely on macOS hardware. That is a stronger position than a hand-claimed
 GO.
 
+## The evidence database across the boundary
+
+The broker that decides, and the dashboard that reviews, are different machines
+in one respect: the broker runs inside the container and the reviewer's
+dashboard runs on the host, and only one of them may treat the SQLite file as a
+database to write. Two storage rules follow, and both are enforced in
+`kernel/src/memory.rs`:
+
+- **never WAL.** WAL keeps its committed-frame index in a `-shm` memory map,
+  which is only valid inside one kernel. The host would read an empty queue
+  while a real approval was pending.
+- **`journal_mode = TRUNCATE`, not DELETE.** A rollback-journal commit ends by
+  unlinking the journal file, and that unlink has failed across the Windows
+  mount with `Error code 2570: I/O error within xDelete of a VFS object`
+  (`SQLITE_IOERR_DELETE`). The broker took the fault, exited, and the contained
+  agent reported its own gateway as unreachable. TRUNCATE shrinks the journal to
+  zero bytes instead of deleting it, and a zero-length journal is not a hot
+  journal, so the host still sees an ordinary committed database.
+
+- **the reviewer never writes.** SQLite's advisory locks are not honored across
+  the host/container filesystem translation, so a host dashboard that opens the
+  evidence file as a writer races the broker and can revert a transaction the
+  broker already committed. `kerna guard` now launches its dashboard with
+  `KERNA_DB_READER=1`, and `MemoryEngine::new_reader` opens that handle
+  read-only and refuses to bootstrap. A human decision made in the browser is
+  handed back to the broker as a one-shot file in `<state>/decisions/`, and the
+  broker — the only writer — applies it through the same expiry-, digest-, and
+  session-bound checks it uses for a native click. This keeps the release of a
+  held action strictly conditional on a receipt the broker itself committed.
+
+Kerna reads the mode back from the same `PRAGMA` that sets it and warns on the
+trusted side if it did not settle, because journal mode is not recorded in the
+database header the way WAL is — opening a second handle and asking proves
+nothing about the first. `accept-contained-run.ps1` treats that warning, a
+failed receipt commit, and an xDelete fault as run-ending failures rather than
+letting them appear as a client-side error.
+
+The approval queue is held to the same standard: `/api/v1/dashboard/approvals`
+answers 503 when it cannot read (retrying a read-only handle that lost a race
+with the writer before it ever returns a fault), so `{"approvals": []}` always
+means genuinely nothing is waiting, and never a storage fault wearing an empty
+list.
+
 ## Running the rehearsal
 
 ```powershell
 # once: build and prepare (Windows PowerShell 5.1 is enough; pwsh is not required)
 $env:CARGO_TARGET_DIR = 'C:\Temp\kerna-pitch-target'   # SSD, never FAT32
 cargo build --locked
-powershell -ExecutionPolicy Bypass -File scripts/build-claude-agent-image.ps1   # if guard doctor reports the image absent
+powershell -ExecutionPolicy Bypass -File scripts/build-claude-agent-image.ps1   # if the preflight says the image is stale
 
 # every rehearsal
 powershell -ExecutionPolicy Bypass -File scripts/test-claude-container-boundary.ps1

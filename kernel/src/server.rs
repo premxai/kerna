@@ -492,6 +492,10 @@ async fn handle_guard_anthropic(
             "Missing or invalid session token.",
         );
     }
+    // A reviewer across the containment boundary cannot write the evidence
+    // database, so a stop it requests arrives as a file. This is where such a
+    // request is noticed when no action happens to be held.
+    apply_incoming_decision_requests(&state.memory);
     let context = match start_guard_stream(&state, AgentKind::ClaudeCode, "anthropic_messages") {
         Ok(context) => context,
         Err(_) => {
@@ -1586,6 +1590,80 @@ fn wp0_smoke_command(action: &crate::guard_protocol::ActionCandidate) -> Option<
     }
 }
 
+/// One reviewer's instruction to the process that actually owns the evidence
+/// database, left in the spool beside that database.
+///
+/// Only a reviewer on the far side of the containment boundary needs this. It
+/// opens the database read-only, because a second SQLite connection there could
+/// roll back the broker's in-flight journal and silently revert committed
+/// receipts; a read-only connection cannot write a decision, so the decision
+/// travels as a file instead, and the broker applies it through the same
+/// expiry-, digest- and session-bound checks it would use for a local click.
+#[derive(Serialize, Deserialize)]
+struct DecisionRequest {
+    kind: String,
+    id: String,
+    #[serde(default)]
+    approved: Option<bool>,
+    submitted_at: String,
+}
+
+/// Hand one decision to the broker. Written to a throwaway name and renamed
+/// into place so the broker never observes a half-written request.
+fn submit_decision_request(memory: &MemoryEngine, request: &DecisionRequest) -> anyhow::Result<()> {
+    let spool = memory.decision_spool();
+    std::fs::create_dir_all(&spool)?;
+    let token = Uuid::new_v4().to_string();
+    let staged = spool.join(format!("{token}.part"));
+    let final_path = spool.join(format!("{token}.json"));
+    std::fs::write(&staged, serde_json::to_vec(request)?)?;
+    std::fs::rename(&staged, &final_path)?;
+    Ok(())
+}
+
+/// Apply whatever decisions a read-only reviewer has left, from the writer's
+/// side of the boundary. Best effort by design: an unparseable or partially
+/// landed file is simply revisited on the next poll, and a file whose approval
+/// has already been decided or expired is rejected by `decide_guard_approval`
+/// itself, so replaying the spool cannot honour a decision twice.
+fn apply_incoming_decision_requests(memory: &MemoryEngine) {
+    let Ok(entries) = std::fs::read_dir(memory.decision_spool()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|name| name.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(request) = serde_json::from_str::<DecisionRequest>(&text) else {
+            continue;
+        };
+        let outcome = match request.kind.as_str() {
+            "decide_approval" => match request.approved {
+                Some(approved) => memory.decide_guard_approval(&request.id, approved).or_else(
+                    |error| match memory.decide_pending_approval(&request.id, approved) {
+                        Ok(decided) => Ok(decided),
+                        Err(_) => Err(error),
+                    },
+                ),
+                None => Ok(false),
+            },
+            "stop_session" => memory.stop_gateway_session(&request.id),
+            _ => Ok(false),
+        };
+        if let Err(error) = outcome {
+            log_persistence_failure("decision", &request.id, error);
+        }
+        // The reviewer's files are inert once applied, so a failed unlink here
+        // cannot honour anything twice; the launcher removes the spool with the
+        // rest of the session state.
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 async fn wait_for_stream_approval(
     memory: &MemoryEngine,
     policy: &GuardPolicy,
@@ -1614,6 +1692,9 @@ async fn wait_for_stream_approval(
         }
     };
     loop {
+        // A reviewer across the containment boundary decides by leaving a file
+        // for this process, because its own database handle is read-only.
+        apply_incoming_decision_requests(memory);
         if matches!(
             memory.gateway_session_state(&binding.session_id),
             Ok(Some(state)) if state == "stopped"
@@ -1916,6 +1997,21 @@ async fn stop_dashboard_session(
     if !dashboard_mutation_is_authorized(&state, &headers) {
         return error_response(StatusCode::FORBIDDEN, "Dashboard CSRF validation failed.");
     }
+    if state.app.memory.is_reviewer() {
+        let request = DecisionRequest {
+            kind: "stop_session".to_owned(),
+            id: id.clone(),
+            approved: None,
+            submitted_at: chrono::Utc::now().to_rfc3339(),
+        };
+        return match submit_decision_request(&state.app.memory, &request) {
+            Ok(()) => Json(json!({"ok": true, "status": "submitted"})).into_response(),
+            Err(error) => error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("the stop request could not be handed to the contained broker: {error}"),
+            ),
+        };
+    }
     match state.app.memory.stop_gateway_session(&id) {
         Ok(true) => Json(json!({"ok": true, "status": "stopped"})).into_response(),
         Ok(false) => error_response(StatusCode::CONFLICT, "Session is no longer running."),
@@ -2176,17 +2272,33 @@ async fn dashboard_receipts(State(state): State<DashboardState>) -> Json<Value> 
 /// rehearsal that the control plane is healthy while it proves nothing. So a
 /// failed read is reported as a fault, not as an empty queue.
 async fn dashboard_approvals(State(state): State<DashboardState>) -> axum::response::Response {
-    let pending = match state.app.memory.list_pending_approvals() {
-        Ok(pending) => pending,
-        Err(error) => {
-            log_persistence_failure("approval queue read", "-", &error);
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "the approval queue could not be read",
-            );
+    // Across the containment boundary this read is made on a handle that is
+    // deliberately read-only. While the broker has a transaction in flight,
+    // SQLite will not let such a connection roll back the journal it cannot
+    // touch, and that refusal arrives here as a read error. Retrying is the
+    // honest response; serving `{"approvals": []}` for a read that never
+    // happened would tell a reviewer that nothing is waiting.
+    let mut pending = None;
+    for attempt in 0..10 {
+        match state.app.memory.list_pending_approvals() {
+            Ok(rows) => {
+                pending = Some(rows);
+                break;
+            }
+            Err(error) => {
+                if attempt == 9 {
+                    log_persistence_failure("approval queue read", "-", &error);
+                    return error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "the approval queue could not be read",
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
         }
-    };
+    }
     let approvals = pending
+        .unwrap_or_default()
         .into_iter()
         .map(|(id, task_id, tool, args_json)| {
             let parsed = serde_json::from_str(&args_json).unwrap_or(Value::String(args_json));
@@ -2325,6 +2437,21 @@ fn decide_dashboard_approval(
 ) -> axum::response::Response {
     if !dashboard_mutation_is_authorized(&state, &headers) {
         return error_response(StatusCode::FORBIDDEN, "Dashboard CSRF validation failed.");
+    }
+    if state.app.memory.is_reviewer() {
+        let request = DecisionRequest {
+            kind: "decide_approval".to_owned(),
+            id: id.clone(),
+            approved: Some(approved),
+            submitted_at: chrono::Utc::now().to_rfc3339(),
+        };
+        return match submit_decision_request(&state.app.memory, &request) {
+            Ok(()) => Json(json!({"ok": true, "status": "submitted"})).into_response(),
+            Err(error) => error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("the decision could not be handed to the contained broker: {error}"),
+            ),
+        };
     }
     let decision = match state.app.memory.decide_guard_approval(&id, approved) {
         Ok(true) => Ok(true),
@@ -3079,6 +3206,91 @@ mod tests {
         ));
         drop(memory);
         std::fs::remove_file(path).unwrap();
+    }
+
+    /// The reviewer on the far side of the containment boundary is allowed to
+    /// read evidence and is never allowed to write it, because a second SQLite
+    /// connection there could roll back the broker's in-flight journal and
+    /// revert receipts that were already committed. This test pins both halves
+    /// of that contract: the reviewer's handle cannot decide an approval, and
+    /// the decision the reviewer leaves as a file still wakes the waiting
+    /// stream through the broker's own checks.
+    #[tokio::test]
+    async fn a_reviewer_decides_by_a_file_and_never_by_writing_evidence() {
+        let dir = std::env::temp_dir().join(format!("kerna-reviewer-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("evidence.db");
+        let writer = Arc::new(MemoryEngine::new(&path).unwrap());
+        let task_id = Uuid::new_v4();
+        writer
+            .create_task(task_id, None, "reviewer spool test")
+            .unwrap();
+        let context = GuardStreamContext {
+            session_id: "guard-reviewer-test".to_owned(),
+            task_id: task_id.to_string(),
+            agent: AgentKind::ClaudeCode,
+            agent_version: "test".to_owned(),
+            worktree_baseline: "sha256:test".to_owned(),
+        };
+        let action = crate::guard_protocol::ActionCandidate {
+            protocol: crate::guard_protocol::Protocol::AnthropicMessages,
+            id: "toolu_reviewer_test".to_owned(),
+            raw_tool_name: "secret_probe".to_owned(),
+            arguments: json!({}),
+        };
+        let policy = GuardPolicy::from_legacy_permissions(
+            &[crate::config::PermissionRule {
+                tool: "secret_probe".to_owned(),
+                action: "require_confirmation".to_owned(),
+            }],
+            PolicyEffect::Deny,
+        );
+        let (_, binding) = guard_binding(&policy, &context, &action);
+        let approval_id = writer
+            .create_guard_action(&binding, "ask", "{}", true)
+            .unwrap()
+            .unwrap();
+
+        std::env::set_var("KERNA_DB_READER", "1");
+        let reviewer = MemoryEngine::new(&path).unwrap();
+        std::env::remove_var("KERNA_DB_READER");
+        assert!(reviewer.is_reviewer());
+        let refused = reviewer.decide_guard_approval(&approval_id, true);
+        assert!(
+            refused.is_err(),
+            "a read-only reviewer handle must not mutate a receipt: {refused:?}"
+        );
+
+        let submitted = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            submit_decision_request(
+                &reviewer,
+                &DecisionRequest {
+                    kind: "decide_approval".to_owned(),
+                    id: approval_id,
+                    approved: Some(true),
+                    submitted_at: chrono::Utc::now().to_rfc3339(),
+                },
+            )
+            .unwrap();
+        });
+        let decision = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_stream_approval(&writer, &policy, &context, &action),
+        )
+        .await
+        .expect("a decision left by a reviewer must wake the stream");
+        submitted.await.unwrap();
+        assert!(
+            matches!(decision, crate::guard_protocol::GateDecision::Allow),
+            "the reviewer's approval must release the action, got {decision:?}"
+        );
+        let leftovers = std::fs::read_dir(writer.decision_spool())
+            .map(|entries| entries.flatten().count())
+            .unwrap_or(usize::MAX);
+        assert_eq!(leftovers, 0, "the broker must consume the reviewer's spool");
+        drop(writer);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

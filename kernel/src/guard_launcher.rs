@@ -450,6 +450,7 @@ pub async fn launch_claude(
         .current_dir(&session_dir)
         .env("KERNA_DB_PATH", &evidence_db)
         .env("KERNA_DB_SHARED", "1")
+        .env("KERNA_DB_READER", "1")
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
