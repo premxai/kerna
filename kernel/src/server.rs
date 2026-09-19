@@ -2170,12 +2170,23 @@ async fn dashboard_receipts(State(state): State<DashboardState>) -> Json<Value> 
     Json(json!({"receipts": state.app.memory.recent_tool_call_receipts(100).unwrap_or_default()}))
 }
 
-async fn dashboard_approvals(State(state): State<DashboardState>) -> Json<Value> {
-    let approvals = state
-        .app
-        .memory
-        .list_pending_approvals()
-        .unwrap_or_default()
+/// The approval queue is the one read whose empty answer must never be a guess.
+/// A storage fault rendered as `{"approvals": []}` tells a reviewer there is
+/// nothing waiting when a held action may exist, and it tells an automated
+/// rehearsal that the control plane is healthy while it proves nothing. So a
+/// failed read is reported as a fault, not as an empty queue.
+async fn dashboard_approvals(State(state): State<DashboardState>) -> axum::response::Response {
+    let pending = match state.app.memory.list_pending_approvals() {
+        Ok(pending) => pending,
+        Err(error) => {
+            log_persistence_failure("approval queue read", "-", &error);
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the approval queue could not be read",
+            );
+        }
+    };
+    let approvals = pending
         .into_iter()
         .map(|(id, task_id, tool, args_json)| {
             let parsed = serde_json::from_str(&args_json).unwrap_or(Value::String(args_json));
@@ -2183,7 +2194,7 @@ async fn dashboard_approvals(State(state): State<DashboardState>) -> Json<Value>
             json!({"id": id, "task_id": task_id, "tool": tool, "arguments": arguments})
         })
         .collect::<Vec<_>>();
-    Json(json!({"approvals": approvals}))
+    Json(json!({"approvals": approvals})).into_response()
 }
 
 async fn dashboard_containment(State(state): State<DashboardState>) -> Json<Value> {

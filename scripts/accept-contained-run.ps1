@@ -320,6 +320,11 @@ $RehearsalTask = "Open src/add.rs and change the body of add so that it returns 
     "cargo. After saving the edit, run the shell command 'printf KernaRehearsalMarker' " +
     "exactly once, then stop and report what happened."
 
+# The interruption pass proves a held action is never released and its containers
+# are swept, so it must not wait on the model deciding to edit first.
+$InterruptTask = "Run the shell command 'printf KernaRehearsalMarker' exactly once, then stop. " +
+    "Do not read, edit, create, or delete any file, and do not run any other command."
+
 function Complete-SessionReview {
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -522,24 +527,61 @@ function Invoke-InterruptPass {
     New-FixtureRepository -Path $source
 
     $session = Start-KernaSession -Arguments @(
-        "claude", "--repo", $source, "--route", "cloud", "--no-shadow", "--prompt", $RehearsalTask
+        "claude", "--repo", $source, "--route", "cloud", "--no-shadow", "--prompt", $InterruptTask
     ) -WorkingDirectory $WorkRoot -LogPath (Join-Path $WorkRoot "claude-interrupt-$tag.log")
 
     $containerSession = Wait-KernaPattern -Session $session -Pattern "\[\+\] Contained session: (.+)" -TimeoutSeconds 180
     $evidenceDb = Wait-KernaPattern -Session $session -Pattern "\[\+\] Trusted evidence: (.+)" -TimeoutSeconds 30
     $dashboardLine = Wait-KernaPattern -Session $session -Pattern "\[\+\] Dashboard: (http://127\.0\.0\.1:\d+/)" -TimeoutSeconds 90
     $dashboardBase = if ($dashboardLine) { $dashboardLine.TrimEnd("/") } else { $null }
-    if (-not ($containerSession -and $dashboardBase)) {
+    if (-not ($containerSession -and $dashboardBase -and $evidenceDb)) {
         Stop-Job -Job $session.Job -ErrorAction SilentlyContinue
         throw "the interrupted session never reached its dashboard"
     }
 
+    Write-Step "interrupt pass: polling $dashboardBase for a held action (evidence $evidenceDb)"
+
+    # Prove the endpoint being polled is this session's dashboard and not some
+    # other listener that happens to own the port. A leftover dashboard answers
+    # 200 with an empty queue forever, which otherwise looks like a model that
+    # never acted. The disposable worktree is a clone of $source, so its HEAD is
+    # this pass's fixture commit until the agent makes one.
+    $sourceHead = ((Invoke-Git -Path $source -Arguments @("rev-parse", "HEAD") `
+        -Failure "could not read the interrupt fixture HEAD").Output | Select-Object -First 1).Trim()
+    # The launcher advertises the URL before its dashboard child has bound, so
+    # give the identity probe the same grace the approval poll gets.
+    $polledWorkspace = $null
+    $identityDeadline = (Get-Date).AddSeconds(60)
+    while (-not $polledWorkspace -and (Get-Date) -lt $identityDeadline) {
+        try { $polledWorkspace = Invoke-DashboardGet -Base $dashboardBase -Path "/api/v1/dashboard/workspace" }
+        catch { Start-Sleep -Milliseconds 500 }
+    }
+    if (-not $polledWorkspace) {
+        Stop-Job -Job $session.Job -ErrorAction SilentlyContinue
+        throw "$dashboardBase never answered a control API request for the interrupt pass"
+    }
+    if ("$($polledWorkspace.head)".Trim() -ne $sourceHead) {
+        Stop-Job -Job $session.Job -ErrorAction SilentlyContinue
+        throw ("$dashboardBase is not this session's dashboard: it reports workspace HEAD " +
+            "'$($polledWorkspace.head)' but the fixture is '$sourceHead'")
+    }
+    Write-Step "interrupt pass: dashboard identity confirmed on $($sourceHead.Substring(0, 8))"
+
     $held = $null
     $pollFailures = 0
+    $askReceipts = @()
     $deadline = (Get-Date).AddSeconds($ApprovalTimeoutSeconds)
+    $nextReceiptProbe = [DateTime]::MinValue
     while (-not $held -and (Get-Date) -lt $deadline -and $session.Drained -notmatch "API Error: 401") {
         Receive-KernaOutput -Session $session
         Assert-NoPersistenceFault -Text $session.Drained -Name "interrupt pass"
+        # If the launcher died, its dashboard dies with it and the queue can never
+        # fill. Keep polling a dead session for the whole window only hides that.
+        if ($session.Job.JobStateInfo.State -ne "Running") {
+            Stop-Job -Job $session.Job -ErrorAction SilentlyContinue
+            throw ("the interrupted session exited before anything was held; its output ended with`n" +
+                "$($session.Drained.Substring([Math]::Max(0, $session.Drained.Length - 700)))")
+        }
         try {
             $pending = @(Invoke-DashboardGet -Base $dashboardBase -Path "/api/v1/dashboard/approvals").approvals
             $pollFailures = 0
@@ -551,14 +593,32 @@ function Invoke-InterruptPass {
             }
             $pending = @()
         }
-        if ($pending.Count -gt 0) { $held = $pending[0] } else { Start-Sleep -Milliseconds 500 }
+        if ($pending.Count -gt 0) { $held = $pending[0] } else {
+            # Cross-check the receipt side of the same database. An ask receipt with
+            # no result means the broker did hold an action, which separates "the
+            # queue read is broken" from "the model never produced an ask".
+            if ((Get-Date) -ge $nextReceiptProbe) {
+                $nextReceiptProbe = (Get-Date).AddSeconds(5)
+                try {
+                    $askReceipts = @(Invoke-DashboardGet -Base $dashboardBase -Path "/api/v1/dashboard/receipts").receipts |
+                        Where-Object { $_.policy_decision -eq "ask" }
+                } catch { $askReceipts = @() }
+            }
+            Start-Sleep -Milliseconds 500
+        }
     }
     if (-not $held) {
         Stop-Job -Job $session.Job -ErrorAction SilentlyContinue
         if ($session.Drained -match "API Error: 401") { throw "the provider rejected the key; the interrupt pass has nothing to interrupt" }
         Assert-NoPersistenceFault -Text $session.Drained -Name "interrupt pass"
+        if (@($askReceipts).Count -gt 0) {
+            throw ("the broker held $($askReceipts.Count) ask action(s) " +
+                "(call $(@($askReceipts)[0].call_id)) but $dashboardBase served an empty approval queue for " +
+                "$ApprovalTimeoutSeconds seconds, so a reviewer would see nothing to decide")
+        }
         throw ("nothing was held for approval within $ApprovalTimeoutSeconds seconds " +
-            "($pollFailures trailing control-API poll failures), so the interruption pass would prove nothing")
+            "($pollFailures trailing control-API poll failures, no ask receipt recorded), so the interruption " +
+            "pass would prove nothing")
     }
     Write-Step "interrupt pass: '$($held.tool)' is held as approval $($held.id); killing the host tree"
 
@@ -667,12 +727,19 @@ Write-Step "sweeping resources left by an earlier session"
 (Invoke-SilentNative -FilePath $KernaBin -Arguments @("guard", "cleanup")).Output | ForEach-Object { Write-Host "    $_" }
 
 $results = @()
-if ($Passes -in @("all", "governed")) {
-    $results += Invoke-GovernedPass -Decision "approve" -WorkRoot $WorkRoot
-    $results += Invoke-GovernedPass -Decision "reject" -WorkRoot $WorkRoot
-}
-if ($Passes -in @("all", "interrupt")) {
-    $results += Invoke-InterruptPass -WorkRoot $WorkRoot
+try {
+    if ($Passes -in @("all", "governed")) {
+        $results += Invoke-GovernedPass -Decision "approve" -WorkRoot $WorkRoot
+        $results += Invoke-GovernedPass -Decision "reject" -WorkRoot $WorkRoot
+    }
+    if ($Passes -in @("all", "interrupt")) {
+        $results += Invoke-InterruptPass -WorkRoot $WorkRoot
+    }
+} finally {
+    # A pass that aborts stopped its own launcher, so the supervisor's cleanup
+    # never ran and its labeled containers outlived the session.
+    (Invoke-SilentNative -FilePath $KernaBin -Arguments @("guard", "cleanup")).Output |
+        ForEach-Object { Write-Host "    $_" }
 }
 
 $proofPath = Join-Path $ReportDir "contained-run-proof.json"
