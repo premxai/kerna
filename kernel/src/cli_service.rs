@@ -46,6 +46,12 @@ fn ensure_up(port: u16) -> Result<(u16, bool)> {
     let exe = std::env::current_exe()?;
     let mut command = std::process::Command::new(exe);
     command.args(["dashboard", "--port", &port.to_string(), "--no-open"]);
+    // The child must not inherit the launcher's working directory, or a
+    // detached service keeps whichever repo folder started it open.
+    if let Some(parent) = state_path().parent() {
+        let _ = std::fs::create_dir_all(parent);
+        command.current_dir(parent);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
