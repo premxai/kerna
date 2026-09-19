@@ -92,14 +92,105 @@ pub enum NativeEvent {
 
 pub struct EventRenderer {
     json: bool,
+    quiet: bool,
+    echo_deltas: bool,
+}
+
+/// Verbose shows the machinery (the historical CLI behavior, restored by
+/// `--debug`). Quiet is the product default: one activity line plus results.
+/// Json keeps the stable JSON Lines stream on stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderMode {
+    Verbose,
+    /// `echo_deltas` is true for tool-less answers (ask/chat) where the
+    /// assistant text is the product output, false for governed code runs
+    /// where the final summary block replaces it.
+    Quiet {
+        echo_deltas: bool,
+    },
+    Json,
 }
 
 impl EventRenderer {
-    pub fn new(json: bool) -> Self {
-        Self { json }
+    pub fn new(mode: RenderMode) -> Self {
+        Self {
+            json: mode == RenderMode::Json,
+            quiet: matches!(mode, RenderMode::Quiet { .. }),
+            echo_deltas: matches!(mode, RenderMode::Quiet { echo_deltas: true }),
+        }
+    }
+
+    fn phase(&self, event: &NativeEvent) -> Option<&'static str> {
+        match event {
+            NativeEvent::SessionStarted { .. } => Some("Understanding the project"),
+            NativeEvent::ProposalPreflight { .. } => Some("Planning changes"),
+            NativeEvent::InspectionRequested { .. } => Some("Inspecting the code"),
+            NativeEvent::ActionExecuted { kind, .. } => match kind.as_str() {
+                "file_write" => Some("Editing files"),
+                "shell" => Some("Running checks"),
+                _ => Some("Working"),
+            },
+            _ => None,
+        }
     }
 
     pub fn emit(&mut self, event: &NativeEvent) -> Result<()> {
+        if std::env::var_os("KERNA_LOG_DISABLE").is_none() {
+            if let Ok(mut value) = serde_json::to_value(event) {
+                use sha2::Digest;
+                if let NativeEvent::AssistantDelta { text, .. } = event {
+                    // The event log persists; raw model prose and proposal
+                    // content (including file payloads) do not.
+                    value["text"] = serde_json::Value::String(format!(
+                        "[REDACTED {} bytes sha256:{:x}]",
+                        text.len(),
+                        sha2::Sha256::digest(text.as_bytes())
+                    ));
+                }
+                if let Some(content) = value.get("content").and_then(|v| v.as_str()) {
+                    value["content"] = serde_json::Value::String(format!(
+                        "[REDACTED {} bytes sha256:{:x}]",
+                        content.len(),
+                        sha2::Sha256::digest(content.as_bytes())
+                    ));
+                }
+                crate::cli_logs::append_event(&value);
+            }
+        }
+        if self.quiet {
+            match event {
+                NativeEvent::SessionStarted { .. } => {
+                    crate::cli_brand::spinner_start("Understanding the project")
+                }
+                NativeEvent::AssistantDelta { text, .. } => {
+                    if self.echo_deltas {
+                        print!("{text}");
+                        io::stdout().flush()?;
+                    }
+                }
+                NativeEvent::SessionCompleted { .. } => {
+                    crate::cli_brand::spinner_stop();
+                }
+                NativeEvent::SessionInterrupted { .. } => {
+                    crate::cli_brand::spinner_stop();
+                    eprintln!("[!] stopped; anything not yet approved was never executed");
+                }
+                NativeEvent::SessionFailed { error_class, .. } => {
+                    crate::cli_brand::spinner_stop();
+                    eprintln!("[!] Kerna could not complete this task ({error_class}).");
+                    eprintln!("    Run `kerna doctor` or check `kerna logs` for details.");
+                }
+                NativeEvent::InspectionBlocked { path, .. } => {
+                    eprintln!("[!] Kerna blocked one action: {path} (see `kerna logs`)");
+                }
+                other => {
+                    if let Some(phase) = self.phase(other) {
+                        crate::cli_brand::spinner_set_label(phase);
+                    }
+                }
+            }
+            return Ok(());
+        }
         if self.json {
             println!("{}", serde_json::to_string(event)?);
             io::stdout().flush()?;
@@ -359,5 +450,24 @@ mod tests {
         assert_eq!(value["type"], "context.cleared");
         assert!(value.get("messages").is_none());
         assert!(value.get("prompt").is_none());
+    }
+
+    #[test]
+    fn persisted_event_log_redacts_prose_and_content_previews() {
+        let dir = std::env::temp_dir().join(format!("kerna-log-redact-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("KERNA_LOG_DIR", &dir);
+        std::env::remove_var("KERNA_LOG_DISABLE");
+        let mut renderer = EventRenderer::new(RenderMode::Quiet { echo_deltas: false });
+        renderer
+            .emit(&NativeEvent::AssistantDelta {
+                session_id: "s1".to_string(),
+                text: "SECRET-PROSE KERNA_PROPOSAL_JSON".to_string(),
+            })
+            .unwrap();
+        let raw = std::fs::read_to_string(crate::cli_logs::log_path()).unwrap();
+        assert!(raw.contains("[REDACTED"));
+        assert!(!raw.contains("SECRET-PROSE"));
+        std::env::remove_var("KERNA_LOG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

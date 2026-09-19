@@ -1,8 +1,17 @@
 mod artifact;
 pub mod budget;
+mod cli_brand;
+mod cli_init;
+mod cli_logs;
+mod cli_models;
+mod cli_providers;
+mod cli_repl;
+mod cli_service;
+mod cli_system;
 mod client;
 mod config;
 mod contract;
+mod credentials;
 mod cron;
 mod demo_session;
 mod egress;
@@ -106,6 +115,9 @@ enum QuickCommand {
         /// Emit stable JSON Lines events instead of human-readable text.
         #[arg(long)]
         json: bool,
+        /// Show the full machinery (policy, receipts, phases) in the terminal.
+        #[arg(long)]
+        debug: bool,
     },
     /// Chat with a model through one tool-less native broker session.
     Chat {
@@ -116,13 +128,17 @@ enum QuickCommand {
         /// Emit stable JSON Lines events instead of human-readable text.
         #[arg(long)]
         json: bool,
+        /// Show the full machinery in the terminal.
+        #[arg(long)]
+        debug: bool,
     },
     /// Governed native code session: the model proposes, Kerna executes under
     /// policy in a disposable candidate clone; the repo changes only on an
     /// explicit approved apply. No Docker and no wrapped agent CLI session.
+    /// With no goal (or a directory), opens the interactive coding environment.
     Code {
-        /// Engineering goal. Prompts and model prose are not persisted.
-        goal: String,
+        /// A repository path (interactive) or a one-shot engineering goal.
+        target: Option<String>,
         #[arg(long, default_value = ".")]
         repo: PathBuf,
         #[arg(long, default_value = "anthropic", value_parser = ["anthropic", "openai", "mock"])]
@@ -143,6 +159,9 @@ enum QuickCommand {
         /// Upper bound on model proposal turns; the session fails closed past it.
         #[arg(long, default_value = "6")]
         max_turns: u32,
+        /// Show the full machinery instead of the clean product view.
+        #[arg(long)]
+        debug: bool,
     },
     /// Scan system, model, sandbox, and repository readiness.
     Doctor {
@@ -199,6 +218,53 @@ enum QuickCommand {
     },
     /// Show the governance capabilities active in the Claude-first runtime.
     Skills,
+    /// First-run onboarding: system check, local model, cloud providers.
+    /// Onboarding only - detailed diagnostics live in `kerna doctor`.
+    Init,
+    /// Read the structured activity log: routing, tools, policy, results.
+    Logs {
+        #[arg(short = 'n', long, default_value_t = 50)]
+        lines: usize,
+        #[arg(short = 'f', long)]
+        follow: bool,
+    },
+    /// One-screen runtime summary: providers, model, service, logs, evidence.
+    Status,
+    /// Start the local Kerna service (the dashboard control room) detached.
+    Start {
+        #[arg(long, default_value_t = 8765)]
+        port: u16,
+    },
+    /// Local model management through the runtime that actually exists here.
+    Model {
+        #[command(subcommand)]
+        action: QuickModelCommands,
+    },
+    /// Cloud provider management with OS credential-store secrets.
+    Provider {
+        #[command(subcommand)]
+        action: QuickProviderCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum QuickModelCommands {
+    /// Show installed runtime models plus catalog recommendations.
+    List,
+    /// Download a model into the local runtime.
+    Pull { model: String },
+    /// Make an installed model the active local model.
+    Use { model: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum QuickProviderCommands {
+    /// Add or replace a provider key (hidden input; never stored in config).
+    Add { provider: Option<String> },
+    /// List providers and where each credential comes from.
+    List,
+    /// Remove a stored provider credential.
+    Remove { provider: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1424,29 +1490,31 @@ fn print_kerna_skills() {
 }
 
 fn print_quick_help() {
-    println!("Kerna — route, govern, and prove AI-agent work.\n");
+    cli_brand::banner("Agent Runtime");
+    println!();
     println!("Usage:");
-    println!("  kerna doctor                  Check hardware, models, keys, and sandboxes");
+    println!("  kerna init                       One-time setup: hardware check, model, cloud key");
+    println!("  kerna code                       Interactive build session in this repo");
+    println!("  kerna code \"<goal>\" --repo .     One-shot governed run");
+    println!("  kerna start [--port N]           Start the local Kerna service");
+    println!("  kerna status                     What is configured and running right now");
+    println!(
+        "  kerna doctor                     Full diagnostics (hardware, models, keys, sandboxes)"
+    );
+    println!("  kerna logs [-n N] [--follow]     Structured event log");
+    println!("  kerna model list | pull <m> | use <m>");
+    println!("  kerna provider add | list | remove <name>");
+    println!("  kerna ask \"<question>\"           Ask a model without granting tools");
+    println!("  kerna chat                       Chat with in-memory context and no tools");
     println!("  kerna claude --repo . --route cloud --no-shadow");
+    println!("                                 Docker-contained, receipt-governed Claude session");
     println!(
-        "                                Start a Docker-contained, receipt-governed Claude session"
+        "  kerna guard doctor | cleanup     Verify the pinned agent image; sweep stale sessions"
     );
-    println!("  kerna guard doctor            Verify the pinned agent image and containment prerequisites");
-    println!(
-        "  kerna guard cleanup           Remove containers/networks left by a crashed session"
-    );
-    println!("  kerna ask \"<question>\"       Ask a model without granting tools");
-    println!("  kerna chat                   Chat with in-memory context and no tools");
-    println!(
-        "  kerna code \"<goal>\" --repo .  Governed native run: model proposes, Kerna executes in a\n                                candidate clone; your repo changes only on an approved apply"
-    );
-    println!(
-        "  kerna claude --host-demo      Legacy host-launched demo; not production containment"
-    );
-    println!("  kerna sandbox                Run bounded Python in Wasmer");
-    println!("  kerna replay <evidence.json> Open signed read-only evidence");
-    println!("  kerna skills                 Show active governance capabilities");
-    println!("  kerna dashboard              Open the local control room\n");
+    println!("  kerna sandbox                    Run bounded Python in Wasmer");
+    println!("  kerna replay <evidence.json>     Open signed read-only evidence");
+    println!("  kerna skills | dashboard         Governance capabilities; local control room");
+    println!();
     println!("Run `kerna advanced --help` for the legacy runtime command reference.");
 }
 
@@ -1500,10 +1568,9 @@ fn build_native_toolless_runtime(
     let key_env = providers::api_key_env_for(&config, provider);
     let provider_key = if provider == "mock" {
         zeroize::Zeroizing::new(String::new())
-    } else if let Some(key) = std::env::var(&key_env)
-        .ok()
-        .filter(|key| !key.trim().is_empty())
-    {
+    } else if let Some(key) = credentials::resolve(provider, &key_env) {
+        // Environment variable first, then the OS credential store placed by
+        // `kerna provider add`; the key never lives in config files.
         zeroize::Zeroizing::new(key)
     } else {
         zeroize::Zeroizing::new(
@@ -1565,6 +1632,16 @@ fn build_native_toolless_runtime(
     })
 }
 
+fn render_mode_for(json: bool, debug: bool, echo_deltas: bool) -> native_cli::RenderMode {
+    if json {
+        native_cli::RenderMode::Json
+    } else if debug {
+        native_cli::RenderMode::Verbose
+    } else {
+        native_cli::RenderMode::Quiet { echo_deltas }
+    }
+}
+
 fn emit_native_event(
     renderer: &Arc<std::sync::Mutex<native_cli::EventRenderer>>,
     event: &native_cli::NativeEvent,
@@ -1580,6 +1657,7 @@ async fn run_native_ask(
     provider: String,
     model: Option<String>,
     json: bool,
+    debug: bool,
 ) -> Result<()> {
     let NativeRuntime {
         scheduler,
@@ -1589,7 +1667,9 @@ async fn run_native_ask(
         ..
     } = build_native_toolless_runtime(std::path::Path::new("."), &provider, model, false)?;
     let session_id = format!("ask-{}", uuid::Uuid::new_v4());
-    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
+    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(
+        render_mode_for(json, debug, true),
+    )));
     emit_native_event(
         &renderer,
         &native_cli::NativeEvent::SessionStarted {
@@ -1654,7 +1734,12 @@ async fn run_native_ask(
     Ok(())
 }
 
-async fn run_native_chat(provider: String, model: Option<String>, json: bool) -> Result<()> {
+async fn run_native_chat(
+    provider: String,
+    model: Option<String>,
+    json: bool,
+    debug: bool,
+) -> Result<()> {
     use std::io::{self, Write};
 
     let NativeRuntime {
@@ -1665,7 +1750,9 @@ async fn run_native_chat(provider: String, model: Option<String>, json: bool) ->
         ..
     } = build_native_toolless_runtime(std::path::Path::new("."), &provider, model, false)?;
     let session_id = format!("chat-{}", uuid::Uuid::new_v4());
-    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
+    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(
+        render_mode_for(json, debug, true),
+    )));
     emit_native_event(
         &renderer,
         &native_cli::NativeEvent::SessionStarted {
@@ -1808,6 +1895,7 @@ async fn run_native_code_plan(
     provider: String,
     model: Option<String>,
     json: bool,
+    debug: bool,
 ) -> Result<()> {
     let context = native_code::build_code_dry_run_context(&repo, &goal)?;
     let NativeRuntime {
@@ -1819,7 +1907,9 @@ async fn run_native_code_plan(
         evidence_db_path,
     } = build_native_toolless_runtime(&context.repo_root, &provider, model, true)?;
     let session_id = format!("code-{}", uuid::Uuid::new_v4());
-    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
+    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(
+        render_mode_for(json, debug, true),
+    )));
     emit_native_event(
         &renderer,
         &native_cli::NativeEvent::SessionStarted {
@@ -2087,9 +2177,19 @@ async fn run_native_code(
     plan: bool,
     yes: bool,
     max_turns: u32,
-) -> Result<()> {
+    debug: bool,
+    history_note: Option<&str>,
+) -> Result<native_exec::TaskOutcome> {
     if plan {
-        return run_native_code_plan(goal, repo, provider, model, json).await;
+        run_native_code_plan(goal, repo, provider, model, json, debug).await?;
+        return Ok(native_exec::TaskOutcome {
+            final_text: String::new(),
+            outcome: "planned".to_string(),
+            changed_files: Vec::new(),
+            diff_stat: String::new(),
+            evidence_path: PathBuf::new(),
+            tokens: 0,
+        });
     }
     let context = native_code::build_code_dry_run_context(&repo, &goal)?;
     let NativeRuntime {
@@ -2101,7 +2201,9 @@ async fn run_native_code(
         evidence_db_path,
     } = build_native_toolless_runtime(&context.repo_root, &provider, model, true)?;
     let session_id = format!("code-{}", uuid::Uuid::new_v4());
-    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
+    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(
+        render_mode_for(json, debug, false),
+    )));
     emit_native_event(
         &renderer,
         &native_cli::NativeEvent::SessionStarted {
@@ -2142,7 +2244,7 @@ async fn run_native_code(
     } else {
         native_exec::ApprovalMode::Interactive
     };
-    if !json {
+    if debug && !json {
         eprintln!(
             "[i] native governed exec - the model proposes only; writes and shell run in the candidate clone {} (native-direct broker, no OS containment; safety = policy + receipts + human approval). The original repo changes only if you approve the final apply.",
             candidate_root.display()
@@ -2154,14 +2256,20 @@ async fn run_native_code(
     } else {
         GuardPolicy::balanced()
     };
+    let mut prompt = native_code::render_exec_prompt(&goal, &context);
+    if let Some(note) = history_note {
+        prompt.push_str("\n\n");
+        prompt.push_str(note);
+    }
     let mut messages = vec![scheduler::ChatMessage {
         role: "user".to_string(),
-        content: Some(native_code::render_exec_prompt(&goal, &context)),
+        content: Some(prompt),
         tool_calls: None,
         tool_call_id: None,
     }];
     let mut turn = 0u32;
     let mut total_tokens = 0u64;
+    let final_text: String;
     loop {
         turn += 1;
         if turn > max_turns {
@@ -2236,6 +2344,7 @@ async fn run_native_code(
             }
         }
         if native_exec::is_final_answer(&assistant_text) {
+            final_text = assistant_text.clone();
             break;
         }
         let parsed = match native_code::parse_proposal_preflight(
@@ -2320,12 +2429,14 @@ async fn run_native_code(
     } else {
         "not_applied"
     };
-    if !json {
-        eprintln!(
-            "[i] apply status: {} - diff: {}",
-            outcome,
-            apply_report["diff_stat"].as_str().unwrap_or("(none)")
-        );
+    let diff_stat = apply_report["diff_stat"].as_str().unwrap_or("").to_string();
+    if debug && !json {
+        let diff_display = if diff_stat.is_empty() {
+            "(none)"
+        } else {
+            diff_stat.as_str()
+        };
+        eprintln!("[i] apply status: {outcome} - diff: {diff_display}");
     }
     let evidence_path = native_exec::write_signed_evidence(
         &memory,
@@ -2335,7 +2446,7 @@ async fn run_native_code(
         &apply_report,
         outcome,
     )?;
-    if !json {
+    if debug && !json {
         eprintln!("[+] signed evidence: {}", evidence_path.display());
     }
     emit_native_event(
@@ -2346,7 +2457,41 @@ async fn run_native_code(
         },
     )?;
     drop(broker);
-    Ok(())
+    let task = native_exec::TaskOutcome {
+        final_text,
+        outcome: outcome.to_string(),
+        changed_files: native_exec::changed_files_from_diff_stat(&diff_stat),
+        diff_stat,
+        evidence_path,
+        tokens: total_tokens,
+    };
+    if !json && !debug {
+        print_product_result(&task);
+    }
+    Ok(task)
+}
+
+/// The clean final view for a governed task: result, changed files, honest
+/// apply status, and where the signed evidence lives.
+fn print_product_result(task: &native_exec::TaskOutcome) {
+    let result = task.final_text.trim();
+    if result.is_empty() {
+        println!("✓ Done.");
+    } else {
+        println!("✓ {result}");
+    }
+    if task.changed_files.is_empty() {
+        println!("  Changed: nothing");
+    } else {
+        println!("  Changed: {}", task.changed_files.join(", "));
+    }
+    match task.outcome.as_str() {
+        "applied" => println!("  Applied to your repository."),
+        "not_applied" => println!("  Not applied - the review was declined."),
+        "no_changes" => {}
+        other => println!("  Status: {other}"),
+    }
+    println!("  Evidence: {}", task.evidence_path.display());
 }
 
 async fn async_main() -> Result<()> {
@@ -2354,27 +2499,21 @@ async fn async_main() -> Result<()> {
     let arguments = std::env::args_os().collect::<Vec<_>>();
     let first = arguments.get(1).and_then(|arg| arg.to_str());
     if first.is_none() {
-        // Production containment is cloud-routed with no shadow, so the old
-        // bare `kerna` auto-route + shadow call always failed closed and read
-        // as a crash. Print the working invocation instead.
+        // The product front door is `kerna init` then `kerna code`; print the
+        // command map and point at the right next step instead of failing.
         print_quick_help();
         let has_key = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
             .iter()
-            .any(|var| std::env::var(var).is_ok_and(|key| !key.trim().is_empty()));
-        if has_key {
-            println!("\n[+] provider API key detected in the environment.");
+            .any(|var| std::env::var(var).is_ok_and(|key| !key.trim().is_empty()))
+            || cli_providers::source("anthropic") != credentials::CredentialSource::None
+            || cli_providers::source("openai") != credentials::CredentialSource::None;
+        if !guard_routing::demo_profile_path().is_file() {
+            println!("\n[i] First run? Set up in one pass:  kerna init");
+        } else if has_key || guard_routing::active_local_model().is_some() {
+            println!("\n[i] Ready. Open a build session:  kerna code .");
         } else {
-            println!("\n[i] no provider API key in the environment; Kerna will ask for it at run time (hidden input, never stored).");
+            println!("\n[i] No model or cloud key configured yet. Run:  kerna init");
         }
-        let suggested = providers::preset_info("anthropic")
-            .map(|preset| preset.default_model.to_string())
-            .unwrap_or_else(|| "claude-sonnet-5".to_string());
-        println!("[i] suggested model: {suggested} (override any time with --model).");
-        println!("\nEnter your task directly - Kerna calls the model itself, no Docker and no agent CLI session:");
-        println!("  kerna code \"<your task>\" --repo .");
-        println!("\nFor the fully Docker-contained agent session instead:");
-        println!("  kerna claude --repo . --route cloud --no-shadow");
-        println!("Check prerequisites first: kerna doctor");
         return Ok(());
     }
     if matches!(first, Some("--help" | "-h" | "help")) {
@@ -2387,7 +2526,22 @@ async fn async_main() -> Result<()> {
     }
     let uses_quick_parser = matches!(
         first,
-        Some("ask" | "chat" | "code" | "claude" | "sandbox" | "replay" | "skills" | "dashboard",)
+        Some(
+            "ask"
+                | "chat"
+                | "code"
+                | "claude"
+                | "sandbox"
+                | "replay"
+                | "skills"
+                | "dashboard"
+                | "init"
+                | "logs"
+                | "status"
+                | "start"
+                | "model"
+                | "provider",
+        )
     ) || (first == Some("doctor")
         && !arguments.iter().any(|arg| arg == "--gateway"));
     if uses_quick_parser {
@@ -2397,14 +2551,16 @@ async fn async_main() -> Result<()> {
                 provider,
                 model,
                 json,
-            } => run_native_ask(question, provider, model, json).await?,
+                debug,
+            } => run_native_ask(question, provider, model, json, debug).await?,
             QuickCommand::Chat {
                 provider,
                 model,
                 json,
-            } => run_native_chat(provider, model, json).await?,
+                debug,
+            } => run_native_chat(provider, model, json, debug).await?,
             QuickCommand::Code {
-                goal,
+                target,
                 repo,
                 provider,
                 model,
@@ -2412,7 +2568,53 @@ async fn async_main() -> Result<()> {
                 plan,
                 yes,
                 max_turns,
-            } => run_native_code(goal, repo, provider, model, json, plan, yes, max_turns).await?,
+                debug,
+            } => {
+                let directory = target
+                    .as_deref()
+                    .map(std::path::Path::new)
+                    .is_some_and(|path| path.is_dir());
+                if directory || (target.is_none() && !plan) {
+                    let root = match target {
+                        Some(ref path) if directory => PathBuf::from(path),
+                        _ => repo,
+                    };
+                    cli_repl::run(root, provider, model, debug, yes, max_turns).await?;
+                } else {
+                    let goal = target.ok_or_else(|| {
+                        anyhow::anyhow!("kerna code needs a goal, or a repository path to open the interactive environment")
+                    })?;
+                    run_native_code(
+                        goal, repo, provider, model, json, plan, yes, max_turns, debug, None,
+                    )
+                    .await?;
+                }
+            }
+            QuickCommand::Init => cli_init::run().await?,
+            QuickCommand::Logs { lines, follow } => cli_logs::run(lines, follow)?,
+            QuickCommand::Status => cli_service::run()?,
+            QuickCommand::Start { port } => cli_service::start(port)?,
+            QuickCommand::Model { action } => match action {
+                QuickModelCommands::List => cli_models::list().await?,
+                QuickModelCommands::Pull { model } => cli_models::pull(&model)?,
+                QuickModelCommands::Use { model } => cli_models::use_model(&model).await?,
+            },
+            QuickCommand::Provider { action } => match action {
+                QuickProviderCommands::Add { provider } => {
+                    let provider = match provider {
+                        Some(provider) => provider,
+                        None => dialoguer::Select::new()
+                            .with_prompt("Provider")
+                            .items(["anthropic", "openai"])
+                            .default(0)
+                            .interact()
+                            .map(|index| ["anthropic", "openai"][index].to_string())?,
+                    };
+                    cli_providers::connect_interactive(&provider).await?;
+                }
+                QuickProviderCommands::List => cli_providers::list()?,
+                QuickProviderCommands::Remove { provider } => cli_providers::remove(&provider)?,
+            },
             QuickCommand::Doctor { repo, brief } => {
                 if !(if brief {
                     guard_launcher::print_doctor_brief(true, Some(&repo)).await

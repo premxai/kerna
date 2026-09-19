@@ -48,18 +48,12 @@ pub fn demo_profile_path() -> PathBuf {
 }
 
 pub fn load_demo_profile() -> DemoProfile {
+    // `kerna model use` validates the model name before saving, so any
+    // syntactically valid Ollama tag is honored here rather than clamped back
+    // to the two demo defaults.
     std::fs::read_to_string(demo_profile_path())
         .ok()
         .and_then(|text| serde_json::from_str::<DemoProfile>(&text).ok())
-        .map(|mut profile| {
-            if !matches!(
-                profile.local_model.as_deref(),
-                None | Some("qwen3.5:9b") | Some("qwen3:4b")
-            ) {
-                profile.local_model = Some(DEFAULT_LOCAL_MODEL.to_string());
-            }
-            profile
-        })
         .unwrap_or_default()
 }
 

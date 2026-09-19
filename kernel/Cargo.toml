@@ -33,3 +33,7 @@ futures-core = "0.3"
 rmcp = { version = "3.1.4", default-features = false, features = ["server", "transport-io"] }
 dialoguer = "0.12.0"
 console = "0.16.4"
+sysinfo = "0.30"
+
+[target.'cfg(windows)'.dependencies]
+keyring = "2"

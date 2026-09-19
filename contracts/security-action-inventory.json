@@ -464,6 +464,46 @@
       "risk": "P1",
       "remediation_task": null,
       "evidence": "Unit tests prove candidate staging with the requested/released/result-observed lifecycle, fail-closed ask actions without a human channel, rejection of traversal and Git-internal writes before any receipt, candidate-scoped shell execution with exit recording, preflight-only network and package kinds, apply only after explicit approval, and a redacted signed evidence bundle whose payload carries digests but no raw model content. The mock end-to-end smoke and its replay verification ran without any Docker resource; a live provider-keyed exec run remains an open acceptance item and no OS containment is claimed on this path."
+    },
+    {
+      "id": "SB-024",
+      "title": "Product CLI host-touch surface: init, start, status, logs, model management",
+      "entrypoint": "kerna init | start [--port N] | status | logs [-n N] [--follow] | model list | model pull <name> | model use <name>",
+      "initiator": "human",
+      "controlled_inputs": ["operator-typed model name", "port number", "log tail count", "KERNA_LOG_DIR override"],
+      "operation": ["filesystem", "process", "network"],
+      "privileges": "On an explicit operator command the trusted CLI reads hardware information, spawns the local Ollama binary for a model download, spawns a detached dashboard child process of itself bound to a loopback port, and writes log, service-state, and demo-profile files under C:\\KernaData (or KERNA_LOG_DIR / KERNA_DEMO_DATA_DIR).",
+      "enforcement_point": "Model names pass a character-class allowlist before ever reaching a process argument; service ports bind 127.0.0.1 only; no path on this surface executes model-controlled content.",
+      "containment_boundary": "Trusted host CLI process, label trusted_cli_product_shell. The structured event log stores only redacted scalar event fields (types, session ids, digests, statuses) - never raw prompts, model prose, file contents, or provider keys.",
+      "receipt_coverage": "Not a model action plane; operator command results are terminal output and log lines. Model-proposed side effects remain governed by the SB-023 receipt lifecycle.",
+      "failure_behavior": "Missing local runtime, port bind failure, or unreadable log surfaces a friendly explanation and a non-zero outcome; nothing is silently installed, started, or retried against the repository.",
+      "platforms": ["windows", "macos", "linux"],
+      "tests": ["cli_logs::tests::append_and_read_round_trip_with_field_formatting", "cli_logs::tests::format_entry_truncates_long_values_and_survives_bad_timestamps", "cli_service::tests::a_closed_port_is_reported_as_not_running", "cli_service::tests::service_state_round_trips_through_json", "cli_service::tests::evidence_listing_never_panics_without_bundles", "cli_models::tests::tag_parsing_tolerates_missing_or_malformed_payloads", "cli_models::tests::model_names_are_validated_before_reaching_any_process"],
+      "source_files": ["kernel/src/cli_logs.rs", "kernel/src/cli_service.rs", "kernel/src/cli_models.rs"],
+      "status": "trusted-host-only",
+      "risk": "P2",
+      "remediation_task": null,
+      "evidence": "Unit tests prove the log round trip with field redaction and truncation, closed-port detection, state JSON persistence, resilient evidence-bundle listing, tolerant runtime tag parsing, and model-name validation before any process spawn."
+    },
+    {
+      "id": "SB-025",
+      "title": "Provider credential store and connection verification",
+      "entrypoint": "kerna provider add [name] | list | remove <name>; the kerna init cloud-connect checklist; key resolution for kerna code/ask/chat",
+      "initiator": "human",
+      "controlled_inputs": ["provider name", "API key typed at the hidden prompt", "provider API key environment variable"],
+      "operation": ["network", "external-service"],
+      "privileges": "The CLI may read and write entries in the Windows Credential Manager under the kerna service namespace for the two allowlisted providers, and may send the entered key in exactly one authenticated verification request to the provider API before storing it.",
+      "enforcement_point": "Provider names are an explicit allowlist (anthropic, openai); empty secrets are rejected before the store; resolution order is environment variable, then credential store, then hidden stdin prompt; list and status surfaces print only the source, never a key value.",
+      "containment_boundary": "Keys live in the OS credential store or in zeroizing in-memory buffers en route to the loopback broker. Configuration files hold at most a kerna://<provider> reference; keys never reach argv, logs, container metadata, or the repository.",
+      "receipt_coverage": "Not a model action plane; sessions consuming a resolved key are receipt-covered by SB-001 and SB-023.",
+      "failure_behavior": "Authentication failures are reported without echoing the key; an unavailable credential store falls back to explicit environment-variable guidance; on platforms without a V1 credential backend the CLI refuses to store rather than persisting plaintext.",
+      "platforms": ["windows", "macos", "linux"],
+      "tests": ["credentials::tests::only_known_providers_are_accepted", "credentials::tests::empty_secrets_never_reach_the_store", "credentials::tests::environment_wins_over_the_store_and_absence_is_explicit", "credentials::tests::credential_store_round_trip_uses_a_namespaced_test_account", "cli_providers::tests::labels_and_env_names_cover_both_v1_providers", "cli_providers::tests::an_obviously_bad_key_fails_authentication_rather_than_hanging"],
+      "source_files": ["kernel/src/credentials.rs", "kernel/src/cli_providers.rs"],
+      "status": "governed",
+      "risk": "P1",
+      "remediation_task": null,
+      "evidence": "Unit tests prove the provider allowlist, empty-secret rejection, environment precedence over the store, a live credential-store round trip that self-skips headless, and a bounded-timeout bad-key verification that reports authentication failure."
     }
   ]
 }

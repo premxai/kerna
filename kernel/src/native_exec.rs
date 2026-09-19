@@ -46,6 +46,57 @@ pub enum ApprovalMode {
     Unavailable,
 }
 
+/// "Allow for this session" decisions from the interactive menu. Each action
+/// still carries its own receipt bound to its exact canonical digest; the
+/// grant only records that the human chose to stop being asked again for the
+/// same kind + resource in this process.
+static SESSION_GRANTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+fn session_grants() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    SESSION_GRANTS.get_or_init(Default::default)
+}
+
+pub fn clear_session_grants() {
+    if let Ok(mut grants) = session_grants().lock() {
+        grants.clear();
+    }
+}
+
+fn session_grant_key(action: &ProposalAction) -> String {
+    format!(
+        "{}:{}",
+        action.proposed_kind,
+        action
+            .intent
+            .canonical_resource
+            .clone()
+            .unwrap_or_else(|| action.intent.canonical_digest())
+    )
+}
+
+/// The clean result the product CLI renders after a governed task.
+#[derive(Debug, Clone)]
+pub struct TaskOutcome {
+    pub final_text: String,
+    pub outcome: String,
+    pub changed_files: Vec<String>,
+    pub diff_stat: String,
+    pub evidence_path: PathBuf,
+    pub tokens: u64,
+}
+
+/// Parse `git diff --stat` lines ("path | 3 ++") into the changed file list.
+pub fn changed_files_from_diff_stat(stat: &str) -> Vec<String> {
+    stat.lines()
+        .filter_map(|line| {
+            line.split_once('|')
+                .map(|(path, _)| path.trim().to_string())
+        })
+        .filter(|path| !path.is_empty())
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecBoundary {
     pub session_id: String,
@@ -391,23 +442,53 @@ fn approval_note_for(decision: &PolicyDecision) -> Option<serde_json::Value> {
 }
 
 fn prompt_approval(action: &ProposalAction) -> bool {
-    eprintln!();
-    eprintln!(
-        "[?] Kerna asks your approval for one action (bound to digest {}):\n    {} {}",
-        action
-            .intent
-            .canonical_digest()
-            .chars()
-            .take(16)
-            .collect::<String>(),
-        action.proposed_kind,
-        action.intent.redacted_display
-    );
-    dialoguer::Confirm::new()
-        .with_prompt("Allow this exact action once?")
-        .default(false)
-        .interact()
+    let key = session_grant_key(action);
+    if session_grants()
+        .lock()
+        .map(|grants| grants.contains(&key))
         .unwrap_or(false)
+    {
+        eprintln!(
+            "[i] allowed for this session: {} {}",
+            action.proposed_kind, action.intent.redacted_display
+        );
+        return true;
+    }
+    let choice = cli_brand_pause(|| {
+        eprintln!();
+        eprintln!(
+            "[?] Kerna needs your decision (action bound to digest {}):\n    {} {}",
+            action
+                .intent
+                .canonical_digest()
+                .chars()
+                .take(16)
+                .collect::<String>(),
+            action.proposed_kind,
+            action.intent.redacted_display
+        );
+        dialoguer::Select::new()
+            .with_prompt("How should Kerna proceed?")
+            .items(["Allow once", "Allow for this session", "Deny"])
+            .default(2)
+            .interact_opt()
+            .unwrap_or(None)
+    });
+    match choice {
+        Some(0) => true,
+        Some(1) => {
+            if let Ok(mut grants) = session_grants().lock() {
+                grants.insert(key);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Approval prompts must own the terminal, so the activity line steps aside.
+fn cli_brand_pause<T>(run: impl FnOnce() -> T) -> T {
+    crate::cli_brand::with_spinner_paused(run)
 }
 
 fn execute_read(
@@ -737,17 +818,21 @@ pub fn review_and_apply(
     if String::from_utf8_lossy(&patch).trim().is_empty() {
         return Ok(report);
     }
-    println!("\n[k] candidate diff (staged in the disposable clone):\n{stat}");
     let approve = match approval {
-        ApprovalMode::Interactive => dialoguer::Confirm::new()
-            .with_prompt(format!(
-                "Apply this exact patch ({}) to {}?",
-                report["patch_sha256"].as_str().unwrap_or(""),
-                boundary.repo_root.display()
-            ))
-            .default(false)
-            .interact()
-            .unwrap_or(false),
+        ApprovalMode::Interactive => cli_brand_pause(|| {
+            // The reviewer must see the exact staged diff before deciding;
+            // other modes keep this machinery out of the product view.
+            println!("\n[k] candidate diff (staged in the disposable clone):\n{stat}");
+            dialoguer::Confirm::new()
+                .with_prompt(format!(
+                    "Apply this exact patch ({}) to {}?",
+                    report["patch_sha256"].as_str().unwrap_or(""),
+                    boundary.repo_root.display()
+                ))
+                .default(false)
+                .interact()
+                .unwrap_or(false)
+        }),
         ApprovalMode::PreAuthorized => true,
         ApprovalMode::Unavailable => false,
     };
@@ -1241,5 +1326,52 @@ mod tests {
             "content must never persist"
         );
         assert!(bundle.contains("content_sha256"));
+    }
+    #[test]
+    fn changed_files_parse_skips_the_git_summary_line() {
+        let stat = " src/app.py   | 3 +++
+tests/test_app.py | 1 +
+ 2 files changed, 4 insertions(+)";
+        assert_eq!(
+            changed_files_from_diff_stat(stat),
+            vec!["src/app.py".to_string(), "tests/test_app.py".to_string()]
+        );
+        assert!(changed_files_from_diff_stat("").is_empty());
+    }
+
+    #[test]
+    fn session_grants_are_keyed_by_kind_and_resource_and_clearable() {
+        clear_session_grants();
+        let policy = GuardPolicy::balanced();
+        let action = proposal(
+            "file_write",
+            json!({"file_path": "src/app.py", "content_sha256": "ab12"}),
+            Some("x".to_string()),
+            None,
+            &policy,
+        );
+        let key = session_grant_key(&action);
+        assert!(key.contains("file_write"));
+        assert!(key.contains("src/app.py"));
+        session_grants().lock().unwrap().insert(key.clone());
+        assert!(session_grants().lock().unwrap().contains(&key));
+        clear_session_grants();
+        assert!(!session_grants().lock().unwrap().contains(&key));
+
+        let shell = proposal(
+            "shell",
+            json!({"command": "cargo test -q"}),
+            None,
+            Some("cargo test -q".to_string()),
+            &policy,
+        );
+        let shell_key = session_grant_key(&shell);
+        assert!(shell_key.starts_with("shell:"));
+        let expected = shell
+            .intent
+            .canonical_resource
+            .clone()
+            .unwrap_or_else(|| shell.intent.canonical_digest());
+        assert_eq!(shell_key, format!("shell:{expected}"));
     }
 }
