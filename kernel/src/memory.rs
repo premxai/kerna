@@ -283,6 +283,15 @@ impl MemoryEngine {
             .join("evidence_view.json")
     }
 
+    /// True for the process that owns a boundary-shared database and is
+    /// therefore the one that has to keep the reviewer's view fresh. A reviewer
+    /// publishes nothing; it only reads what the writer put there, and a plain
+    /// single-process run has no reviewer to feed.
+    pub fn publishes_live_queue(&self) -> bool {
+        let shared = std::env::var_os("KERNA_DB_SHARED");
+        shared.as_deref() == Some(std::ffi::OsStr::new("1")) && !self.reader
+    }
+
     /// The broker is the only process entitled to describe its committed
     /// queue. A reviewer across the containment mount can reopen a read-only
     /// handle on every read and still be served pages the filesystem

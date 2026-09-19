@@ -155,6 +155,22 @@ fn error_response(status: StatusCode, message: impl Into<String>) -> axum::respo
 }
 
 pub async fn start_server(state: AppState, bind: &str, port: u16) -> anyhow::Result<()> {
+    // The bounded reviewer across the containment mount can only show the queue
+    // this process pushes for it, and the hold loop publishes while an action
+    // is actually held. An otherwise idle broker would therefore let the view
+    // age past its freshness window, and the reviewer would answer "no fresh
+    // view" at exactly the moment it should say "nothing is waiting". Keep it
+    // warm for the life of the server. The publisher is a no-op for a reviewer
+    // and for a run that shares nothing across a boundary.
+    let queue_publisher = state.memory.clone();
+    if queue_publisher.publishes_live_queue() {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let _ = queue_publisher.write_pending_snapshot();
+            }
+        });
+    }
     let app = Router::new()
         .route("/v1/chat/completions", post(handle_chat_completion))
         .route("/anthropic/v1/messages", post(handle_guard_anthropic))
@@ -1630,6 +1646,7 @@ fn apply_incoming_decision_requests(memory: &MemoryEngine) {
     let Ok(entries) = std::fs::read_dir(memory.decision_spool()) else {
         return;
     };
+    let mut applied = false;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|name| name.to_str()) != Some("json") {
@@ -1661,6 +1678,14 @@ fn apply_incoming_decision_requests(memory: &MemoryEngine) {
         // cannot honour anything twice; the launcher removes the spool with the
         // rest of the session state.
         let _ = std::fs::remove_file(&path);
+        applied = true;
+    }
+    // A decision the reviewer left can land while no action is held for
+    // approval, so the hold-tick publication above would not push the queue
+    // again for a while. Republish here to stop the reviewer showing an
+    // approval this process has already honoured or refused.
+    if applied {
+        let _ = memory.write_pending_snapshot();
     }
 }
 
@@ -1748,6 +1773,10 @@ async fn wait_for_stream_approval(
             Ok(None) if tokio::time::Instant::now() >= deadline => {
                 let _ = memory.expire_guard_approval(&binding);
                 let _ = memory.deny_guard_action(&binding);
+                // Nothing else will publish on this action's behalf now that the
+                // hold loop is leaving, so take the expired row out of the
+                // reviewer's view rather than offering a dead approval.
+                let _ = memory.write_pending_snapshot();
                 return crate::guard_protocol::GateDecision::Deny {
                     reason: "approval expired".to_owned(),
                 };
