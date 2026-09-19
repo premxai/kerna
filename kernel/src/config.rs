@@ -3,6 +3,24 @@ use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+/// One trusted evidence store shared by every local Kerna process, so the
+/// dashboard genuinely sees every run's receipts instead of whichever
+/// relative `kerna.db` its own working directory happened to open. Override
+/// with `KERNA_DB_PATH` or a `db_path` entry in `kerna.toml`.
+fn default_db_path() -> String {
+    let dir = if cfg!(windows) {
+        PathBuf::from(r"C:\KernaData")
+    } else {
+        env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+            .unwrap_or_else(std::env::temp_dir)
+            .join("kerna")
+    };
+    let _ = fs::create_dir_all(&dir);
+    dir.join("kerna.db").to_string_lossy().into_owned()
+}
+
 /// Configuration for a single MCP server that Kerna can spawn and route tool calls to.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct McpServerConfig {
@@ -120,20 +138,8 @@ impl McpServerConfig {
         if self.runtime_mode != "docker" {
             bail!("plugin '{}' must set runtime_mode = \"docker\"", self.name);
         }
-        if !self.image.contains("@sha256:") {
-            bail!(
-                "plugin '{}' must use an OCI image pinned by @sha256 digest",
-                self.name
-            );
-        }
-        let digest = self
-            .image
-            .rsplit_once("@sha256:")
-            .map(|(_, d)| d)
-            .unwrap_or_default();
-        if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
-            bail!("plugin '{}' has an invalid OCI sha256 digest", self.name);
-        }
+        crate::artifact::validate_oci_digest_reference(&self.image)
+            .with_context(|| format!("plugin '{}' has an invalid OCI reference", self.name))?;
         if self.manifest_sha256.len() != 64
             || !self.manifest_sha256.chars().all(|c| c.is_ascii_hexdigit())
         {
@@ -652,8 +658,10 @@ impl Config {
             });
         }
 
-        if config.db_path.is_empty() {
-            config.db_path = env::var("KERNA_DB_PATH").unwrap_or_else(|_| "kerna.db".to_string());
+        if let Ok(trusted_db_path) = env::var("KERNA_DB_PATH") {
+            config.db_path = trusted_db_path;
+        } else if config.db_path.is_empty() {
+            config.db_path = default_db_path();
         }
 
         if config.sandbox_dir.is_empty() {
@@ -696,6 +704,13 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_evidence_store_is_one_shared_absolute_path() {
+        let path = PathBuf::from(default_db_path());
+        assert!(path.is_absolute());
+        assert_eq!(path.file_name().unwrap(), "kerna.db");
+    }
 
     #[test]
     fn test_mcp_config_parses_with_boundaries() {

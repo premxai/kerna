@@ -4,399 +4,532 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>Kerna · Agent control room</title>
+  <title>Kerna · Control Room</title>
   <style>
-    /* ---------- Tokens ---------- */
     :root{
-      --bg:#f6f7f6;--surface:#fff;--surface-2:#f8faf9;--surface-3:#f1f4f2;
-      --ink:#141c18;--ink-2:#3b4741;--ink-3:#5f6c66;--ink-4:#8a958f;
-      --line:#e6eae8;--line-2:#d7ddda;
-      --accent:#d9701f;--accent-ink:#96490e;--accent-soft:#fdf1e6;--accent-line:#f2d2b4;
-      --green:#1f8a55;--green-ink:#176642;--green-soft:#e8f5ee;--green-line:#c7e5d3;
-      --amber:#b3731a;--amber-ink:#875411;--amber-soft:#fcf3e2;--amber-line:#eed8a6;
-      --red:#c0453f;--red-ink:#98332f;--red-soft:#fdeeed;--red-line:#f0c8c5;
-      --blue:#2f6f94;--blue-ink:#245878;--blue-soft:#e9f2f8;--blue-line:#c5dbe9;
-      --violet:#6353b8;--violet-ink:#4c3f95;--violet-soft:#efedfb;--violet-line:#d7d1f1;
-      --shadow:0 1px 2px rgba(20,28,24,.04),0 2px 8px rgba(20,28,24,.03);
+      --bg:#f4f3ef;--surface:#fdfdfb;--surface-2:#f7f6f1;--surface-3:#efede6;
+      --ink:#171310;--ink-2:#4c463d;--ink-3:#7d766a;--ink-4:#a29a8d;
+      --line:#e6e3da;--line-2:#d8d4c8;
+      --red:#e5484d;--red-ink:#b3272d;--red-soft:#fdeeec;--red-line:#f4c9c6;
+      --green:#1f9d61;--green-ink:#17734a;--green-soft:#e9f6ef;--green-line:#c6e6d4;
+      --amber:#c07a1a;--amber-ink:#915c12;--amber-soft:#fbf2df;--amber-line:#edd9a9;
+      --shadow:0 1px 2px rgba(23,19,16,.04),0 4px 14px rgba(23,19,16,.04);
       --r-sm:6px;--r-md:10px;--r-lg:14px;
       --sans:ui-sans-serif,system-ui,"Segoe UI Variable Text","Segoe UI",-apple-system,"Helvetica Neue",Arial,sans-serif;
       --mono:ui-monospace,"Cascadia Mono","JetBrains Mono",Consolas,"Liberation Mono",monospace;
-      --t-xs:11px;--t-sm:12px;--t-md:13px;--t-lg:15px;--t-xl:20px;--t-2xl:26px;--t-3xl:30px;
+      --t-xs:11px;--t-sm:12px;--t-md:13px;--t-lg:15px;--t-xl:20px;--t-2xl:30px;
     }
     *{box-sizing:border-box}
     html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
     body{margin:0;background:var(--bg);color:var(--ink);font:var(--t-md)/1.5 var(--sans);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
-    h1,h2,h3{margin:0;font-weight:600;letter-spacing:-.01em;line-height:1.25}
+    h1,h2,h3{margin:0;font-weight:650;letter-spacing:-.02em;line-height:1.15}
     p{margin:0}
-    a{color:inherit}
-    code,pre,.mono,.tnum{font-family:var(--mono);font-variant-numeric:tabular-nums}
+    code,pre,.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
     code{font-size:var(--t-sm);color:var(--ink-2);overflow-wrap:anywhere}
     .muted{color:var(--ink-3)}
     .icon{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none}
     .icon.sm{width:14px;height:14px}
     .icon.lg{width:20px;height:20px}
 
-    /* ---------- Controls ---------- */
-    button,input{font:inherit}
-    button{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line-2);border-radius:var(--r-sm);background:var(--surface);color:var(--ink);font-size:var(--t-md);font-weight:500;cursor:pointer;white-space:nowrap;transition:background-color .12s,border-color .12s,color .12s}
-    button:hover{background:var(--surface-2);border-color:#c4ccc8}
+    button,select{font:inherit}
+    button{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line-2);border-radius:var(--r-sm);background:var(--surface);color:var(--ink);font-size:var(--t-md);font-weight:550;cursor:pointer;white-space:nowrap;transition:background-color .12s,border-color .12s,color .12s}
+    button:hover{background:var(--surface-2);border-color:#c9c4b6}
     button:active{background:var(--surface-3)}
-    button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+    button:focus-visible,a:focus-visible,summary:focus-visible,select:focus-visible{outline:2px solid var(--red);outline-offset:2px}
     button.primary{background:var(--ink);border-color:var(--ink);color:#fff}
-    button.primary:hover{background:#26322c;border-color:#26322c}
-    button.orange{background:var(--accent);border-color:var(--accent);color:#fff}
-    button.orange:hover{background:#c7641a;border-color:#c7641a}
+    button.primary:hover{background:#332b24;border-color:#332b24}
+    button.red{background:var(--red);border-color:var(--red);color:#fff}
+    button.red:hover{background:#cf3a40;border-color:#cf3a40}
     button.danger{background:var(--surface);border-color:var(--red-line);color:var(--red-ink)}
-    button.danger:hover{background:var(--red-soft);border-color:#e6b3af}
+    button.danger:hover{background:var(--red-soft);border-color:#eeb6b1}
     button:disabled{opacity:.5;cursor:not-allowed}
     button.card-action{height:28px;padding:0 10px;font-size:var(--t-sm)}
+    button.icon-btn{width:32px;padding:0}
+    select{height:28px;padding:0 8px;border:1px solid var(--line-2);border-radius:var(--r-sm);background:var(--surface);color:var(--ink-2);font-size:var(--t-sm);font-weight:550}
 
-    /* ---------- Shell ---------- */
-    .app{display:grid;grid-template-columns:240px minmax(0,1fr);min-height:100vh}
-    .sidebar{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;padding:24px 16px 20px;background:var(--surface);border-right:1px solid var(--line)}
-    .brand{display:flex;align-items:center;gap:10px;padding:0 8px 28px;font-size:18px;font-weight:600;letter-spacing:-.02em}
-    .mark{display:grid;grid-template-columns:repeat(2,8px);gap:3px}
-    .mark i{display:block;width:8px;height:8px;border-radius:50%;background:var(--accent)}
-    .mark i:nth-child(2),.mark i:nth-child(3){background:#eba86a}
-    .nav-label{padding:0 8px 8px;color:var(--ink-4);font:600 var(--t-xs)/1 var(--mono);letter-spacing:.08em;text-transform:uppercase}
-    nav{display:grid;gap:2px}
-    .nav-item{display:flex;align-items:center;gap:10px;height:34px;padding:0 10px;border-radius:var(--r-sm);color:var(--ink-2);text-decoration:none;font-size:var(--t-md);font-weight:500}
-    .nav-item .icon{color:var(--ink-3)}
-    .nav-item:hover{background:var(--surface-2);color:var(--ink)}
-    .nav-item.active{background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
-    .nav-item.active .icon{color:var(--accent)}
-    .sidebar-bottom{margin-top:auto}
-    .local-pill{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2)}
-    .local-pill b{display:block;font-size:var(--t-sm);font-weight:600}
-    .local-pill small{display:block;color:var(--ink-3);font-size:var(--t-xs)}
-
-    .content{min-width:0}
-    .topbar{position:sticky;top:0;z-index:5;height:56px;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 32px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.85);backdrop-filter:blur(12px)}
-    .breadcrumb{display:flex;align-items:center;gap:8px;color:var(--ink-3);font-size:var(--t-md)}
-    .breadcrumb b{color:var(--ink);font-weight:600}
-    .breadcrumb .icon{color:var(--accent)}
-    .top-actions,.heading-actions{display:flex;align-items:center;gap:8px}
-    .system-status{display:flex;align-items:center;gap:8px;margin-right:8px;color:var(--ink-2);font-size:var(--t-sm);font-weight:500}
-    .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px var(--green-soft)}
-    .dot.warn{background:var(--amber);box-shadow:0 0 0 3px var(--amber-soft)}
-    .dot.bad{background:var(--red);box-shadow:0 0 0 3px var(--red-soft)}
-
-    /* ---------- Page ---------- */
-    main{max-width:1440px;margin:0 auto;padding:32px 32px 64px}
-    .page-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:24px}
-    .eyebrow{margin-bottom:8px;color:var(--ink-3);font:600 var(--t-xs)/1 var(--mono);letter-spacing:.08em;text-transform:uppercase}
-    .page-heading h1{font-size:var(--t-2xl);letter-spacing:-.02em}
-    .page-heading p{margin-top:6px;color:var(--ink-3);font-size:var(--t-lg)}
-
-    .pill{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 8px;border-radius:999px;border:1px solid var(--line);background:var(--surface-3);color:var(--ink-2);font-size:var(--t-xs);font-weight:600;letter-spacing:.01em;white-space:nowrap}
+    .pill{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 8px;border-radius:999px;border:1px solid var(--line);background:var(--surface-3);color:var(--ink-2);font-size:var(--t-xs);font-weight:650;letter-spacing:.02em;white-space:nowrap}
     .pill.good{background:var(--green-soft);border-color:var(--green-line);color:var(--green-ink)}
     .pill.warn{background:var(--amber-soft);border-color:var(--amber-line);color:var(--amber-ink)}
     .pill.bad{background:var(--red-soft);border-color:var(--red-line);color:var(--red-ink)}
-    .pill.blue{background:var(--blue-soft);border-color:var(--blue-line);color:var(--blue-ink)}
-    .pill.purple{background:var(--violet-soft);border-color:var(--violet-line);color:var(--violet-ink)}
     .pill.live:before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 2s ease-in-out infinite}
     @keyframes pulse{50%{opacity:.35}}
+    .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px var(--green-soft);flex:none}
+    .dot.warn{background:var(--amber);box-shadow:0 0 0 3px var(--amber-soft)}
+    .dot.bad{background:var(--red);box-shadow:0 0 0 3px var(--red-soft)}
+
+    /* ---------- Shell ---------- */
+    .topbar{position:fixed;inset:0 0 auto 0;z-index:20;height:52px;display:flex;align-items:center;gap:14px;padding:0 20px;border-bottom:1px solid var(--line);background:rgba(253,253,251,.92);backdrop-filter:blur(10px)}
+    .brand{display:flex;align-items:center;gap:9px;font-weight:700;letter-spacing:.02em;font-size:var(--t-lg)}
+    .brand .mark{display:grid;grid-template-columns:repeat(2,7px);gap:2.5px}
+    .brand .mark i{display:block;width:7px;height:7px;border-radius:50%;background:var(--red)}
+    .brand .mark i:nth-child(2),.brand .mark i:nth-child(3){background:#ef9a92}
+    .brand .crumb{color:var(--ink-3);font-weight:550;font-size:var(--t-md)}
+    .top-spacer{flex:1}
+    .top-chip{display:flex;align-items:center;gap:8px;color:var(--ink-2);font-size:var(--t-sm);font-weight:550}
+    .top-chip.mono{color:var(--ink-3)}
+
+    .rail{position:fixed;z-index:15;top:52px;bottom:0;left:0;width:196px;display:flex;flex-direction:column;gap:2px;padding:18px 12px;border-right:1px solid var(--line);background:var(--surface)}
+    .rail a{display:flex;align-items:center;gap:10px;height:34px;padding:0 10px;border-radius:var(--r-sm);color:var(--ink-2);text-decoration:none;font-size:var(--t-md);font-weight:550}
+    .rail a .icon{color:var(--ink-3)}
+    .rail a:hover{background:var(--surface-2);color:var(--ink)}
+    .rail a.active{background:var(--red-soft);color:var(--red-ink);font-weight:650}
+    .rail a.active .icon{color:var(--red)}
+    .rail-note{margin-top:auto;padding:12px 10px;color:var(--ink-4);font:600 10px/1.6 var(--mono);letter-spacing:.14em;text-transform:uppercase}
+    .rail-note em{display:block;font-style:normal;color:var(--red)}
+
+    main{margin:52px 0 0 196px;padding:28px 28px 56px;max-width:1480px}
+    .page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:20px}
+    .page-head h1{font-size:var(--t-2xl)}
+    .page-head p{margin-top:6px;color:var(--ink-3);font-size:var(--t-lg)}
+    .tagline{color:var(--ink-3);font:650 var(--t-xs)/1.7 var(--mono);letter-spacing:.14em;text-transform:uppercase;text-align:right;white-space:pre-line}
 
     /* ---------- Metrics ---------- */
-    .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:16px}
-    .metric{padding:20px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);box-shadow:var(--shadow)}
-    .metric-top{display:flex;align-items:center;justify-content:space-between;color:var(--ink-3);font-size:var(--t-sm);font-weight:500}
-    .metric-icon{display:grid;place-items:center;width:28px;height:28px;border-radius:var(--r-sm);background:var(--surface-3);color:var(--ink-2)}
-    .metric strong{display:block;margin-top:12px;font-size:var(--t-3xl);font-weight:600;letter-spacing:-.02em;line-height:1;font-variant-numeric:tabular-nums}
+    .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:14px}
+    .metric{padding:16px 18px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);box-shadow:var(--shadow)}
+    .metric-top{display:flex;align-items:center;justify-content:space-between;color:var(--ink-3);font:600 var(--t-xs)/1 var(--mono);letter-spacing:.08em;text-transform:uppercase}
+    .metric strong{display:inline-block;margin-top:10px;font-size:30px;font-weight:650;letter-spacing:-.02em;line-height:1;font-variant-numeric:tabular-nums}
+    .metric .spark{float:right;margin-top:8px}
     .metric-foot{margin-top:8px;color:var(--ink-3);font-size:var(--t-sm)}
     .metric-foot.good{color:var(--green-ink)}
     .metric-foot.warn{color:var(--amber-ink)}
+    .metric-foot.bad{color:var(--red-ink)}
+    .metric.alert{border-color:var(--red-line);background:var(--red-soft)}
 
     /* ---------- Grid & cards ---------- */
-    .grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:16px}
-    .card{display:flex;flex-direction:column;min-width:0;max-height:520px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);box-shadow:var(--shadow)}
-    .card-head{flex:none;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 20px;border-bottom:1px solid var(--line)}
-    .title-wrap{display:flex;align-items:center;gap:12px;min-width:0}
-    .title-icon{display:grid;place-items:center;width:32px;height:32px;border-radius:var(--r-sm);background:var(--surface-3);color:var(--ink-2)}
+    .grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:14px}
+    .card{display:flex;flex-direction:column;min-width:0;max-height:560px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);box-shadow:var(--shadow)}
+    .card-head{flex:none;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 18px;border-bottom:1px solid var(--line)}
     .card-head h2{font-size:var(--t-lg)}
     .card-head p{margin-top:2px;color:var(--ink-3);font-size:var(--t-sm)}
-    .card-body{flex:1;min-height:0;display:flex;flex-direction:column;padding:20px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--line-2) transparent}
+    .head-actions{display:flex;align-items:center;gap:8px}
+    .card-body{flex:1;min-height:0;display:flex;flex-direction:column;padding:16px 18px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--line-2) transparent}
     .card-body::-webkit-scrollbar{width:8px}
     .card-body::-webkit-scrollbar-thumb{border-radius:8px;background:var(--line-2);border:2px solid var(--surface)}
     .card-body::-webkit-scrollbar-track{background:transparent}
     .card-body>*{flex:none}
     .card-body>.empty{flex:1}
-    .route-reason{margin-top:auto;padding-top:16px}
-    .route-hero,.comparison,.history,.activity,.workspace{grid-column:span 8}
-    .readiness,.approvals-card,.registry,.containment,.evidence{grid-column:span 4}
-    .skills-card,.trace{grid-column:span 12}
-    .demo-cases{grid-column:span 12;max-height:none}
-    .demo-case-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
-    .demo-case{padding:14px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2)}
-    .demo-case.approved{border-color:var(--green-line);background:var(--green-soft)}
-    .demo-case.blocked{border-color:var(--red-line);background:var(--red-soft)}
-    .demo-case-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
-    .demo-case-head b{font-size:var(--t-md);font-weight:600}
-    .demo-case p{min-height:42px;color:var(--ink-2);font-size:var(--t-sm);line-height:1.45}
-    .demo-case-meta{display:grid;gap:5px;margin-top:12px;color:var(--ink-3);font-size:var(--t-xs)}
-    .demo-case-meta b{color:var(--ink-2);font-weight:600}
-    .demo-case-note{margin-bottom:14px;padding:10px 12px;border:1px solid var(--blue-line);border-radius:var(--r-sm);background:var(--blue-soft);color:var(--blue-ink);font-size:var(--t-sm)}
+    .route-card{grid-column:span 8}
+    .runs-card{grid-column:span 4}
+    .ledger-card{grid-column:span 8;max-height:640px}
+    .approvals-card{grid-column:span 4;max-height:640px}
+    .worktree-card,.readiness-card,.signed-card{grid-column:span 4}
 
-    /* ---------- Routing ---------- */
-    .route-top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px}
-    .route-decision strong{display:block;font-size:var(--t-xl);font-weight:600;letter-spacing:-.015em;line-height:1.3}
-    .route-decision span{display:block;margin-top:2px;color:var(--ink-3);font-size:var(--t-sm)}
-    .route-flow{display:grid;grid-template-columns:1fr 32px 1fr 32px 1fr;align-items:stretch}
-    .route-node{padding:16px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2)}
-    .route-node.active{border-color:var(--accent-line);background:var(--accent-soft)}
-    .route-node.shadow{border-color:var(--violet-line);background:var(--violet-soft)}
-    .node-label{display:flex;align-items:center;gap:6px;margin-bottom:10px;color:var(--ink-3);font:600 var(--t-xs)/1 var(--mono);letter-spacing:.06em;text-transform:uppercase}
-    .route-node.active .node-label{color:var(--accent-ink)}
-    .route-node.shadow .node-label{color:var(--violet-ink)}
-    .route-node b{display:block;font-size:var(--t-md);font-weight:600}
-    .route-node small{display:block;margin-top:4px;color:var(--ink-3);font-size:var(--t-sm);line-height:1.45}
-    .route-arrow{display:grid;place-items:center;color:var(--ink-4)}
-    .route-reason{display:flex;flex-wrap:wrap;gap:8px 20px;color:var(--ink-3);font-size:var(--t-sm)}
-    .route-reason b{color:var(--ink);font-weight:600}
+    /* ---------- Route ---------- */
+    .route-flow{display:grid;grid-template-columns:1.1fr 34px .9fr 34px 1.2fr;align-items:stretch;margin-top:4px}
+    .route-box{padding:14px 16px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2)}
+    .route-box.hub{border-color:var(--ink);background:var(--surface)}
+    .route-box .lbl{display:block;margin-bottom:6px;color:var(--ink-3);font:600 10px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase}
+    .route-box b{display:flex;align-items:center;gap:8px;font-size:var(--t-lg);font-weight:650}
+    .route-box small{display:block;margin-top:3px;color:var(--ink-3);font-size:var(--t-sm)}
+    .route-arrow{display:grid;place-items:center;color:var(--ink-4);text-align:center}
+    .route-arrow small{display:block;font:600 9px/1.4 var(--mono);letter-spacing:.1em;color:var(--ink-4)}
+    .route-outputs{display:grid;gap:10px}
+    .route-out{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2)}
+    .route-out .dot{box-shadow:none}
+    .route-out b{font-size:var(--t-md);font-weight:650}
+    .route-out small{display:block;color:var(--ink-3);font-size:var(--t-xs)}
+    .route-out .pill{margin-left:auto}
+    .route-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+    .route-tags .pill{height:20px;font-size:10px}
+    .route-foot{margin-top:14px;color:var(--ink-3);font-size:var(--t-sm)}
+    .route-foot code{font-size:var(--t-xs)}
 
-    /* ---------- Readiness ---------- */
-    .check-row{display:grid;grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}
-    .check-row:first-child{padding-top:0}
-    .check-row:last-child{border-bottom:0}
-    .check-icon{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;background:var(--green-soft);color:var(--green)}
-    .check-icon.warn{background:var(--amber-soft);color:var(--amber)}
-    .check-icon.bad{background:var(--red-soft);color:var(--red)}
-    .check-row b{display:block;font-size:var(--t-md);font-weight:600}
-    .check-row small{display:block;color:var(--ink-3);font-size:var(--t-sm);overflow-wrap:anywhere}
-    .hardware{margin-top:16px;padding:12px 14px;border-radius:var(--r-md);background:var(--surface-2);color:var(--ink-3);font-size:var(--t-sm);line-height:1.6}
-    .hardware b{color:var(--ink);font-weight:600}
+    /* ---------- Tables & rows ---------- */
+    .ledger{display:grid;grid-template-columns:76px 108px 120px minmax(0,1fr) 84px 118px 64px 44px;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);font-size:var(--t-sm)}
+    .ledger.head{padding-top:0;color:var(--ink-4);font:600 10px/1.4 var(--mono);letter-spacing:.08em;text-transform:uppercase;border-bottom-color:var(--line-2)}
+    .ledger .t{color:var(--ink-3);font-family:var(--mono);font-size:var(--t-xs);white-space:nowrap}
+    .ledger .a{color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ledger .tool{font-weight:600;font-family:var(--mono);font-size:var(--t-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ledger .target{color:var(--ink-2);font-family:var(--mono);font-size:var(--t-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ledger .dur{color:var(--ink-3);font-family:var(--mono);font-size:var(--t-xs);text-align:right}
 
-    /* ---------- Shadow comparison ---------- */
-    .compare-grid{display:grid;grid-template-columns:1fr 40px 1fr;align-items:stretch}
-    .runtime-col{padding:16px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2)}
-    .runtime-col.shadow{border-color:var(--violet-line);background:var(--violet-soft)}
-    .runtime-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
-    .runtime-head b{display:block;font-size:var(--t-md);font-weight:600}
-    .runtime-head small{display:block;margin-top:2px;color:var(--ink-3);font-size:var(--t-sm)}
-    .runtime-stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:16px}
-    .runtime-stat{padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface)}
-    .runtime-stat span{display:block;color:var(--ink-3);font-size:var(--t-xs)}
-    .runtime-stat b{display:block;margin-top:2px;font:600 var(--t-md)/1.3 var(--mono);font-variant-numeric:tabular-nums}
-    .compare-link{display:grid;place-items:center;color:var(--ink-4)}
-    .same-task{display:flex;align-items:center;gap:8px;margin-top:16px;padding:10px 12px;border:1px solid var(--green-line);border-radius:var(--r-sm);background:var(--green-soft);color:var(--green-ink);font-size:var(--t-sm)}
-    .privacy-note{margin-top:12px;color:var(--ink-3);font-size:var(--t-sm);line-height:1.55}
-    .privacy-note b{color:var(--ink-2);font-weight:600}
+    .run-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:10px 0;border-bottom:1px solid var(--line);font-size:var(--t-sm)}
+    .run-row:last-child{border-bottom:0}
+    .run-row b{display:block;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .run-row small{display:block;color:var(--ink-3);font-family:var(--mono);font-size:var(--t-xs)}
+    .run-row .pill{align-self:center}
 
-    /* ---------- Approvals ---------- */
-    .approval{padding:14px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2)}
-    .approval+.approval{margin-top:8px}
-    .approval-title{display:flex;align-items:center;gap:8px;font-size:var(--t-md);font-weight:600}
-    .approval p{margin:6px 0 12px;color:var(--ink-3);font-size:var(--t-sm)}
+    .approval{padding:14px;border:1px solid var(--amber-line);border-radius:var(--r-md);background:var(--amber-soft)}
+    .approval+.approval{margin-top:10px}
+    .approval-title{display:flex;align-items:center;gap:8px;font-size:var(--t-md);font-weight:650}
+    .approval-args{display:grid;grid-template-columns:96px minmax(0,1fr);gap:4px 12px;margin:10px 0 12px;font-size:var(--t-sm)}
+    .approval-args dt{color:var(--ink-3)}
+    .approval-args dd{margin:0;font-family:var(--mono);font-size:var(--t-xs);color:var(--ink);overflow-wrap:anywhere}
     .approval-actions{display:flex;gap:8px}
     .approval-actions button{flex:1}
     .empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;min-height:96px;padding:16px;color:var(--ink-3);text-align:center;font-size:var(--t-md);line-height:1.5}
     .empty .icon{color:var(--ink-4)}
-    .error{padding:12px 14px;border:1px solid var(--red-line);border-radius:var(--r-sm);background:var(--red-soft);color:var(--red-ink);font-size:var(--t-sm)}
 
-    /* ---------- Skills ---------- */
-    .skills{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
-    .skill{display:flex;align-items:flex-start;gap:12px;padding:14px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2)}
-    .skill-icon{display:grid;place-items:center;width:28px;height:28px;border-radius:var(--r-sm);background:var(--surface);border:1px solid var(--line);color:var(--accent)}
-    .skill b{display:flex;align-items:center;gap:8px;font-size:var(--t-md);font-weight:600}
-    .skill small{display:block;margin-top:4px;color:var(--ink-3);font-size:var(--t-sm);line-height:1.5}
+    .check-row{display:grid;grid-template-columns:18px minmax(0,1fr) auto auto;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);font-size:var(--t-sm)}
+    .check-row:last-child{border-bottom:0}
+    .check-row b{font-weight:600}
+    .check-row .ver{color:var(--ink-3);font-family:var(--mono);font-size:var(--t-xs)}
+    .hardware{margin-top:12px;padding:10px 12px;border-radius:var(--r-md);background:var(--surface-2);color:var(--ink-3);font-size:var(--t-sm);line-height:1.6}
+    .hardware b{color:var(--ink);font-weight:600}
 
-    /* ---------- History ---------- */
-    .demo-notice{display:flex;align-items:flex-start;gap:10px;margin-bottom:16px;padding:10px 12px;border:1px solid var(--amber-line);border-radius:var(--r-sm);background:var(--amber-soft);color:var(--amber-ink);font-size:var(--t-sm);line-height:1.5}
-    .demo-notice b{font-weight:600}
-    .bars{display:grid;grid-template-columns:repeat(10,1fr);gap:8px;height:160px;padding:8px 0 0;border-bottom:1px solid var(--line-2)}
-    .day{display:grid;grid-template-rows:1fr 20px;gap:8px;min-width:0}
-    .bar-pair{display:flex;align-items:flex-end;justify-content:center;gap:4px}
-    .bar{width:12px;min-height:4px;border-radius:3px 3px 0 0;background:var(--accent)}
-    .bar.cloud{background:var(--violet)}
-    .day label{text-align:center;color:var(--ink-3);font:var(--t-xs)/1 var(--mono);font-variant-numeric:tabular-nums}
-    .legend{display:flex;gap:20px;margin-top:12px;color:var(--ink-3);font-size:var(--t-sm)}
-    .legend span{display:flex;align-items:center;gap:6px}
-    .swatch{width:10px;height:10px;border-radius:3px;background:var(--accent)}
-    .swatch.cloud{background:var(--violet)}
-    .history-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px}
-    .history-summary div{padding:12px 14px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2)}
-    .history-summary b{display:block;font-size:var(--t-xl);font-weight:600;letter-spacing:-.015em;font-variant-numeric:tabular-nums}
-    .history-summary span{display:block;margin-top:2px;color:var(--ink-3);font-size:var(--t-sm)}
+    .signed-callout{display:flex;gap:12px;padding:14px;border:1px solid var(--green-line);border-radius:var(--r-md);background:var(--green-soft);color:var(--green-ink);font-size:var(--t-sm);line-height:1.5}
+    .signed-callout b{display:block;font-size:var(--t-md);color:var(--green-ink)}
+    .kv{display:grid;grid-template-columns:120px minmax(0,1fr);gap:6px 12px;margin:14px 0;font-size:var(--t-sm)}
+    .kv dt{color:var(--ink-3)}
+    .kv dd{margin:0;font-family:var(--mono);font-size:var(--t-xs);overflow-wrap:anywhere}
 
-    /* ---------- Registry ---------- */
-    .model{padding:14px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2)}
-    .model+.model{margin-top:8px}
-    .model-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
-    .model b{font-size:var(--t-sm);font-weight:600;color:var(--ink-2)}
-    .model code{display:block;margin-top:2px;color:var(--ink);font-size:var(--t-md);font-weight:600}
-    .model p{margin-top:8px;color:var(--ink-3);font-size:var(--t-sm);line-height:1.5}
-    .task-fit{margin-top:16px;padding-top:4px;border-top:1px solid var(--line)}
-    .task-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);font-size:var(--t-sm);color:var(--ink-2)}
-    .task-row:last-child{border-bottom:0}
-    .task-row span:last-child{color:var(--ink);font-weight:600}
-
-    /* ---------- Receipts / containment ---------- */
-    .activity-row{display:grid;grid-template-columns:8px 172px minmax(0,1fr) auto auto;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}
-    .activity-row:first-child{padding-top:0}
-    .activity-row:last-child{border-bottom:0}
-    .activity-time{color:var(--ink-3);font:var(--t-xs)/1.4 var(--mono);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    .activity-main strong{display:block;font-size:var(--t-md);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    .activity-main span{display:block;color:var(--ink-3);font-size:var(--t-sm)}
-    .containment-row{padding:12px 0;border-bottom:1px solid var(--line)}
-    .containment-row:first-child{padding-top:0}
-    .containment-row:last-child{border-bottom:0;padding-bottom:0}
-    .containment-title{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:var(--t-md);font-weight:600}
-    .containment-details{display:grid;gap:4px;margin-top:8px;color:var(--ink-3);font-size:var(--t-sm)}
-    .containment-details code{font-size:var(--t-xs);color:var(--ink-3)}
-
-    /* ---------- Worktree / evidence / trace ---------- */
-    .workspace-status{display:flex;align-items:center;gap:10px;margin-bottom:12px;font-size:var(--t-md)}
+    .workspace-status{display:flex;align-items:center;gap:10px;margin-bottom:10px;font-size:var(--t-md);flex-wrap:wrap}
     .workspace-status b{font-weight:600;overflow-wrap:anywhere}
-    .workspace-actions{display:flex;gap:8px;margin-bottom:12px}
-    .mono{color:var(--ink-3);font-size:var(--t-sm)}
-    .mono code{color:var(--ink-2);font-size:var(--t-sm)}
-    details{margin-top:12px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface)}
-    summary{cursor:pointer;padding:10px 14px;font-size:var(--t-md);font-weight:600;list-style:none;display:flex;align-items:center;gap:8px}
-    summary::-webkit-details-marker{display:none}
-    summary:before{content:"";width:6px;height:6px;border-right:1.5px solid var(--ink-3);border-bottom:1.5px solid var(--ink-3);transform:rotate(-45deg);transition:transform .12s}
-    details[open] summary:before{transform:rotate(45deg)}
-    details ul{margin:0;padding:8px 14px 12px;border-top:1px solid var(--line);list-style:none;font-size:var(--t-sm)}
-    details li{display:flex;align-items:center;gap:10px;padding:6px 0}
-    details li button{margin-left:auto}
-    details pre,.trace pre{margin:0;padding:14px;overflow:auto;background:var(--surface-2);color:var(--ink-2);font-size:var(--t-sm);line-height:1.55;white-space:pre-wrap}
-    details pre{max-height:240px;border-top:1px solid var(--line);border-radius:0 0 var(--r-md) var(--r-md)}
-    .trace pre{min-height:96px;max-height:320px;border:1px solid var(--line);border-radius:var(--r-md)}
-    .evidence-callout{padding:14px;border:1px solid var(--green-line);border-radius:var(--r-md);background:var(--green-soft)}
-    .evidence-callout strong{display:block;font-size:var(--t-md);font-weight:600;color:var(--green-ink)}
-    .evidence-callout p{margin-top:6px;color:var(--green-ink);font-size:var(--t-sm);line-height:1.5;opacity:.9}
-    .evidence .card-body>button{width:100%;margin-top:12px}
-    .sandbox-box{margin-top:12px;padding:12px 14px;border:1px solid var(--violet-line);border-radius:var(--r-md);background:var(--violet-soft);color:var(--ink-2);font-size:var(--t-sm);line-height:1.6}
-    .sandbox-box b{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;color:var(--violet-ink);font-size:var(--t-md);font-weight:600}
-    .sandbox-box code{font-size:var(--t-xs)}
+    details{margin-top:8px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface-2)}
+    details+details{margin-top:8px}
+    summary{padding:8px 12px;cursor:pointer;color:var(--ink-2);font-size:var(--t-sm);font-weight:550}
+    details pre,details ul{margin:0;padding:10px 12px;border-top:1px solid var(--line);max-height:220px;overflow:auto;font-size:var(--t-xs)}
+    details ul{list-style:none}
+    details li{padding:4px 0;color:var(--ink-2)}
 
-    /* ---------- Responsive ---------- */
-    @media(max-width:1200px){
-      .app{grid-template-columns:216px minmax(0,1fr)}
-      .topbar,main{padding-left:24px;padding-right:24px}
-      .grid{grid-auto-flow:dense}
-      .route-hero,.comparison,.history,.activity,.workspace{grid-column:span 12}
-      .demo-cases{grid-column:span 12}
-      .readiness,.approvals-card,.registry,.containment,.evidence{grid-column:span 6}
-      .skills{grid-template-columns:repeat(2,1fr)}
-      .activity-row{grid-template-columns:8px minmax(0,1fr) auto auto}
-      .activity-time{display:none}
+    /* ---------- Trace panel ---------- */
+    .trace-panel{position:fixed;z-index:30;top:52px;right:0;bottom:0;width:400px;display:flex;flex-direction:column;border-left:1px solid var(--line);background:var(--surface);box-shadow:-12px 0 32px rgba(23,19,16,.08);transform:translateX(102%);transition:transform .22s ease}
+    .trace-panel.open{transform:none}
+    .trace-head{flex:none;padding:16px 18px;border-bottom:1px solid var(--line)}
+    .trace-head .lbl{display:block;margin-bottom:4px;color:var(--ink-4);font:600 10px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase}
+    .trace-title{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+    .trace-title h2{font-size:var(--t-xl)}
+    .trace-sub{display:flex;align-items:center;gap:10px;margin-top:8px;color:var(--ink-3);font-size:var(--t-sm)}
+    .trace-tabs{flex:none;display:flex;gap:2px;padding:8px 18px 0;border-bottom:1px solid var(--line)}
+    .trace-tabs button{height:30px;border:0;border-bottom:2px solid transparent;border-radius:0;background:none;color:var(--ink-3);font-size:var(--t-sm);font-weight:600;padding:0 10px}
+    .trace-tabs button.active{color:var(--red-ink);border-bottom-color:var(--red)}
+    .trace-body{flex:1;min-height:0;overflow-y:auto;padding:16px 18px;scrollbar-width:thin;scrollbar-color:var(--line-2) transparent}
+    .timeline{position:relative;margin-left:6px;padding-left:22px;border-left:2px solid var(--line-2)}
+    .tl-item{position:relative;padding:0 0 18px 4px}
+    .tl-item:before{content:"";position:absolute;left:-28px;top:4px;width:10px;height:10px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px var(--green-soft)}
+    .tl-item.warn:before{background:var(--amber);box-shadow:0 0 0 3px var(--amber-soft)}
+    .tl-item.bad:before{background:var(--red);box-shadow:0 0 0 3px var(--red-soft)}
+    .tl-item .tl-time{display:block;color:var(--ink-3);font-family:var(--mono);font-size:var(--t-xs)}
+    .tl-item b{display:block;margin-top:2px;font-size:var(--t-md);font-weight:600}
+    .tl-item small{display:block;color:var(--ink-3);font-size:var(--t-sm)}
+    .trace-body pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:var(--t-xs);color:var(--ink-2)}
+
+    .footer-note{margin-top:22px;color:var(--ink-4);font-size:var(--t-sm);text-align:center}
+
+    @media (max-width:1200px){
+      .route-card,.runs-card,.ledger-card,.approvals-card,.worktree-card,.readiness-card,.signed-card{grid-column:span 12}
+      .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
     }
-    @media(max-width:760px){
-      .app{display:block}
-      .sidebar{position:static;height:auto;padding:16px}
-      .brand{padding:0 8px 12px}
-      .nav-label,.sidebar-bottom{display:none}
-      nav{display:flex;gap:4px;overflow:auto}
-      .nav-item{white-space:nowrap}
-      .topbar{position:static;height:auto;padding:12px 16px}
-      .breadcrumb span,.system-status{display:none}
-      main{padding:20px 16px 40px}
-      .page-heading{display:block}
-      .heading-actions{margin-top:16px}
-      .metrics{grid-template-columns:1fr}
-      .grid>*{grid-column:span 12!important}
-      .route-flow,.compare-grid,.skills,.history-summary{grid-template-columns:1fr}
-      .demo-case-grid{grid-template-columns:1fr}
-      .route-arrow,.compare-link{padding:4px 0;transform:rotate(90deg)}
-    }
-    @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+    @media (max-width:900px){.rail{display:none}main{margin-left:0}.trace-panel{width:100%}}
   </style>
 </head>
 <body>
-  <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
-    <symbol id="i-dashboard" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></symbol>
-    <symbol id="i-route" viewBox="0 0 24 24"><circle cx="5" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="12" cy="19" r="2"/><path d="M7 5h7a5 5 0 0 1 5 5v2M5 7v3a9 9 0 0 0 7 9"/></symbol>
-    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 20 6v5c0 5-3.4 8.6-8 10-4.6-1.4-8-5-8-10V6l8-3Z"/><path d="m9 12 2 2 4-5"/></symbol>
-    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m11 12 8-8m-3 3 2 2m-5 1 2 2"/></symbol>
-    <symbol id="i-receipt" viewBox="0 0 24 24"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2V3Z"/><path d="M9 8h6m-6 4h6m-6 4h3"/></symbol>
-    <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 9h6v6H9zM9 2v4m6-4v4M9 18v4m6-4v4M2 9h4m-4 6h4m12-6h4m-4 6h4"/></symbol>
-    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
-    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <svg style="display:none" aria-hidden="true">
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M9.5 21v-6h5v6"/></symbol>
+    <symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.5 6H15a3 3 0 0 1 3 3v2"/><path d="M6 8.5V15a3 3 0 0 0 3 3h4"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5Z"/></symbol>
+    <symbol id="i-ledger" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 9v11"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6Z"/><path d="m9.5 12 2 2 3.5-4"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M6 2v2M18 2v2M6 20v2M18 20v2"/></symbol>
     <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l2-7 4 14 2-7h6"/></symbol>
-    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
-    <symbol id="i-model" viewBox="0 0 24 24"><path d="m12 3 8 4.5-8 4.5-8-4.5L12 3Z"/><path d="m4 12.5 8 4.5 8-4.5M4 17l8 4 8-4"/></symbol>
-    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V10m6 10V4m6 16v-7m5 7H2"/></symbol>
-    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3m6 0h4"/></symbol>
-    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M4 20h16"/></symbol>
-    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3V6Z"/></symbol>
-    <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 1.4 4.6L18 9l-4.6 1.4L12 15l-1.4-4.6L6 9l4.6-1.4L12 3Zm7 12 .7 2.3L22 18l-2.3.7L19 21l-.7-2.3L16 18l2.3-.7L19 15Z"/></symbol>
-    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
-    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8v.5"/></symbol>
-  </defs></svg>
-  <div class="app">
-    <aside class="sidebar">
-      <div class="brand"><span class="mark"><i></i><i></i><i></i><i></i></span>Kerna</div>
-      <div class="nav-label">Session</div>
-      <nav>
-        <a class="nav-item active" href="#overview"><svg class="icon"><use href="#i-dashboard"/></svg>Overview</a>
-        <a class="nav-item" href="#routing"><svg class="icon"><use href="#i-route"/></svg>Routing</a>
-        <a class="nav-item" href="#comparison"><svg class="icon"><use href="#i-spark"/></svg>Shadow compare</a>
-        <a class="nav-item" href="#approvals"><svg class="icon"><use href="#i-shield"/></svg>Approvals</a>
-        <a class="nav-item" href="#receipts"><svg class="icon"><use href="#i-receipt"/></svg>Receipts</a>
-        <a class="nav-item" href="#workspace"><svg class="icon"><use href="#i-folder"/></svg>Worktree</a>
-        <a class="nav-item" href="#evidence"><svg class="icon"><use href="#i-lock"/></svg>Evidence</a>
-      </nav>
-      <div class="sidebar-bottom"><div class="local-pill"><span class="dot"></span><div><b>Local control plane</b><small>Loopback only · no cloud dashboard</small></div></div></div>
-    </aside>
-    <div class="content">
-      <header class="topbar">
-        <div class="breadcrumb"><svg class="icon sm"><use href="#i-shield"/></svg><b>Kerna</b><span>/ Claude session / Control room</span></div>
-        <div class="top-actions"><div id="system-state" class="system-status"><span class="dot"></span>All required systems ready</div><button class="primary" onclick="exportEvidence()"><svg class="icon sm"><use href="#i-download"/></svg>Export report</button></div>
-      </header>
-      <main id="overview">
-        <div class="page-heading">
-          <div><div class="eyebrow">Agent runtime governance</div><h1>Kerna is governing this session.</h1><p>Route the model, control every action, isolate execution, and keep the proof.</p></div>
-          <div class="heading-actions"><span class="pill live good">Live telemetry</span><button class="danger" onclick="stopActiveSession()">Stop session</button></div>
-        </div>
-        <div id="metrics" class="metrics" aria-live="polite"></div>
-        <div class="grid">
-          <section id="routing" class="card route-hero"><div class="card-head"><div class="title-wrap"><span class="title-icon"><svg class="icon"><use href="#i-route"/></svg></span><div><h2>Routing &amp; model selection</h2><p>The first decision is persisted before any provider receives the task.</p></div></div><span id="routing-state" class="pill blue">Awaiting task</span></div><div id="routing-card" class="card-body"></div></section>
-          <section id="approvals" class="card approvals-card"><div class="card-head"><div class="title-wrap"><span class="title-icon"><svg class="icon"><use href="#i-shield"/></svg></span><div><h2>Policy &amp; approvals</h2><p>Exact, expiring, one-time authority.</p></div></div><span id="approval-count" class="pill good">0 pending</span></div><div id="approvals-list" class="card-body"></div></section>
-          <section id="comparison" class="card comparison"><div class="card-head"><div class="title-wrap"><span class="title-icon"><svg class="icon"><use href="#i-spark"/></svg></span><div><h2>Primary ↔ shadow comparison</h2><p>The same request runs twice; only the primary can receive governed tool authority.</p></div></div><span class="pill purple">No shadow side effects</span></div><div id="comparison-body" class="card-body"></div></section>
-          <section class="card readiness"><div class="card-head"><div class="title-wrap"><span class="title-icon"><svg class="icon"><use href="#i-cpu"/></svg></span><div><h2>System readiness</h2><p>Real checks from this machine.</p></div></div><button class="card-action" onclick="loadReadiness()">Refresh</button></div><div id="readiness-card" class="card-body"><div class="empty">Scanning this machine…</div></div></section>
-          <section class="card skills-card"><div class="card-head"><div class="title-wrap"><span class="title-icon"><svg class="icon"><use href="#i-key"/></svg></span><div><h2>What Kerna controls</h2><p>The essential governance skills in this demo, with narrower claims where coverage is scoped.</p></div></div></div><div id="skills" class="card-body skills"></div></section>
-          <section class="card history"><div class="card-head"><div class="title-wrap"><span class="title-icon"><svg class="icon"><use href="#i-chart"/></svg></span><div><h2>10-day routing rehearsal</h2><p>Illustrative history for explaining the product before customer telemetry exists.</p></div></div><span class="pill warn">Simulated data</span></div><div id="history-body" class="card-body"></div></section>
-          <section class="card registry"><div class="card-head"><div class="title-wrap"><span class="title-icon"><svg class="icon"><use href="#i-model"/></svg></span><div><h2>Model registry &amp; task fit</h2><p>Two configured runtimes, one policy decision.</p></div></div></div><div id="registry-body" class="card-body"></div></section>
-          <section id="receipts" class="card activity"><div class="card-head"><div class="title-wrap"><span class="title-icon"><svg class="icon"><use href="#i-receipt"/></svg></span><div><h2>Receipt report</h2><p>Requested, released, result-observed, failed, or outcome-unknown.</p></div></div><button class="card-action" onclick="renderActivity(latest?.receipts||[])">Refresh</button></div><div id="activity" class="card-body activity-list"></div></section>
-          <section class="card containment"><div class="card-head"><div class="title-wrap"><span class="title-icon"><svg class="icon"><use href="#i-lock"/></svg></span><div><h2>Containment</h2><p>Who controls which boundary.</p></div></div></div><div id="containment-list" class="card-body"></div></section>
-          <section id="workspace" class="card workspace"><div class="card-head"><div class="title-wrap"><span class="title-icon"><svg class="icon"><use href="#i-folder"/></svg></span><div><h2>Disposable worktree</h2><p>Review changes before anything reaches the original repository.</p></div></div><button class="card-action" onclick="loadWorkspace()">Refresh</button></div><div id="workspace-body" class="card-body"><div class="empty">Loading Git status and diff…</div></div></section>
-          <section id="evidence" class="card evidence"><div class="card-head"><div class="title-wrap"><span class="title-icon"><svg class="icon"><use href="#i-lock"/></svg></span><div><h2>Signed evidence</h2><p>Portable, redacted proof.</p></div></div></div><div class="card-body"><div class="evidence-callout"><strong>Ed25519 signed receipt bundle</strong><p>Includes routing, approvals, containment, digests, and terminal states. Raw prompts, source, model prose, output, and keys stay out by default.</p></div><button class="primary" onclick="exportEvidence()"><svg class="icon sm"><use href="#i-download"/></svg>Download report</button><div id="sandbox-card" class="sandbox-box"><b>Sponsor sandbox</b>No governed sandbox event yet.</div></div></section>
-          <section id="audit" class="card trace"><div class="card-head"><div class="title-wrap"><span class="title-icon"><svg class="icon"><use href="#i-activity"/></svg></span><div><h2>Audit detail</h2><p>Select a receipt to inspect its redacted event chain.</p></div></div></div><div class="card-body"><pre id="trace">Choose “View” on a receipt to inspect its event record.</pre></div></section>
-        </div>
-      </main>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m4.5 12.5 5 5 10-11"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><rect x="9" y="9" width="6" height="6" rx="1"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4.5-4.5M12 15 7.5 10.5"/><path d="M4 19h16"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="2.5"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h16m0 0-5-5m5 5-5 5"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+    <symbol id="i-git" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="9" r="2.5"/><path d="M6 8.5v7M15.5 9.5 8 16"/></symbol>
+  </svg>
+
+  <header class="topbar">
+    <div class="brand"><span class="mark"><i></i><i></i><i></i><i></i></span>KERNA<span class="crumb">/ CONTROL ROOM</span></div>
+    <div class="top-spacer"></div>
+    <span id="system-state" class="top-chip"><span class="dot"></span>Connecting…</span>
+    <span id="addr" class="top-chip mono"></span>
+    <span id="client-chip" class="top-chip mono"></span>
+    <button class="danger" onclick="stopActiveSession()"><svg class="icon sm"><use href="#i-stop"/></svg>Stop Session</button>
+  </header>
+
+  <nav class="rail" id="nav">
+    <a href="#overview" class="nav-item active"><svg class="icon"><use href="#i-home"/></svg>Overview</a>
+    <a href="#route" class="nav-item"><svg class="icon"><use href="#i-route"/></svg>Route</a>
+    <a href="#runs" class="nav-item"><svg class="icon"><use href="#i-play"/></svg>Runs</a>
+    <a href="#ledger" class="nav-item"><svg class="icon"><use href="#i-ledger"/></svg>Evidence</a>
+    <a href="#approvals" class="nav-item"><svg class="icon"><use href="#i-shield"/></svg>Approvals</a>
+    <a href="#worktree" class="nav-item"><svg class="icon"><use href="#i-folder"/></svg>Worktree</a>
+    <a href="#readiness" class="nav-item"><svg class="icon"><use href="#i-cpu"/></svg>Readiness</a>
+    <a href="#audit" class="nav-item" onclick="openLatestTrace(event)"><svg class="icon"><use href="#i-activity"/></svg>Audit</a>
+    <div class="rail-note">A safer<em>AI future.</em></div>
+  </nav>
+
+  <main>
+    <div class="page-head" id="overview">
+      <div>
+        <h1>Kerna Control Room</h1>
+        <p>Govern AI agents. Route models. Isolate execution. Record everything.</p>
+      </div>
+      <div class="tagline">/ MORE CAPABILITY.
+LESS RISK.</div>
     </div>
-  </div>
+
+    <section class="metrics" id="metrics"></section>
+
+    <div class="grid">
+      <section id="route" class="card route-card">
+        <div class="card-head">
+          <div><h2>Current route</h2><p>Agent requests flow through Kerna's control plane with policy enforcement, isolated execution, and full audit trails.</p></div>
+          <div class="head-actions"><span id="route-live" class="pill">Idle</span></div>
+        </div>
+        <div class="card-body">
+          <div class="route-flow">
+            <div class="route-box">
+              <span class="lbl">Agent</span>
+              <b id="route-agent">Awaiting client</b>
+              <small id="route-agent-sub">Run <code>kerna code</code> or connect a governed client</small>
+            </div>
+            <div class="route-arrow"><div><small>REQUEST</small><svg class="icon lg"><use href="#i-arrow"/></svg><small>Intent · Tools · Context</small></div></div>
+            <div class="route-box hub">
+              <span class="lbl">Kerna</span>
+              <b>Control Plane</b>
+              <small>Policy · Routing · Audit</small>
+            </div>
+            <div class="route-arrow"><div><svg class="icon lg"><use href="#i-arrow"/></svg></div></div>
+            <div class="route-outputs">
+              <div class="route-out">
+                <span class="dot"></span>
+                <div><b id="route-primary">—</b><small id="route-primary-sub">Cloud · generate, analyze, reason</small>
+                  <div class="route-tags"><span class="pill" id="route-primary-kind">PRIMARY</span></div>
+                </div>
+                <span class="pill good" id="route-primary-state">ready</span>
+              </div>
+              <div class="route-out">
+                <span class="dot warn" id="route-shadow-dot"></span>
+                <div><b id="route-shadow">—</b><small id="route-shadow-sub">Local · cross-check, validate, compare</small>
+                  <div class="route-tags"><span class="pill" id="route-shadow-kind">LOCAL SHADOW</span></div>
+                </div>
+                <span class="pill warn" id="route-shadow-state">—</span>
+              </div>
+            </div>
+          </div>
+          <div class="route-foot" id="route-config"></div>
+        </div>
+      </section>
+
+      <section id="runs" class="card runs-card">
+        <div class="card-head">
+          <div><h2>Runs</h2><p>Governed sessions — from the gateway registry or the receipt ledger.</p></div>
+        </div>
+        <div class="card-body" id="runs-list"><div class="empty"><svg class="icon lg"><use href="#i-play"/></svg><span>No runs yet.<br>Start one with <code>kerna code</code>.</span></div></div>
+      </section>
+
+      <section id="ledger" class="card ledger-card">
+        <div class="card-head">
+          <div><h2>Live evidence</h2><p>Blocked, approved, allowed — the real ledger.</p></div>
+          <div class="head-actions">
+            <select id="ledger-filter" onchange="renderLedger()">
+              <option value="all">All events</option>
+              <option value="allowed">Allowed</option>
+              <option value="blocked">Blocked / failed</option>
+              <option value="pending">Pending</option>
+            </select>
+            <button class="icon-btn" id="ledger-pause" title="Pause live updates" onclick="togglePause()"><svg class="icon sm"><use href="#i-pause"/></svg></button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="ledger head"><span>Time</span><span>Agent</span><span>Action</span><span>Target</span><span>Policy</span><span>Result</span><span style="text-align:right">Dur</span><span></span></div>
+          <div id="ledger-rows"></div>
+        </div>
+      </section>
+
+      <section id="approvals" class="card approvals-card">
+        <div class="card-head">
+          <div><h2>Approval gate</h2><p>Exact, expiring, one-time authority.</p></div>
+          <span id="approval-count" class="pill good">0 pending</span>
+        </div>
+        <div class="card-body" id="approvals-list"><div class="empty"><svg class="icon lg"><use href="#i-check"/></svg><span>No pending approvals.<br>The policy gate is clear.</span></div></div>
+      </section>
+
+      <section id="worktree" class="card worktree-card">
+        <div class="card-head">
+          <div><h2>Disposable worktree</h2><p>Review before anything reaches the original repository.</p></div>
+          <span id="worktree-state" class="pill">—</span>
+        </div>
+        <div class="card-body" id="workspace-body"><div class="empty">Loading worktree…</div></div>
+      </section>
+
+      <section id="readiness" class="card readiness-card">
+        <div class="card-head">
+          <div><h2>Host readiness</h2><p>Real checks from this machine.</p></div>
+        </div>
+        <div class="card-body" id="readiness-card"><div class="empty">Running host checks…</div></div>
+      </section>
+
+      <section id="signed" class="card signed-card">
+        <div class="card-head">
+          <div><h2>Signed evidence</h2><p>Portable, redacted, verifiable.</p></div>
+        </div>
+        <div class="card-body">
+          <div class="signed-callout"><svg class="icon lg"><use href="#i-lock"/></svg><div><b>Ed25519 verified</b>All events cryptographically signed and tamper-evident.</div></div>
+          <dl class="kv">
+            <dt>Evidence receipts</dt><dd id="signed-count">0</dd>
+            <dt>Latest receipt</dt><dd id="signed-latest">—</dd>
+          </dl>
+          <button class="primary" onclick="exportEvidence()"><svg class="icon sm"><use href="#i-download"/></svg>Download bundle</button>
+        </div>
+      </section>
+    </div>
+    <div class="footer-note">Kerna runs locally · loopback only · every action is one-time, bound, and receipted · evidence exports are Ed25519-signed</div>
+  </main>
+
+  <aside class="trace-panel" id="audit">
+    <div class="trace-head">
+      <span class="lbl">Audit trace</span>
+      <div class="trace-title"><h2 id="trace-title">No run selected</h2><button class="icon-btn" onclick="closeTrace()"><svg class="icon"><use href="#i-x"/></svg></button></div>
+      <div class="trace-sub"><code id="trace-id">—</code><span id="trace-badge"></span><span id="trace-elapsed" class="muted"></span></div>
+    </div>
+    <div class="trace-tabs">
+      <button id="tab-timeline" class="active" onclick="traceTab('timeline')">Timeline</button>
+      <button id="tab-receipt" onclick="traceTab('receipt')">Receipt</button>
+    </div>
+    <div class="trace-body"><div id="trace-timeline"><div class="empty">Choose <b>View</b> on a ledger event to inspect its record.</div></div><pre id="trace-receipt" hidden></pre></div>
+  </aside>
+
   <script>
-    const csrf='{csrf}';let latest=null;
+    const csrf='{csrf}';let latest=null;let paused=false;let latestDetail=null;
     const esc=(value)=>String(value??'').replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const clip=(value,length)=>String(value||'').slice(0,length||24000);
     const icon=(name,cls='sm')=>'<svg class="icon '+cls+'"><use href="#i-'+name+'"/></svg>';
-    const kind=(value)=>{const t=String(value||'').toLowerCase();return t.includes('deny')||t.includes('fail')||t.includes('error')||t.includes('block')?'bad':t.includes('approv')||t.includes('pending')||t.includes('unknown')||t.includes('scoped')?'warn':t.includes('allow')||t.includes('success')||t.includes('observ')||t.includes('completed')||t.includes('active')||t.includes('ready')?'good':'blue'};
+    const kind=(value)=>{const t=String(value||'').toLowerCase();return t.includes('deny')||t.includes('fail')||t.includes('error')||t.includes('block')?'bad':t.includes('approv')||t.includes('pending')||t.includes('unknown')||t.includes('hold')||t.includes('await')?'warn':t.includes('allow')||t.includes('success')||t.includes('observ')||t.includes('complet')||t.includes('active')||t.includes('ready')||t.includes('releas')?'good':''};
     const payload=(event)=>event?.payload_json&&typeof event.payload_json==='object'?event.payload_json:{};
-    function metric(label,value,name,foot,footKind){return '<div class="metric"><div class="metric-top"><span>'+esc(label)+'</span><span class="metric-icon">'+icon(name)+'</span></div><strong>'+esc(value)+'</strong><div class="metric-foot '+(footKind||'')+'">'+esc(foot)+'</div></div>'}
-    function render(data){latest=data;const m=data.metrics||{};const observed=(data.receipts||[]).filter((r)=>r.result_class).length;document.querySelector('#metrics').innerHTML=metric('Active sessions',m.active_sessions??0,'activity',m.active_sessions?'Watching live':'Ready for Claude',m.active_sessions?'good':'')+metric('Governed actions',m.tool_calls??0,'shield',(m.completed??0)+' released · '+(m.denied??0)+' denied','')+metric('Approvals pending',m.pending_approvals??0,'clock',m.pending_approvals?'Human decision required':'No action needed',m.pending_approvals?'warn':'good')+metric('Observed results',observed,'check',(m.failed??0)+' failed · p95 '+(m.p95_duration_ms==null?'—':m.p95_duration_ms+' ms'),'');document.querySelector('#system-state').innerHTML='<span class="dot '+(m.degraded?'warn':'')+'"></span>'+(m.degraded?'Degraded — inspect receipts':'All required systems ready');document.querySelector('#approval-count').className='pill '+(m.pending_approvals?'warn':'good');document.querySelector('#approval-count').textContent=(data.approvals||[]).length+' pending';renderRouting(data);renderComparison(data);renderApprovals(data.approvals||[]);renderSkills(data.capabilities||[]);renderHistory(data.rehearsal||{});renderRegistry(data.model_registry||[],data.rehearsal?.task_fit||[]);renderActivity(data.receipts||[]);renderContainment([...(data.runtime_boundaries||[]),...(data.containment||[])]);renderSandbox(data.sandbox_events||[])}
-    function renderRouting(data){const e=(data.routing||[])[0],p=payload(e),cfg=data.routing_config||{};const provider=p.provider||'Kerna auto router',model=p.model||(cfg.requested_mode==='local'?cfg.local_model:cfg.requested_mode==='cloud'?cfg.cloud_model:'Selected after first task');const shadow=p.shadow_provider||((cfg.shadow_enabled&&cfg.requested_mode!=='local')?cfg.local_model:'Off for local-only');document.querySelector('#routing-state').className='pill '+(e?'good':'blue');document.querySelector('#routing-state').textContent=e?'Sticky route':'Configured · '+(cfg.requested_mode||'auto');document.querySelector('#routing-card').innerHTML='<div class="route-top"><div class="route-decision"><strong>'+esc(provider)+' / '+esc(model)+'</strong><span>'+(e?'Decision committed before provider contact':'Waiting for Claude’s first task to classify intent')+'</span></div><span class="pill '+(e?'good':'blue')+'">'+(e?'Session locked':'Auto policy ready')+'</span></div><div class="route-flow"><div class="route-node"><div class="node-label">'+icon('terminal')+'Task intent</div><b>'+esc(e?'Canonical request captured':'Claude receives your task')+'</b><small>Prompt text is never stored in the receipt ledger.</small></div><div class="route-arrow">'+icon('arrow')+'</div><div class="route-node active"><div class="node-label">'+icon('model')+'Primary</div><b>'+esc(model)+'</b><small>'+esc(p.privacy||'Local for private/read-only; cloud for complex work')+'</small></div><div class="route-arrow">'+icon('arrow')+'</div><div class="route-node shadow"><div class="node-label">'+icon('spark')+'Shadow</div><b>'+esc(shadow)+'</b><small>Same request fingerprint · tools removed · cannot act</small></div></div><div class="route-reason"><span>Requested <b>'+esc(p.requested_mode||cfg.requested_mode||'auto')+'</b></span><span>Reason <b>'+esc(p.reason||'deterministic task classifier')+'</b></span><span>Sticky <b>'+esc(p.sticky??cfg.sticky_after_first_task??true)+'</b></span></div>'}
-    function runtimeColumn(title,e,isShadow){const p=payload(e);const empty=!e;return '<div class="runtime-col '+(isShadow?'shadow':'')+'"><div class="runtime-head"><div><b>'+esc(title)+'</b><small>'+esc(e?.model||p.model||(isShadow?'Local comparison':'Selected primary'))+'</small></div><span class="pill '+(empty?'blue':kind(p.status||e.event_type))+'">'+esc(empty?'Waiting':p.status||e.event_type)+'</span></div><div class="runtime-stats"><div class="runtime-stat"><span>Latency</span><b>'+esc(empty?'—':(p.duration_ms??'—')+' ms')+'</b></div><div class="runtime-stat"><span>Output bytes</span><b>'+esc(empty?'—':p.output_bytes??'—')+'</b></div><div class="runtime-stat"><span>Tool authority</span><b>'+esc(isShadow?'None':p.tool_authority||'Policy gated')+'</b></div><div class="runtime-stat"><span>Output digest</span><b>'+esc(empty?'—':String(p.output_sha256||'—').slice(0,10))+'</b></div></div></div>'}
-    function renderComparison(data){const primary=(data.primary||[])[0],pp=payload(primary);const shadow=(data.shadow||[]).find((e)=>{const sp=payload(e);return !primary||e.correlation_id===primary.correlation_id||sp.request_sha256===pp.request_sha256});const sp=payload(shadow);const same=primary&&shadow&&pp.request_sha256&&pp.request_sha256===sp.request_sha256;const localOnly=(data.routing||[]).length&&payload((data.routing||[])[0]).provider==='ollama';document.querySelector('#comparison-body').innerHTML='<div class="compare-grid">'+runtimeColumn('Primary runtime',primary,false)+'<div class="compare-link">'+icon(same?'check':'arrow','lg')+'</div>'+runtimeColumn('Local shadow',shadow,true)+'</div><div class="same-task">'+icon(same?'check':'lock')+(same?'Same request fingerprint verified. Primary and shadow ran the same task; shadow had no tools.':localOnly?'Local-only session: no cloud shadow is launched by policy.':'Comparison will pair both runtimes by session and request digest.')+'</div><div class="privacy-note"><b>Honest comparison:</b> live telemetry compares route, completion, latency, bytes, authority, and output digests. Semantic quality is not scored live because Kerna does not persist model prose.</div>'}
-    function renderApprovals(items){document.querySelector('#approvals-list').innerHTML=items.length?items.map((a)=>'<div class="approval"><div class="approval-title">'+icon('clock')+'<span>'+esc(a.tool)+'</span></div><p>'+esc(a.task_id||'Session-bound action')+' · exact retry only · expires automatically</p><div class="approval-actions"><button class="orange" onclick="decide(\''+esc(a.id)+'\',\'approve\')">'+icon('check')+'Approve once</button><button class="danger" onclick="decide(\''+esc(a.id)+'\',\'reject\')">Reject</button></div></div>').join(''):'<div class="empty">'+icon('check','lg')+'<span>No pending approvals. The policy gate is clear.</span></div>'}
-    const skillIcons={Routing:'route',Policy:'shield',Identity:'key',Approvals:'clock',Secrets:'lock',Evidence:'receipt',Budgets:'chart',Orchestration:'activity'};
-    function renderSkills(items){document.querySelector('#skills').innerHTML=items.map((s)=>'<div class="skill"><span class="skill-icon">'+icon(skillIcons[s.name]||'spark')+'</span><div><b>'+esc(s.name)+' <span class="pill '+kind(s.state)+'">'+esc(s.state)+'</span></b><small>'+esc(s.detail)+'</small></div></div>').join('')}
-    function renderHistory(history){const days=history.days||[];const max=Math.max(1,...days.map((d)=>Math.max(d.local,d.cloud)));const totals=days.reduce((a,d)=>({local:a.local+d.local,cloud:a.cloud+d.cloud,blocked:a.blocked+d.blocked}),{local:0,cloud:0,blocked:0});document.querySelector('#history-body').innerHTML='<div class="demo-notice">'+icon('info')+'<div><b>'+esc(history.label||'Simulated rehearsal data')+'</b><br>'+esc(history.reason||'Illustrative fixture; not production telemetry.')+'</div></div><div class="bars">'+days.map((d)=>'<div class="day"><div class="bar-pair"><i class="bar" style="height:'+Math.max(5,d.local/max*100)+'%"></i><i class="bar cloud" style="height:'+Math.max(5,d.cloud/max*100)+'%"></i></div><label>'+esc(d.date.replace('Sep ',''))+'</label></div>').join('')+'</div><div class="legend"><span><i class="swatch"></i>Local tasks</span><span><i class="swatch cloud"></i>Cloud + local shadow</span></div><div class="history-summary"><div><b>'+totals.local+'</b><span>local tasks routed</span></div><div><b>'+totals.cloud+'</b><span>cloud tasks shadowed</span></div><div><b>'+totals.blocked+'</b><span>unsafe actions blocked</span></div></div>'}
-    function renderRegistry(models,tasks){document.querySelector('#registry-body').innerHTML=models.map((m)=>'<div class="model"><div class="model-head"><div><b>'+esc(m.provider)+' · '+esc(m.location)+'</b><code>'+esc(m.model)+'</code></div><span class="pill '+kind(m.status)+'">'+esc(m.status)+'</span></div><p>'+esc(m.best_for)+'</p></div>').join('')+'<div class="task-fit">'+tasks.map((t)=>'<div class="task-row"><span>'+esc(t.task)+'</span><span>'+esc(t.route)+'</span></div>').join('')+'</div>'}
-    function renderActivity(items){document.querySelector('#activity').innerHTML=items.length?items.slice(0,100).map((r)=>'<div class="activity-row"><span class="dot '+(kind(r.result_class||r.policy_decision)==='bad'?'bad':kind(r.result_class||r.policy_decision)==='warn'?'warn':'')+'"></span><span class="activity-time" title="'+esc(r.completed_at||r.started_at||'')+'">'+esc(String(r.completed_at||r.started_at||'—').replace('T',' ').slice(0,19))+'</span><div class="activity-main"><strong>'+esc(r.tool)+'</strong><span>'+esc(r.policy_decision)+' · '+esc(r.result_class||'requested')+' · '+esc(r.client_name||'gateway')+'</span></div><span class="pill '+kind(r.result_class||r.policy_decision)+'">'+esc(r.result_class||r.policy_decision||'Observed')+'</span>'+'<button class="card-action" onclick="viewReceipt(\''+esc(r.call_id)+'\')">View</button>'+'</div>').join(''):'<div class="empty">No governed action has been recorded yet.</div>'}
-    function renderContainment(items){document.querySelector('#containment-list').innerHTML=items.length?items.map((p)=>'<div class="containment-row"><div class="containment-title"><span>'+esc(p.name)+'</span><span class="pill '+kind(p.status||p.runtime_mode)+'">'+esc(p.runtime_mode||'contained')+'</span></div><div class="containment-details"><span>Network: '+esc(p.network||'disabled')+'</span><code>'+esc(p.image_digest||p.status||'digest unavailable')+'</code><span>Writable: '+esc(Array.isArray(p.write_roots)?p.write_roots.join(', ')||'none':p.write_roots||'none')+'</span></div></div>').join(''):'<div class="empty">No containment runtime reported.</div>'}
-    function renderSandbox(items){const e=items[0],p=payload(e),o=p.outcome||p.policy||{};if(e&&o.backend_contacted===false){document.querySelector('#sandbox-card').innerHTML='<b>'+esc(o.backend||'Sandbox')+' · Kerna blocked</b>'+esc(o.policy_reason||o.reason||'Policy denied')+'<br>Backend not contacted — see Receipt report';return}document.querySelector('#sandbox-card').innerHTML=e?'<b>'+esc(o.backend||'sandbox')+' · '+esc(o.package||'bounded runtime')+'<span class="pill '+kind(e.event_type)+'">'+esc(o.status==='failed'?'safe failure':o.status||e.event_type)+'</span></b>Network '+esc(o.network||'disabled')+' · exit '+esc(o.exit_code)+' · '+esc(o.duration_ms)+' ms<br>Containment: '+esc(o.containment||'isolated')+'<br><code>'+esc(String(o.output_sha256||'not recorded').slice(0,18))+'</code>':'<b>Wasmer local · Tenki remote</b>No governed sandbox event yet. Network and host mounts default to off.'}
-    async function loadReadiness(){try{const r=await fetch('/api/v1/dashboard/readiness');if(!r.ok)throw new Error(await r.text());const d=await r.json();document.querySelector('#readiness-card').innerHTML='<div class="check-list">'+(d.checks||[]).map((c)=>'<div class="check-row"><span class="check-icon '+(c.status==='ready'?'':c.status==='optional'?'warn':'bad')+'">'+icon(c.status==='ready'?'check':'clock')+'</span><div><b>'+esc(c.name)+'</b><small>'+esc(c.detail)+'</small></div><span class="pill '+(c.status==='ready'?'good':c.status==='optional'?'warn':'bad')+'">'+esc(c.status)+'</span></div>').join('')+'</div><div class="hardware"><b>'+esc(d.hardware?.name||'Hardware not detected')+' · '+esc(d.hardware?.memory_gb||'—')+' GB</b><br>CPU: '+esc(d.system?.cpu||d.system?.architecture||'not detected')+'<br>Models: '+esc(d.storage?.ollama_models)+'<br>Sessions: '+esc(d.storage?.sessions)+'</div>'}catch(e){document.querySelector('#readiness-card').innerHTML='<div class="empty">Readiness checks are unavailable in this recorded replay.</div>'}}
+    const badge=(value)=>{const k=kind(value);return '<span class="pill '+k+'">'+esc(String(value||'—').replace(/_/g,' ').toUpperCase())+'</span>'};
+    const short=(value,prefix)=>{const s=String(value||'');return s.length>(prefix||14)?s.slice(0,prefix||14)+'…':s};
+    const timeOf=(iso)=>{if(!iso)return'—';const d=new Date(iso);return isNaN(d)?String(iso).slice(11,19):d.toTimeString().slice(0,8)};
+    const ago=(iso)=>{const d=new Date(iso);if(isNaN(d))return'';const s=Math.max(0,(Date.now()-d.getTime())/1000);if(s<60)return Math.floor(s)+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago'};
+
+    function sparkline(values,color){const w=88,h=26;if(!values.some(v=>v>0))return'';const max=Math.max(...values);const pts=values.map((v,i)=>((i/(values.length-1||1))*(w-2)+1)+','+(h-2-(v/max)*(h-4))).join(' ');return '<svg class="spark" width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'"><polyline points="'+pts+'" fill="none" stroke="'+(color||'var(--red)')+'" stroke-width="1.5" stroke-linejoin="round"/></svg>'}
+    function buckets(items,mode){const now=Date.now();const hours=12;const slot=3600e3;const values=new Array(hours).fill(0);const counts=new Array(hours).fill(0);(items||[]).forEach((item)=>{const t=new Date(item.started_at||item.completed_at||0).getTime();if(!t)return;const idx=hours-1-Math.floor((now-t)/slot);if(idx<0||idx>=hours)return;if(mode==='count'){values[idx]++}else if(item.duration_ms!=null){values[idx]+=item.duration_ms;counts[idx]++}});return mode==='count'?values:values.map((v,i)=>counts[i]?Math.round(v/counts[i]):0)}
+    function metric(label,value,foot,footKind,alert,spark){return '<div class="metric'+(alert?' alert':'')+'"><div class="metric-top"><span>'+esc(label)+'</span>'+(spark||'')+'</div><strong>'+esc(value)+'</strong><div class="metric-foot '+(footKind||'')+'">'+esc(foot)+'</div></div>'}
+
+    function render(data){
+      latest=data;
+      const m=data.metrics||{};const receipts=data.receipts||[];const approvals=data.approvals||[];const sessions=data.sessions||[];
+      const released=receipts.filter((r)=>['released','result_observed','completed'].includes(r.result_class)).length;
+      const denied=receipts.filter((r)=>r.result_class==='blocked').length;
+      const failed=receipts.filter((r)=>r.result_class==='failed').length;
+      const blocked=denied+failed;const pending=m.pending_approvals??approvals.length;
+      const hourAgo=Date.now()-3600e3;
+      const actionsThisHour=receipts.filter((r)=>new Date(r.started_at||0).getTime()>hourAgo).length;
+      const sessionsThisHour=sessions.filter((s)=>new Date(s.started_at||0).getTime()>hourAgo).length;
+      const durations=receipts.map((r)=>r.duration_ms).filter((d)=>d!=null).sort((a,b)=>a-b);
+      const p95=durations.length?durations[Math.round((durations.length-1)*0.95)]:null;
+      document.querySelector('#metrics').innerHTML=
+        metric('Active sessions',m.active_sessions??0,m.active_sessions?'+'+sessionsThisHour+' this hour':'Ready for work',m.active_sessions?'good':'')+
+        metric('Governed actions',receipts.length,'+'+actionsThisHour+' this hour · '+released+' released','',false,sparkline(buckets(receipts,'count')))+
+        metric('P95 duration',p95==null?'—':p95+' ms',p95==null?'No timed actions yet':'Across '+durations.length+' timed actions','',false,sparkline(buckets(receipts,'avg'),'var(--green)'))+
+        metric('System status',blocked?'Attention':'Healthy',blocked?blocked+' blocked · '+pending+' pending':'All systems ready',blocked?'bad':'good',blocked>0);
+      document.querySelector('#system-state').innerHTML='<span class="dot '+(m.degraded||blocked?'warn':'')+'"></span>'+(m.degraded?'Degraded — inspect receipts':(m.active_sessions?'Session active':'Idle'));
+      document.querySelector('#addr').textContent=location.host;
+      const lastClient=sessions[0]?.client_name||receipts[0]?.client_name;
+      document.querySelector('#client-chip').textContent=lastClient||'';
+      document.querySelector('#approval-count').className='pill '+(pending?'warn':'good');
+      document.querySelector('#approval-count').textContent=pending+' pending';
+      renderRoute(data,receipts,sessions);renderRuns(sessions);if(!paused)renderLedger();
+      renderApprovals(approvals);
+      document.querySelector('#signed-count').textContent=String(receipts.length);
+      document.querySelector('#signed-latest').textContent=receipts[0]?short(receipts[0].call_id,18):'—';
+    }
+
+    function renderRoute(data,receipts,sessions){
+      const cfg=data.routing_config||{};const e=(data.routing||[])[0];const p=payload(e);
+      const client=sessions.find((s)=>s.state==='running')?.client_name||receipts[0]?.client_name;
+      document.querySelector('#route-agent').textContent=client||'Awaiting client';
+      document.querySelector('#route-agent-sub').innerHTML=client?esc(sessions.find((s)=>s.state==='running')?.workspace||'governed session'):'Run <code>kerna code</code> or connect a governed client';
+      document.querySelector('#route-primary').textContent=p.model||cfg.cloud_model||'—';
+      document.querySelector('#route-shadow').textContent=cfg.local_model&&cfg.local_model!=='not configured'?cfg.local_model:'No local model';
+      const shadowOn=!!cfg.shadow_enabled;
+      document.querySelector('#route-shadow-state').className='pill '+(shadowOn?'good':'warn');
+      document.querySelector('#route-shadow-state').textContent=shadowOn?'shadowing':'standby';
+      const live=(data.metrics?.active_sessions||0)>0;
+      document.querySelector('#route-live').className='pill '+(live?'good live':'');
+      document.querySelector('#route-live').textContent=live?'Live':'Idle';
+      document.querySelector('#route-config').innerHTML='Mode <code>'+esc(cfg.requested_mode||'auto')+'</code> · sticky after first task · shadow '+(shadowOn?'<code>on</code>':'<code>off</code>')+' · cloud <code>'+esc(cfg.cloud_model||'—')+'</code>';
+    }
+
+    function renderRuns(sessions){
+      if(sessions.length){document.querySelector('#runs-list').innerHTML=sessions.slice(0,8).map((s)=>'<div class="run-row"><div><b>'+esc(s.client_name||'governed client')+'</b><small>'+esc(short(s.task_id,22))+' · '+esc(ago(s.started_at))+'</small></div>'+badge(s.state)+'</div>').join('');return}
+      const bySession={};(latest?.receipts||[]).forEach((r)=>{const key=r.session_id||r.task_id;if(!key)return;const cur=bySession[key];if(!cur)bySession[key]={session:key,client:r.client_name,started:r.started_at,result:r.result_class};else{if((r.started_at||'')<cur.started)cur.started=r.started_at;if(!cur.result&&r.result_class)cur.result=r.result_class}});
+      const runs=Object.values(bySession).sort((a,b)=>(b.started||'').localeCompare(a.started||'')).slice(0,8);
+      document.querySelector('#runs-list').innerHTML=runs.length?runs.map((s)=>'<div class="run-row"><div><b>'+esc(s.client||'governed client')+'</b><small>'+esc(short(s.session,22))+' · '+esc(ago(s.started))+'</small></div>'+badge(s.result||'recorded')+'</div>').join(''):'<div class="empty">'+icon('play','lg')+'<span>No runs yet.<br>Start one with <code>kerna code</code>.</span></div>';
+    }
+
+    function ledgerFilter(r){const f=document.querySelector('#ledger-filter')?.value||'all';if(f==='allowed')return kind(r.policy_decision)==='good'&&kind(r.result_class)!=='bad';if(f==='blocked')return['blocked','failed'].includes(r.result_class);if(f==='pending')return!r.result_class||r.result_class==='pending';return true}
+    function renderLedger(){
+      if(!latest)return;const receipts=(latest.receipts||[]).filter(ledgerFilter);
+      const filteredOut=(latest.receipts||[]).length>0&&receipts.length===0;
+      const emptyHtml=filteredOut?'<div class="empty">'+icon('check','lg')+'<span>No events match this filter.</span></div>':'<div class="empty">'+icon('check','lg')+'<span>No governed action recorded yet.<br>Run <code>kerna code</code> to begin.</span></div>';
+      document.querySelector('#ledger-pause').title=paused?'Resume live updates':'Pause live updates';
+      document.querySelector('#ledger-rows').innerHTML=receipts.length?receipts.slice(0,100).map((r)=>{const target=r.output_preview||('task '+short(r.task_id,13));return '<div class="ledger"><span class="t">'+esc(timeOf(r.completed_at||r.started_at))+'</span><span class="a" title="'+esc(r.client_name||'')+'">'+esc(r.client_name||'gateway')+'</span><span class="tool">'+esc(r.tool)+'</span><span class="target" title="'+esc(target)+'">'+esc(short(target,42))+'</span><span>'+badge(r.policy_decision)+'</span><span>'+badge(r.result_class||'requested')+'</span><span class="dur">'+(r.duration_ms==null?'—':esc(r.duration_ms+'ms'))+'</span><button class="card-action" onclick="viewReceipt(\''+esc(r.call_id)+'\')">View</button></div>'}).join(''):emptyHtml;
+    }
+    function togglePause(){paused=!paused;renderLedger()}
+
+    function renderApprovals(items){
+      document.querySelector('#approvals-list').innerHTML=items.length?items.map((a)=>{const args=a.arguments&&typeof a.arguments==='object'?a.arguments:{};const rows=Object.entries(args).slice(0,4).map(([k,v])=>'<dt>'+esc(k)+'</dt><dd>'+esc(short(typeof v==='string'?v:JSON.stringify(v),64))+'</dd>').join('');return '<div class="approval"><div class="approval-title">'+icon('shield')+'<span>'+esc(a.tool)+'</span></div><dl class="approval-args">'+(rows||'<dt>task</dt><dd>'+esc(short(a.task_id,48))+'</dd>')+'</dl><div class="approval-actions"><button class="red" onclick="decide(\''+esc(a.id)+'\',\'approve\')">'+icon('check')+'Approve</button><button class="danger" onclick="decide(\''+esc(a.id)+'\',\'reject\')">'+icon('x')+'Reject</button></div></div>'}).join(''):'<div class="empty">'+icon('check','lg')+'<span>No pending approvals.<br>The policy gate is clear.</span></div>';
+    }
+
     async function decide(id,action){const r=await fetch('/api/v1/dashboard/approvals/'+encodeURIComponent(id)+'/'+action,{method:'POST',headers:{'X-Kerna-Dashboard-CSRF':csrf}});if(!r.ok)alert(await r.text())}
     async function stopSession(id){if(!confirm('Stop this governed session? Pending actions will be denied.'))return;const r=await fetch('/api/v1/dashboard/sessions/'+encodeURIComponent(id)+'/stop',{method:'POST',headers:{'X-Kerna-Dashboard-CSRF':csrf}});if(!r.ok)alert(await r.text())}
     function stopActiveSession(){const active=(latest?.sessions||[]).find((s)=>s.state==='running');if(active)stopSession(active.session_id);else alert('No active governed session.')}
-    async function loadWorkspace(){try{const r=await fetch('/api/v1/dashboard/workspace');if(!r.ok)throw new Error(await r.text());const d=await r.json();const commits=(d.commits||[]).map((c)=>'<li><code>'+esc(c.short)+'</code> '+esc(c.subject)+' <span class="muted">'+esc(c.authored_at)+'</span> <button class="card-action" onclick="applyCommit(\''+esc(c.hash)+'\',\''+esc(c.short)+'\')">Apply commit</button></li>').join('');document.querySelector('#workspace-body').innerHTML='<div class="workspace-status"><span class="dot '+(d.degraded?'warn':'')+'"></span><b>'+esc(d.workspace)+'</b><span class="muted">·</span><span>'+(d.status?'Changes ready for review':'Worktree clean')+'</span></div><div class="workspace-actions"><button class="primary" onclick="applyUncommitted()">Apply reviewed patch…</button></div><div class="mono">HEAD <code>'+esc(d.head)+'</code> · baseline <code>'+esc(d.baseline)+'</code></div><details><summary>Recent commits</summary><ul>'+(commits||'<li class="empty">No commits found.</li>')+'</ul></details><details><summary>Unstaged diff'+(d.unstaged_diff?'':' (empty)')+'</summary><pre>'+esc(clip(d.unstaged_diff))+'</pre></details><details><summary>Staged diff'+(d.staged_diff?'':' (empty)')+'</summary><pre>'+esc(clip(d.staged_diff))+'</pre></details>'}catch(e){document.querySelector('#workspace-body').innerHTML='<div class="error">Worktree review unavailable: '+esc(e.message)+'</div>'}}
+
+    async function loadReadiness(){
+      try{
+        const r=await fetch('/api/v1/dashboard/readiness');if(!r.ok)throw new Error(await r.text());const d=await r.json();
+        document.querySelector('#readiness-card').innerHTML=(d.checks||[]).map((c)=>'<div class="check-row"><svg class="icon sm" style="color:var(--'+(c.status==='ready'?'green':c.status==='optional'?'amber':'red')+')"><use href="#i-'+(c.status==='ready'?'check':'clock')+'"/></svg><b>'+esc(c.name)+'</b><span class="ver">'+esc(short(c.detail,30))+'</span><span class="pill '+(c.status==='ready'?'good':c.status==='optional'?'warn':'bad')+'">'+esc(c.status)+'</span></div>').join('')+'<div class="hardware"><b>'+esc(d.hardware?.name||'Hardware not detected')+' · '+esc(d.hardware?.memory_gb||'—')+' GB</b><br>CPU '+esc(d.system?.cpu||d.system?.architecture||'not detected')+' · models '+esc(d.storage?.ollama_models)+' · sessions '+esc(d.storage?.sessions)+'</div>';
+      }catch(e){document.querySelector('#readiness-card').innerHTML='<div class="empty">Readiness checks are unavailable right now.</div>'}
+    }
+
+    async function loadWorkspace(){
+      try{
+        const r=await fetch('/api/v1/dashboard/workspace');if(!r.ok)throw new Error(await r.text());const d=await r.json();
+        document.querySelector('#worktree-state').className='pill '+(d.degraded?'warn':d.status?'good':'');
+        document.querySelector('#worktree-state').textContent=d.degraded?'degraded':d.status?'changes':'clean';
+        const commits=(d.commits||[]).map((c)=>'<li><code>'+esc(c.short)+'</code> '+esc(c.subject)+' <span class="muted">'+esc(ago(c.authored_at))+'</span> <button class="card-action" onclick="applyCommit(\''+esc(c.hash)+'\',\''+esc(c.short)+'\')">Apply</button></li>').join('');
+        document.querySelector('#workspace-body').innerHTML='<div class="workspace-status"><span class="dot '+(d.status?'warn':'')+'"></span><b>'+esc(d.workspace)+'</b><span class="muted">'+(d.status?'Changes ready for review':'Worktree clean')+'</span></div><div class="mono" style="margin-bottom:10px">HEAD <code>'+esc(short(d.head,10))+'</code> · baseline <code>'+esc(short(d.baseline,16))+'</code></div><button class="primary" onclick="applyUncommitted()"'+(d.status?'':' disabled')+'>'+icon('download')+'Apply changes</button><details><summary>Recent commits</summary><ul>'+(commits||'<li class="empty">No commits found.</li>')+'</ul></details><details><summary>Unstaged diff'+(d.unstaged_diff?'':' (empty)')+'</summary><pre>'+esc(clip(d.unstaged_diff))+'</pre></details><details><summary>Staged diff'+(d.staged_diff?'':' (empty)')+'</summary><pre>'+esc(clip(d.staged_diff))+'</pre></details>';
+      }catch(e){
+        document.querySelector('#worktree-state').className='pill warn';
+        document.querySelector('#worktree-state').textContent='unavailable';
+        document.querySelector('#workspace-body').innerHTML='<div class="empty">'+icon('folder','lg')+'<span>Worktree review is unavailable from this service.<br>Run <code>kerna advanced dashboard --workspace &lt;repo&gt;</code> to review and apply patches.</span></div>';
+      }
+    }
     async function applyChanges(selection,label){const target=prompt('Target clean Git worktree for '+label+':');if(!target||!confirm('Apply '+label+' to '+target+'?'))return;const r=await fetch('/api/v1/dashboard/workspace/apply',{method:'POST',headers:{'Content-Type':'application/json','X-Kerna-Dashboard-CSRF':csrf},body:JSON.stringify({target,selection,confirm:true})});if(!r.ok)alert(await r.text());else{alert('Applied successfully.');loadWorkspace()}}
-    function applyUncommitted(){applyChanges({kind:'uncommitted'},'the complete reviewed patch')}function applyCommit(hash,short){applyChanges({kind:'commits',hashes:[hash]},'commit '+short)}
+    function applyUncommitted(){applyChanges({kind:'uncommitted'},'the complete reviewed patch')}
+    function applyCommit(hash,shortHash){applyChanges({kind:'commits',hashes:[hash]},'commit '+shortHash)}
+
     async function exportEvidence(){const r=await fetch('/api/v1/dashboard/evidence');if(!r.ok){alert(await r.text());return}const blob=new Blob([JSON.stringify(await r.json(),null,2)],{type:'application/json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='kerna-evidence-'+new Date().toISOString().replace(/[:.]/g,'-')+'.json';link.click();URL.revokeObjectURL(link.href)}
-    async function viewReceipt(id){const receipt=(latest?.receipts||[]).find(r=>r.call_id===id);if(!receipt)return;location.hash='audit';document.querySelector('#trace').textContent='Loading audit…';try{const r=await fetch('/api/v1/dashboard/traces/'+encodeURIComponent(receipt.task_id));if(!r.ok)throw new Error(await r.text());const detail=await r.json();document.querySelector('#trace').textContent=JSON.stringify({selected_receipt:receipt,receipt_chain:(detail.receipt_chain||[]).filter(e=>e.call_id===id),task_events:detail.events||[],related_receipts:detail.receipts||[]},null,2)}catch(e){document.querySelector('#trace').textContent=JSON.stringify({selected_receipt:receipt,error:e.message},null,2)}document.querySelector('#audit').scrollIntoView({behavior:'smooth',block:'start'})}
-    async function trace(task){const r=await fetch('/api/v1/dashboard/traces/'+encodeURIComponent(task));document.querySelector('#trace').textContent=r.ok?JSON.stringify(await r.json(),null,2):await r.text();document.querySelector('.trace').scrollIntoView({behavior:'smooth',block:'start'})}
-    const events=new EventSource('/api/v1/dashboard/events');events.addEventListener('snapshot',(event)=>render(JSON.parse(event.data)));events.onerror=()=>{document.querySelector('#system-state').innerHTML='<span class="dot warn"></span>Reconnecting to Kerna'};loadWorkspace();loadReadiness();
+
+    function traceTab(which){document.querySelector('#tab-timeline').className=which==='timeline'?'active':'';document.querySelector('#tab-receipt').className=which==='receipt'?'active':'';document.querySelector('#trace-timeline').hidden=which!=='timeline';document.querySelector('#trace-receipt').hidden=which!=='receipt'}
+    function closeTrace(){document.querySelector('#audit').classList.remove('open')}
+    function openLatestTrace(event){if(event)event.preventDefault();const first=(latest?.receipts||[])[0];if(first)viewReceipt(first.call_id);else document.querySelector('#audit').classList.add('open')}
+    function renderTimeline(detail,receipt){
+      const chain=(detail.receipt_chain||[]);
+      const items=chain.length?chain.map((e)=>{const k=kind(e.event_type);const d=e.details&&typeof e.details==='object'?e.details:{};const sub=d.tool||d.policy_decision||d.result_class||e.call_id||'';return '<div class="tl-item '+(k==='bad'?'bad':k==='warn'?'warn':'')+'"><span class="tl-time">'+esc(timeOf(e.created_at))+' · seq '+esc(e.sequence)+'</span><b>'+esc(String(e.event_type).replace(/[._]/g,' '))+'</b><small>'+esc(short(sub,64))+'</small></div>'}).join(''):'<div class="empty">No chain events recorded for this task.</div>';
+      document.querySelector('#trace-timeline').innerHTML='<div class="timeline">'+items+'</div>';
+      document.querySelector('#trace-receipt').textContent=JSON.stringify({selected_receipt:receipt,receipt_chain:chain,related_receipts:detail.receipts||[]},null,2);
+      traceTab('timeline');
+    }
+    async function viewReceipt(id){
+      const receipt=(latest?.receipts||[]).find(r=>r.call_id===id);if(!receipt)return;
+      document.querySelector('#audit').classList.add('open');
+      document.querySelector('#trace-title').textContent=receipt.tool;
+      document.querySelector('#trace-id').textContent=short(receipt.task_id,22);
+      document.querySelector('#trace-badge').innerHTML=badge(receipt.result_class||'requested');
+      document.querySelector('#trace-elapsed').textContent=ago(receipt.started_at);
+      document.querySelector('#trace-timeline').innerHTML='<div class="empty">Loading audit…</div>';
+      try{const r=await fetch('/api/v1/dashboard/traces/'+encodeURIComponent(receipt.task_id));if(!r.ok)throw new Error(await r.text());const detail=await r.json();latestDetail=detail;renderTimeline(detail,receipt)}
+      catch(e){document.querySelector('#trace-timeline').innerHTML='<div class="empty">Trace unavailable: '+esc(e.message)+'</div>'}
+    }
+
+    const events=new EventSource('/api/v1/dashboard/events');
+    events.addEventListener('snapshot',(event)=>render(JSON.parse(event.data)));
+    events.onerror=()=>{document.querySelector('#system-state').innerHTML='<span class="dot warn"></span>Reconnecting to Kerna'};
+    loadWorkspace();loadReadiness();
+    const sections=[...document.querySelectorAll('main section[id], .page-head')];
+    const navItems=[...document.querySelectorAll('#nav .nav-item')];
+    const observer=new IntersectionObserver((entries)=>{entries.forEach((entry)=>{if(entry.isIntersecting){navItems.forEach((item)=>item.classList.toggle('active',item.getAttribute('href')==='#'+entry.target.id))}})},{rootMargin:'-20% 0px -70% 0px'});
+    sections.forEach((section)=>observer.observe(section));
   </script>
 </body>
 </html>

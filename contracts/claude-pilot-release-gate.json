@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "decision": "NO-GO",
+  "supported_client": "claude-code",
+  "compatibility_only_clients": ["codex"],
+  "required_gates": [
+    {
+      "id": "RG-001",
+      "title": "No open P0 action surface",
+      "status": "pass",
+      "evidence": "security-action-inventory.json contains no open-bypass entry with P0 risk"
+    },
+    {
+      "id": "RG-002",
+      "title": "Windows containment and evidence ACL",
+      "status": "pass",
+      "evidence": "scripts/test-claude-container-boundary.ps1"
+    },
+    {
+      "id": "RG-003",
+      "title": "Physical macOS containment and evidence ACL",
+      "status": "pending",
+      "evidence": "Must run scripts/build-claude-agent-image.sh and scripts/test-claude-container-boundary.sh on physical macOS"
+    },
+    {
+      "id": "RG-004",
+      "title": "Provider-backed contained Claude lifecycle",
+      "status": "pass",
+      "evidence": "reports/contained-run-proof.json (recorded_at 2026-09-19T08:06:36Z): accept, reject, and interrupt passes against api.anthropic.com with Claude Code 2.1.270 in kerna-claude-agent:0.2.9-claude-2.1.270; two held Bash actions approved and released, one held and denied as blocked, one held action interrupted with its receipt still unreleased, diff reviewed and applied over the control API, signed bundle re-verified by kerna replay, and label-scoped cleanup leaving zero managed containers. Reproduced by scripts/accept-contained-run.ps1 -Passes all; boundary read proven by scripts/test-claude-container-boundary.ps1"
+    },
+    {
+      "id": "RG-005",
+      "title": "Inventory, receipts, provenance, and fail-closed CI gates",
+      "status": "pass",
+      "evidence": "security_action_inventory tests plus locked Rust suite"
+    }
+  ]
+}

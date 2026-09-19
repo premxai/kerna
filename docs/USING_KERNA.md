@@ -26,6 +26,25 @@ kerna trace last           # see every step it took
 kerna doctor               # confirm keys + plugins are healthy
 ```
 
+## Contained Claude sessions
+
+Production Claude sessions run the client and broker in separate Docker containers. Build the
+reviewed local image once, verify readiness, then launch a cloud session:
+
+```bash
+./scripts/build-claude-agent-image.sh       # Windows: scripts\build-claude-agent-image.ps1
+kerna guard doctor --repo .
+kerna claude --route cloud
+```
+
+The agent container receives one writable disposable worktree and one scoped session credential.
+It has a read-only root filesystem, no host home, provider key, Docker socket, sibling repository,
+or public network route. Only the broker is attached to an egress network; its provider key arrives
+over stdin and is not stored in container metadata.
+
+`kerna claude --host-demo` retains the hackathon host launcher for local-model demonstrations. It
+prints a degraded-containment warning and is excluded from production and pilot security claims.
+
 ### Updating an earlier workspace
 
 If you used a pre-`v0.2.5` build, run setup once after upgrading:

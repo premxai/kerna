@@ -33,6 +33,7 @@ pub struct ModelRecipe {
     pub min_vram_gb: u64,
     pub engine: String,
     pub launch_kind: String,
+    pub artifact_format: String,
     pub status: String,
     pub chat: bool,
     pub reasoning: bool,
@@ -53,6 +54,13 @@ pub fn catalog() -> Result<Catalog> {
     let catalog: Catalog = serde_json::from_str(CATALOG)?;
     if catalog.schema_version != 1 || catalog.source.license != "MIT" {
         return Err(anyhow!("Invalid curated local-model catalog metadata."));
+    }
+    crate::artifact::validate_source_revision(&catalog.source.revision)?;
+    for recipe in &catalog.recipes {
+        crate::artifact::validate_model_artifact(Path::new(&format!(
+            "artifact.{}",
+            recipe.artifact_format
+        )))?;
     }
     Ok(catalog)
 }

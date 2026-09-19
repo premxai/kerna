@@ -141,6 +141,117 @@ enum ApprovalMode {
     Queue,
 }
 
+#[derive(Clone, Copy)]
+enum TextStreamProtocol {
+    OpenAi,
+    Anthropic,
+}
+
+struct TextStreamDecoder {
+    protocol: TextStreamProtocol,
+    buffer: Vec<u8>,
+    tokens: u64,
+    saw_text: bool,
+}
+
+impl TextStreamDecoder {
+    fn new(protocol: TextStreamProtocol) -> Self {
+        Self {
+            protocol,
+            buffer: Vec::new(),
+            tokens: 0,
+            saw_text: false,
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>> {
+        self.buffer.extend_from_slice(chunk);
+        let mut output = Vec::new();
+        while let Some((end, delimiter)) = next_sse_frame(&self.buffer) {
+            let frame = self.buffer[..end].to_vec();
+            self.buffer.drain(..end + delimiter);
+            if let Some(text) = self.decode_frame(&frame)? {
+                self.saw_text = true;
+                output.push(text);
+            }
+        }
+        Ok(output)
+    }
+
+    fn finish(self) -> Result<u64> {
+        if !self.buffer.iter().all(u8::is_ascii_whitespace) {
+            return Err(anyhow!("provider stream ended mid-event"));
+        }
+        if !self.saw_text {
+            return Err(anyhow!("provider stream returned no text"));
+        }
+        Ok(self.tokens)
+    }
+
+    fn decode_frame(&mut self, frame: &[u8]) -> Result<Option<String>> {
+        let frame =
+            std::str::from_utf8(frame).map_err(|_| anyhow!("provider stream was not UTF-8"))?;
+        let data = frame
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if data.is_empty() || data == "[DONE]" {
+            return Ok(None);
+        }
+        let value: Value = serde_json::from_str(&data)
+            .map_err(|_| anyhow!("provider stream contained malformed JSON"))?;
+        if contains_stream_action(&value) {
+            return Err(anyhow!(
+                "provider returned an action on the tool-less `kerna ask` path"
+            ));
+        }
+        match self.protocol {
+            TextStreamProtocol::OpenAi => {
+                if let Some(total) = value["usage"]["total_tokens"].as_u64() {
+                    self.tokens = total;
+                }
+                Ok(value["choices"][0]["delta"]["content"]
+                    .as_str()
+                    .map(str::to_string))
+            }
+            TextStreamProtocol::Anthropic => {
+                if let Some(input) = value["message"]["usage"]["input_tokens"].as_u64() {
+                    self.tokens = self.tokens.saturating_add(input);
+                }
+                if let Some(output) = value["usage"]["output_tokens"].as_u64() {
+                    self.tokens = self.tokens.saturating_add(output);
+                }
+                Ok((value["delta"]["type"] == "text_delta")
+                    .then(|| value["delta"]["text"].as_str().map(str::to_string))
+                    .flatten())
+            }
+        }
+    }
+}
+
+fn next_sse_frame(buffer: &[u8]) -> Option<(usize, usize)> {
+    buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| (index, 2))
+        .or_else(|| {
+            buffer
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|index| (index, 4))
+        })
+}
+
+fn contains_stream_action(value: &Value) -> bool {
+    value.get("tool_calls").is_some()
+        || value["choices"][0]["delta"].get("tool_calls").is_some()
+        || matches!(
+            value["content_block"]["type"].as_str(),
+            Some("tool_use" | "server_tool_use")
+        )
+}
+
 impl TaskScheduler {
     pub fn new(
         mut config: Config,
@@ -182,6 +293,175 @@ impl TaskScheduler {
             approval_mode: ApprovalMode::Terminal,
             allowed_tools: None,
         })
+    }
+
+    /// Stream one tool-less model turn. Every emitted string is provider text;
+    /// action-shaped stream items fail closed before the caller receives them.
+    pub async fn ask_stream<F>(&self, prompt: &str, emit: F) -> Result<u64>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        if prompt.trim().is_empty() {
+            return Err(anyhow!("the question cannot be empty"));
+        }
+        let resolved = crate::providers::resolve(
+            &self.config,
+            &self.config.llm_provider,
+            Some(&self.config.llm_model),
+            &self.config.llm_api_key,
+        )?;
+        self.ask_stream_resolved(prompt, &resolved, emit).await
+    }
+
+    pub async fn ask_stream_resolved<F>(
+        &self,
+        prompt: &str,
+        resolved: &crate::providers::ResolvedProvider,
+        emit: F,
+    ) -> Result<u64>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        if prompt.trim().is_empty() {
+            return Err(anyhow!("the question cannot be empty"));
+        }
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(prompt.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+        self.ask_messages_stream_resolved(&messages, resolved, emit)
+            .await
+    }
+
+    pub async fn ask_messages_stream_resolved<F>(
+        &self,
+        messages: &[ChatMessage],
+        resolved: &crate::providers::ResolvedProvider,
+        mut emit: F,
+    ) -> Result<u64>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        if messages
+            .last()
+            .and_then(|message| message.content.as_deref())
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            return Err(anyhow!("the question cannot be empty"));
+        }
+        if messages.iter().any(|message| {
+            message.tool_calls.is_some()
+                || message.tool_call_id.is_some()
+                || !matches!(message.role.as_str(), "user" | "assistant" | "system")
+        }) {
+            return Err(anyhow!(
+                "native chat history must remain text-only and tool-less"
+            ));
+        }
+        match resolved.protocol {
+            crate::providers::WireProtocol::Mock => {
+                let (text, tokens) = validate_toolless_reply(call_mock(messages)?.0, 10)?;
+                emit(&text)?;
+                Ok(tokens)
+            }
+            crate::providers::WireProtocol::OpenAiCompat => {
+                self.stream_openai_compat_messages(resolved, messages, &mut emit)
+                    .await
+            }
+            crate::providers::WireProtocol::Anthropic => {
+                self.stream_anthropic_messages(resolved, messages, &mut emit)
+                    .await
+            }
+        }
+    }
+
+    async fn stream_openai_compat_messages<F>(
+        &self,
+        resolved: &crate::providers::ResolvedProvider,
+        messages: &[ChatMessage],
+        emit: &mut F,
+    ) -> Result<u64>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        let url = format!(
+            "{}/chat/completions",
+            resolved.base_url.trim_end_matches('/')
+        );
+        let body = json!({
+            "model": resolved.model,
+            "messages": messages,
+            "stream": true,
+            "stream_options": {"include_usage": true}
+        });
+        let mut request = self
+            .http_client
+            .post(url)
+            .header(TURN_HEADER, turn_header_value(Uuid::new_v4()))
+            .json(&body);
+        if !resolved.api_key.is_empty() {
+            request = request.bearer_auth(&resolved.api_key);
+        }
+        let mut response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response.text().await.unwrap_or_default();
+            return Err(anyhow!("provider HTTP error {status}: {detail}"));
+        }
+        let mut decoder = TextStreamDecoder::new(TextStreamProtocol::OpenAi);
+        while let Some(chunk) = response.chunk().await? {
+            for text in decoder.push(&chunk)? {
+                emit(&text)?;
+            }
+        }
+        decoder.finish()
+    }
+
+    async fn stream_anthropic_messages<F>(
+        &self,
+        resolved: &crate::providers::ResolvedProvider,
+        messages: &[ChatMessage],
+        emit: &mut F,
+    ) -> Result<u64>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        let url = format!("{}/v1/messages", resolved.base_url.trim_end_matches('/'));
+        let (system_prompt, anthropic_messages) = convert_to_anthropic(messages);
+        let mut body = json!({
+            "model": resolved.model,
+            "max_tokens": 4096,
+            "messages": anthropic_messages,
+            "stream": true
+        });
+        if !system_prompt.is_empty() {
+            body["system"] = json!(system_prompt);
+        }
+        let mut response = self
+            .http_client
+            .post(url)
+            .header("x-api-key", &resolved.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header(TURN_HEADER, turn_header_value(Uuid::new_v4()))
+            .json(&body)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Anthropic HTTP error {status}: {detail}"));
+        }
+        let mut decoder = TextStreamDecoder::new(TextStreamProtocol::Anthropic);
+        while let Some(chunk) = response.chunk().await? {
+            for text in decoder.push(&chunk)? {
+                emit(&text)?;
+            }
+        }
+        decoder.finish()
     }
 
     /// Mark this scheduler as running without a human at a terminal (messaging
@@ -1474,6 +1754,23 @@ fn flush_tool_results(pending: &mut Vec<serde_json::Value>, out: &mut Vec<serde_
 /// form. Assistant `tool_calls` become `tool_use` blocks; consecutive `tool`-role
 /// results are coalesced into one following user turn of `tool_result` blocks so
 /// the required user/assistant alternation is preserved.
+fn validate_toolless_reply(reply: ChatMessage, tokens: u64) -> Result<(String, u64)> {
+    if reply
+        .tool_calls
+        .as_ref()
+        .is_some_and(|calls| !calls.is_empty())
+    {
+        return Err(anyhow!(
+            "provider returned an action on the tool-less `kerna ask` path"
+        ));
+    }
+    let text = reply
+        .content
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| anyhow!("provider returned no text"))?;
+    Ok((text, tokens))
+}
+
 pub fn convert_to_anthropic(messages: &[ChatMessage]) -> (String, Vec<serde_json::Value>) {
     let mut system_prompt = String::new();
     let mut out: Vec<serde_json::Value> = Vec::new();
@@ -1602,6 +1899,49 @@ fn call_mock(messages: &[ChatMessage]) -> Result<(ChatMessage, u64)> {
                         },
                     },
                 ]),
+                tool_call_id: None,
+            },
+            10,
+        ));
+    }
+
+    if last_user_msg.starts_with("You are Kerna code planner in dry-run mode.") {
+        return Ok((
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(
+                    "Mock code proposal\nKERNA_PROPOSAL_JSON_BEGIN\n{\"actions\":[{\"kind\":\"file_read\",\"path\":\"README.md\",\"reason\":\"inspect the current documentation before proposing changes\"},{\"kind\":\"file_write\",\"path\":\"README.md\",\"reason\":\"document the requested change\"},{\"kind\":\"shell\",\"command\":\"cargo test\",\"reason\":\"verify after a future contained edit\"}]}\nKERNA_PROPOSAL_JSON_END".to_string(),
+                ),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            10,
+        ));
+    }
+
+    if last_user_msg.starts_with("You are Kerna's code agent running through a governed executor.")
+    {
+        // Deterministic zero-key proof of the governed exec loop: the first
+        // turn proposes one bounded write, and the mock completes as soon as
+        // Kerna's tool-results message comes back so review-and-apply can run.
+        return Ok((
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(
+                    "Mock governed proposal\nKERNA_PROPOSAL_JSON_BEGIN\n{\"actions\":[{\"kind\":\"file_write\",\"path\":\"KERNA_MOCK_NOTE.md\",\"content\":\"# governed exec proof\\n\",\"reason\":\"deterministic zero-key proof of the native exec loop\"}]}\nKERNA_PROPOSAL_JSON_END".to_string(),
+                ),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            10,
+        ));
+    }
+    if last_user_msg.starts_with("{\"kerna_action_results\"") {
+        return Ok((
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some("Mock finished".to_string()),
+                tool_calls: None,
                 tool_call_id: None,
             },
             10,
@@ -1767,6 +2107,132 @@ mod tests {
         assert_eq!(provider_to_runtime["fs_read"], "fs.read");
         assert_eq!(provider_to_runtime["fs_read_2"], "fs_read");
         assert_eq!(provider_to_runtime["calendar_send"], "calendar/send");
+    }
+
+    #[test]
+    fn toolless_ask_accepts_text_and_rejects_action_or_empty_output() {
+        let text = validate_toolless_reply(msg("assistant", Some("safe answer")), 12).unwrap();
+        assert_eq!(text, ("safe answer".to_string(), 12));
+
+        let mut action = msg("assistant", Some("trying an action"));
+        action.tool_calls = Some(vec![ToolCallRequest {
+            id: "call-1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "run_command".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }]);
+        assert!(validate_toolless_reply(action, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("tool-less"));
+        assert!(validate_toolless_reply(msg("assistant", Some("   ")), 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn mock_chat_history_remains_text_only() {
+        let mut config = Config::default();
+        let temp = std::env::temp_dir().join(format!("kerna-chat-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        config.db_path = temp.join("memory.db").to_string_lossy().to_string();
+        config.sandbox_dir = temp.join("sandbox").to_string_lossy().to_string();
+        config.llm_provider = "mock".to_string();
+        config.llm_model = "mock".to_string();
+        let memory = Arc::new(MemoryEngine::new(&config.db_path).unwrap());
+        let scheduler = TaskScheduler::new(
+            config,
+            memory,
+            Arc::new(Mutex::new(McpRegistry::new())),
+            None,
+        )
+        .unwrap();
+        let resolved = crate::providers::ResolvedProvider {
+            name: "mock".to_string(),
+            protocol: crate::providers::WireProtocol::Mock,
+            base_url: "mock://local".to_string(),
+            api_key: String::new(),
+            model: "mock".to_string(),
+        };
+        let messages = vec![
+            msg("user", Some("hello")),
+            msg("assistant", Some("hi")),
+            msg("user", Some("continue")),
+        ];
+        let mut output = String::new();
+        let tokens = scheduler
+            .ask_messages_stream_resolved(&messages, &resolved, |delta| {
+                output.push_str(delta);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(tokens, 10);
+        assert_eq!(output, "Mock finished");
+
+        let mut action = msg("assistant", Some("attempting a tool"));
+        action.tool_calls = Some(vec![ToolCallRequest {
+            id: "call-1".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "run_command".to_string(),
+                arguments: "{}".to_string(),
+            },
+        }]);
+        let error = scheduler
+            .ask_messages_stream_resolved(&[msg("user", Some("go")), action], &resolved, |_| Ok(()))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("tool-less"));
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    fn decode_in_chunks(
+        protocol: TextStreamProtocol,
+        fixture: &[u8],
+        chunk_size: usize,
+    ) -> Result<(String, u64)> {
+        let mut decoder = TextStreamDecoder::new(protocol);
+        let mut text = String::new();
+        for chunk in fixture.chunks(chunk_size) {
+            for delta in decoder.push(chunk)? {
+                text.push_str(&delta);
+            }
+        }
+        let tokens = decoder.finish()?;
+        Ok((text, tokens))
+    }
+
+    #[test]
+    fn openai_text_stream_is_exact_across_every_chunk_size() {
+        let fixture = b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"total_tokens\":9}}\n\ndata: [DONE]\n\n";
+        for size in 1..=fixture.len() {
+            assert_eq!(
+                decode_in_chunks(TextStreamProtocol::OpenAi, fixture, size).unwrap(),
+                ("Hello world".to_string(), 9)
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_text_stream_is_exact_across_every_chunk_size() {
+        let fixture = b"event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":4}}}\n\nevent: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"Safe \"}}\n\nevent: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}\n\nevent: message_delta\ndata: {\"usage\":{\"output_tokens\":3}}\n\n";
+        for size in 1..=fixture.len() {
+            assert_eq!(
+                decode_in_chunks(TextStreamProtocol::Anthropic, fixture, size).unwrap(),
+                ("Safe answer".to_string(), 7)
+            );
+        }
+    }
+
+    #[test]
+    fn toolless_stream_rejects_actions_malformed_json_and_truncation() {
+        let action = b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"x\"}]}}]}\n\n";
+        assert!(decode_in_chunks(TextStreamProtocol::OpenAi, action, 1).is_err());
+        let malformed = b"data: {bad}\n\n";
+        assert!(decode_in_chunks(TextStreamProtocol::OpenAi, malformed, 2).is_err());
+        let truncated = b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}";
+        assert!(decode_in_chunks(TextStreamProtocol::OpenAi, truncated, 3).is_err());
     }
 
     #[test]
