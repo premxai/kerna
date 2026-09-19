@@ -35,17 +35,12 @@ fn read_state() -> Option<ServiceState> {
         .and_then(|text| serde_json::from_str::<ServiceState>(&text).ok())
 }
 
-/// Starts the dashboard control room as a detached background service. The
-/// native `kerna code` path needs no service; this exists for the plan's
-/// `karna start` and for watching approvals from the browser.
-pub fn start(port: u16) -> Result<()> {
+/// Idempotently bring the detached dashboard service up. Returns its port and
+/// whether this call started it.
+fn ensure_up(port: u16) -> Result<(u16, bool)> {
     if let Some(state) = read_state() {
         if port_is_open(state.port) {
-            println!(
-                "Kerna is already running on http://127.0.0.1:{}/",
-                state.port
-            );
-            return Ok(());
+            return Ok((state.port, false));
         }
     }
     let exe = std::env::current_exe()?;
@@ -83,8 +78,46 @@ pub fn start(port: u16) -> Result<()> {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    println!("✓ Kerna is running on http://127.0.0.1:{port}/");
+    Ok((port, true))
+}
+
+/// Starts the dashboard control room as a detached background service. The
+/// native `kerna code` path needs no service; this exists for the plan's
+/// `kerna start` and for watching approvals from the browser.
+pub fn start(port: u16) -> Result<()> {
+    let (port, started_now) = ensure_up(port)?;
+    if started_now {
+        println!("✓ Kerna is running on http://127.0.0.1:{port}/");
+    } else {
+        println!("Kerna is already running on http://127.0.0.1:{port}/");
+    }
     Ok(())
+}
+
+/// The dashboard pointer shown on the `kerna code` start screen. A service
+/// that can't come up is a hint, never a reason to block the governed path.
+pub fn session_dashboard() {
+    match ensure_up(8765) {
+        Ok((port, started_now)) => {
+            let suffix = if started_now {
+                crate::cli_brand::accent(245, "  (started just now for this session)")
+            } else {
+                String::new()
+            };
+            println!(
+                "{} {}{suffix}",
+                crate::cli_brand::accent(245, "Dashboard"),
+                crate::cli_brand::accent(208, &format!("http://127.0.0.1:{port}/"))
+            );
+        }
+        Err(_) => println!(
+            "{}",
+            crate::cli_brand::accent(
+                245,
+                "Dashboard offline — run `kerna start` to watch receipts live"
+            )
+        ),
+    }
 }
 
 fn evidence_bundles(count: usize) -> Vec<std::path::PathBuf> {

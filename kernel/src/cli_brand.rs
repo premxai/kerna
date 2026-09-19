@@ -1,4 +1,4 @@
-//! Product CLI shell: the KARNA-style wordmark branding and the single
+//! Product CLI shell: the Kerna wordmark branding and the single
 //! StatusSpinner line that replaces machinery output in normal mode.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,12 +8,12 @@ const ORANGE: u8 = 208;
 const WARM_RED: u8 = 202;
 const RED: u8 = 196;
 
-const WORDMARK: &str = r#"██╗  ██╗ █████╗ ██████╗ ██╗   ██╗ █████╗
-██║ ██╔╝██╔══██╗██╔══██╗████╗  ██║██╔══██╗
-█████╔╝ ███████║██████╔╝██╔██╗ ██║███████║
-██╔═██╗ ██╔══██║██╔══██╗██║╚██╗██║██╔══██║
-██║  ██╗██║  ██║██║  ██║██║ ╚████║██║  ██║
-╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝"#;
+const WORDMARK: &str = r#"██╗  ██╗███████╗██████╗ ██╗   ██╗ █████╗
+██║ ██╔╝██╔════╝██╔══██╗████╗  ██║██╔══██╗
+█████╔╝ █████╗  ██████╔╝██╔██╗ ██║███████║
+██╔═██╗ ██╔══╝  ██╔══██╗██║╚██╗██║██╔══██║
+██║  ██╗███████╗██║  ██║██║ ╚████║██║  ██║
+╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝"#;
 
 pub fn accent(style_color: u8, text: &str) -> String {
     if console::Term::stdout().features().colors_supported() {
@@ -167,6 +167,13 @@ mod tests {
     fn banner_is_plain_and_stable() {
         assert_eq!(WORDMARK.lines().count(), 6);
         assert!(WORDMARK.contains('█'));
+        // Guards the past regression: the old art spelled KARNA (K-A-R-N-A).
+        // The second letter must be E's full top bar, not A's space-topped bowl.
+        assert!(WORDMARK
+            .lines()
+            .next()
+            .unwrap()
+            .starts_with("██╗  ██╗███████╗"));
         assert!(!accent(ORANGE, "Kerna").contains('\n'));
     }
 

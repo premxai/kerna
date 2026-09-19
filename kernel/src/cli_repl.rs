@@ -21,6 +21,7 @@ pub async fn run(
     // Windows canonicalize() prepends the \\?\ verbatim prefix; show a path the user recognizes.
     let display_root = display_root.to_string_lossy();
     println!("{}", display_root.trim_start_matches(r"\\?\"));
+    crate::cli_service::session_dashboard();
     println!("{}", "─".repeat(44));
     println!();
     println!("What do you want to build?");

@@ -2587,6 +2587,9 @@ async fn async_main() -> Result<()> {
                     let goal = target.ok_or_else(|| {
                         anyhow::anyhow!("kerna code needs a goal, or a repository path to open the interactive environment")
                     })?;
+                    if !json {
+                        crate::cli_service::session_dashboard();
+                    }
                     run_native_code(
                         goal, repo, provider, model, json, plan, yes, max_turns, debug, None,
                     )
