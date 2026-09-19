@@ -92,8 +92,22 @@ function Invoke-SilentNative {
 
 # --- prerequisites -----------------------------------------------------------
 
+# Anything built from kernel sources is only as current as its own timestamp: a
+# stale broker or stale host binary would govern the run with logic that no
+# longer exists, and its receipts would prove nothing about the code on review.
+function Get-SourcesNewerThan {
+    param([DateTime]$Utc)
+    @(Get-ChildItem -LiteralPath (Join-Path $RepoRoot "kernel\src") -Filter *.rs -Recurse |
+        Where-Object { $_.LastWriteTimeUtc -gt $Utc })
+}
+
 if (-not (Test-Path -LiteralPath $KernaBin)) {
     throw "kerna binary not found at $KernaBin; run cargo build --locked first"
+}
+$staleForBinary = Get-SourcesNewerThan -Utc (Get-Item -LiteralPath $KernaBin).LastWriteTimeUtc
+if ($staleForBinary.Count -gt 0) {
+    throw ("$KernaBin predates {0} kernel source file(s) (newest: {1}); run cargo build --locked first" -f `
+        $staleForBinary.Count, ($staleForBinary | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1).Name)
 }
 if (-not (Test-Path -LiteralPath (Join-Path $Fixture "src\add.rs"))) {
     throw "rehearsal fixture not found at $Fixture"
@@ -117,6 +131,29 @@ if (-not $SelfTest) {
         throw "pinned agent image $AgentImage is absent; run scripts/build-claude-agent-image.ps1 first"
     }
     Write-Step "pinned agent image present"
+
+    # The broker is the kerna binary baked into the image, not this host's build,
+    # so a source edit that was never imaged would silently govern the run with
+    # stale logic and its receipts would prove nothing about the current code.
+    $createdProbe = Invoke-SilentNative -FilePath $docker -Arguments @("image", "inspect", $AgentImage, "--format", "{{.Created}}")
+    $created = "$(@($createdProbe.Output) | Select-Object -First 1)".Trim()
+    if (-not $created) { throw "the agent image creation time could not be read; run scripts/build-claude-agent-image.ps1 first" }
+    try {
+        # RoundtripKind keeps the trailing Z as UTC, which is what the source mtimes are compared against.
+        $imageTime = [DateTime]::Parse(
+            [regex]::Replace($created, "\.\d+", ""),
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        )
+    } catch {
+        throw "the agent image creation time '$created' could not be parsed; refusing to guess whether it is fresh"
+    }
+    $staleForImage = Get-SourcesNewerThan -Utc $imageTime
+    if ($staleForImage.Count -gt 0) {
+        throw ("the agent image predates {0} kernel source file(s) (newest: {1}); run scripts/build-claude-agent-image.ps1 first" -f `
+            $staleForImage.Count, ($staleForImage | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1).Name)
+    }
+    Write-Step "agent image is newer than every kernel source file"
 }
 
 New-Item -ItemType Directory -Path $ReportDir -Force | Out-Null
@@ -362,6 +399,17 @@ function Complete-SessionReview {
 
 # --- a governed session, decided either way ----------------------------------
 
+# When a receipt cannot be committed the gate fails closed and the action is
+# never released. That is a trusted-side storage fault, not a policy outcome, so
+# a rehearsal must stop rather than report an empty approval queue.
+function Assert-NoPersistenceFault {
+    param([Parameter(Mandatory)][string]$Text, [Parameter(Mandatory)][string]$Name)
+    $match = [regex]::Match($Text, "Kerna receipt \w+ failed for action \S+: .+|persistence is unavailable")
+    if ($match.Success) {
+        throw "$Name could not persist a receipt: $($match.Value.Trim())"
+    }
+}
+
 function Invoke-GovernedPass {
     param(
         [Parameter(Mandatory)][ValidateSet("approve", "reject")][string]$Decision,
@@ -395,14 +443,25 @@ function Invoke-GovernedPass {
 
     $approvals = [ordered]@{}
     $noApprovalWarned = $false
+    $pollFailures = 0
     $deadline = (Get-Date).AddSeconds($ApprovalTimeoutSeconds)
     $nextPoll = [DateTime]::MinValue
     while ($session.Job.JobStateInfo.State -eq "Running") {
         Receive-KernaOutput -Session $session
+        Assert-NoPersistenceFault -Text $session.Drained -Name "$Decision pass"
         if ((Get-Date) -ge $nextPoll) {
             $nextPoll = (Get-Date).AddSeconds(2)
-            try { $pending = @(Invoke-DashboardGet -Base $dashboardBase -Path "/api/v1/dashboard/approvals").approvals }
-            catch { $pending = @() }
+            try {
+                $pending = @(Invoke-DashboardGet -Base $dashboardBase -Path "/api/v1/dashboard/approvals").approvals
+                $pollFailures = 0
+            } catch {
+                $pollFailures++
+                if ($pollFailures -ge 10) {
+                    Stop-Job -Job $session.Job -ErrorAction SilentlyContinue
+                    throw "the control API refused $pollFailures consecutive approval polls: $_"
+                }
+                $pending = @()
+            }
             foreach ($approval in $pending) {
                 if ($approvals.Contains($approval.id)) { continue }
                 Write-Step "$Decision pass: policy held '$($approval.tool)' as approval $($approval.id)"
@@ -423,8 +482,17 @@ function Invoke-GovernedPass {
     }
     Receive-KernaOutput -Session $session
     Wait-Job -Job $session.Job -Timeout 30 | Out-Null
+    Assert-NoPersistenceFault -Text $session.Drained -Name "$Decision pass"
     if ($session.Drained -match "Failed to authenticate|API Error: 401") {
         throw "the provider rejected the key ($Decision pass); nothing was governed, so this run is not evidence"
+    }
+    $faulted = [regex]::Match($session.Drained, "API Error: .+|Error: contained Claude exited.+")
+    if ($faulted.Success) {
+        throw "the contained run faulted ($Decision pass): $($faulted.Value.Trim())"
+    }
+    $failedDecisions = @($approvals.Values | Where-Object { $_ -ne $Decision })
+    if ($failedDecisions.Count -gt 0) {
+        throw "$($failedDecisions.Count) decision(s) were refused by the control API ($Decision pass); the run is not evidence"
     }
     $jobState = "$($session.Job.JobStateInfo.State)"
 
@@ -467,17 +535,30 @@ function Invoke-InterruptPass {
     }
 
     $held = $null
+    $pollFailures = 0
     $deadline = (Get-Date).AddSeconds($ApprovalTimeoutSeconds)
     while (-not $held -and (Get-Date) -lt $deadline -and $session.Drained -notmatch "API Error: 401") {
         Receive-KernaOutput -Session $session
-        try { $pending = @(Invoke-DashboardGet -Base $dashboardBase -Path "/api/v1/dashboard/approvals").approvals }
-        catch { $pending = @() }
+        Assert-NoPersistenceFault -Text $session.Drained -Name "interrupt pass"
+        try {
+            $pending = @(Invoke-DashboardGet -Base $dashboardBase -Path "/api/v1/dashboard/approvals").approvals
+            $pollFailures = 0
+        } catch {
+            $pollFailures++
+            if ($pollFailures -ge 10) {
+                Stop-Job -Job $session.Job -ErrorAction SilentlyContinue
+                throw "the control API refused $pollFailures consecutive polls during the interrupt pass: $_"
+            }
+            $pending = @()
+        }
         if ($pending.Count -gt 0) { $held = $pending[0] } else { Start-Sleep -Milliseconds 500 }
     }
     if (-not $held) {
         Stop-Job -Job $session.Job -ErrorAction SilentlyContinue
         if ($session.Drained -match "API Error: 401") { throw "the provider rejected the key; the interrupt pass has nothing to interrupt" }
-        throw "nothing was held for approval, so the interruption pass would prove nothing"
+        Assert-NoPersistenceFault -Text $session.Drained -Name "interrupt pass"
+        throw ("nothing was held for approval within $ApprovalTimeoutSeconds seconds " +
+            "($pollFailures trailing control-API poll failures), so the interruption pass would prove nothing")
     }
     Write-Step "interrupt pass: '$($held.tool)' is held as approval $($held.id); killing the host tree"
 

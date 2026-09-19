@@ -24,6 +24,9 @@ const DASHBOARD_PORT: u16 = 8877;
 /// crash sweep finds resources by this label, so a half-dead session can never
 /// hide from it behind an unexpected name.
 const MANAGED_LABEL: &str = "dev.kerna.managed=true";
+/// `MANAGED_LABEL` in `--filter` form. Docker filters require the `label=` key,
+/// and a bare value is rejected by the daemon as an invalid filter.
+const MANAGED_LABEL_FILTER: &str = "label=dev.kerna.managed=true";
 const MANAGED_SESSION_LABEL_PREFIX: &str = "dev.kerna.session=";
 
 #[derive(Debug, Clone, Serialize)]
@@ -282,7 +285,7 @@ pub async fn doctor_checks(demo: bool, repo: Option<&Path>) -> Vec<DoctorCheck> 
         "ps",
         "-a",
         "--filter",
-        MANAGED_LABEL,
+        MANAGED_LABEL_FILTER,
         "--format",
         "{{.Names}}",
     ])
@@ -291,7 +294,7 @@ pub async fn doctor_checks(demo: bool, repo: Option<&Path>) -> Vec<DoctorCheck> 
         "network",
         "ls",
         "--filter",
-        MANAGED_LABEL,
+        MANAGED_LABEL_FILTER,
         "--format",
         "{{.Name}}",
     ])
@@ -446,6 +449,7 @@ pub async fn launch_claude(
         ])
         .current_dir(&session_dir)
         .env("KERNA_DB_PATH", &evidence_db)
+        .env("KERNA_DB_SHARED", "1")
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
@@ -601,6 +605,8 @@ fn native_broker_container_args(spec: &NativeBrokerContainerSpec<'_>) -> Vec<Str
         format!("127.0.0.1:{}:{BROKER_PORT}", spec.host_port),
         "--env".to_string(),
         "KERNA_DB_PATH=/kerna-state/evidence.db".to_string(),
+        "--env".to_string(),
+        "KERNA_DB_SHARED=1".to_string(),
         spec.image_id.to_string(),
         "kerna".to_string(),
         "serve".to_string(),
@@ -1125,6 +1131,8 @@ fn broker_container_args(
         ),
         "--env".to_string(),
         "KERNA_DB_PATH=/kerna-state/evidence.db".to_string(),
+        "--env".to_string(),
+        "KERNA_DB_SHARED=1".to_string(),
     ]);
     args.extend([
         image_id.to_string(),
@@ -1272,34 +1280,65 @@ pub fn sweep_stale_sessions() -> Result<SweepReport> {
         "ps",
         "-a",
         "--filter",
-        MANAGED_LABEL,
+        MANAGED_LABEL_FILTER,
         "--format",
         "{{.Names}}",
     ])? {
-        docker_command()
-            .args(["rm", "--force", &name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        report.containers.push(name);
+        if remove_managed(&["rm", "--force"], &name)? {
+            report.containers.push(name);
+        }
     }
     for name in list_labeled(&[
         "network",
         "ls",
         "--filter",
-        MANAGED_LABEL,
+        MANAGED_LABEL_FILTER,
         "--format",
         "{{.Name}}",
     ])? {
-        docker_command()
-            .args(["network", "rm", &name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        report.networks.push(name);
+        if remove_managed(&["network", "rm"], &name)? {
+            report.networks.push(name);
+        }
     }
     report.retained_worktrees = retained_session_worktrees();
     Ok(report)
+}
+
+/// Managed resources still present. A live session owns its containers, so a
+/// sweep legitimately leaves them; `kerna guard cleanup` reports the number
+/// rather than staying silent about what it did not remove.
+pub fn leftover_managed_count() -> Result<usize> {
+    Ok(list_labeled(&[
+        "ps",
+        "-a",
+        "--filter",
+        MANAGED_LABEL_FILTER,
+        "--format",
+        "{{.Names}}",
+    ])?
+    .len()
+        + list_labeled(&[
+            "network",
+            "ls",
+            "--filter",
+            MANAGED_LABEL_FILTER,
+            "--format",
+            "{{.Name}}",
+        ])?
+        .len())
+}
+
+/// Best-effort removal of one labeled resource. A resource a running session
+/// still owns refuses to disappear, so the sweep reports it as left in place
+/// rather than claiming a removal that Docker rejected.
+fn remove_managed(prefix: &[&str], name: &str) -> Result<bool> {
+    let status = docker_command()
+        .args(prefix)
+        .arg(name)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    Ok(status.success())
 }
 
 /// Disposable session worktrees on disk. A crash preserves reviewable work, so
@@ -1794,8 +1833,10 @@ mod tests {
             common_container_args(None, "agent-net", &workspace, "12345678-session").join(" ");
         assert!(broker.contains("dst=/kerna-state"));
         assert!(broker.contains("KERNA_DB_PATH=/kerna-state/evidence.db"));
+        assert!(broker.contains("KERNA_DB_SHARED=1"));
         assert!(!agent.contains("kerna-state"));
         assert!(!agent.contains("evidence.db"));
+        assert!(!agent.contains("KERNA_DB_SHARED"));
         let _ = std::fs::remove_dir_all(workspace);
         let _ = std::fs::remove_dir_all(state);
     }

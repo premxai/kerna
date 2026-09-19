@@ -114,15 +114,43 @@ impl MemoryEngine {
             }
         };
 
-        // Enable foreign keys and WAL mode for concurrency
+        // Foreign keys always; the journal mode depends on who else can see the file.
         conn.execute("PRAGMA foreign_keys = ON;", [])?;
-        let _ = conn.query_row("PRAGMA journal_mode = WAL;", [], |_row| Ok(()));
+        let shared_flag = std::env::var_os("KERNA_DB_SHARED");
+        let shared = shared_flag.as_deref() == Some(std::ffi::OsStr::new("1"));
+        let busy_timeout = if shared { "30000" } else { "5000" };
+        conn.execute(&format!("PRAGMA busy_timeout = {busy_timeout};"), [])
+            .ok();
+        let journal_mode = Self::db_journal_mode(shared_flag.as_deref());
+        let _ = conn.query_row(
+            &format!("PRAGMA journal_mode = {journal_mode};"),
+            [],
+            |_row| Ok(()),
+        );
+        if journal_mode == "DELETE" {
+            // A reader on the other side of the mount must never see a commit
+            // that only lives in this process's page cache.
+            conn.execute("PRAGMA synchronous = FULL;", []).ok();
+        }
 
         let engine = MemoryEngine {
             conn: Mutex::new(conn),
         };
         engine.bootstrap()?;
         Ok(engine)
+    }
+
+    /// Rollback journal for a database shared across the containment boundary.
+    /// WAL keeps its committed-frame index in a `-shm` memory map, which is only
+    /// valid for readers that share one kernel's mapping; the host dashboard
+    /// polling the broker's WAL database sees an empty file, so an approval
+    /// could never reach the waiting gate.
+    fn db_journal_mode(shared: Option<&std::ffi::OsStr>) -> &'static str {
+        if shared == Some(std::ffi::OsStr::new("1")) {
+            "DELETE"
+        } else {
+            "WAL"
+        }
     }
 
     fn get_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -2160,6 +2188,7 @@ impl MemoryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::fs;
 
     use uuid::Uuid;
@@ -2168,6 +2197,17 @@ mod tests {
         let db_path = format!("{}.db", name);
         let _ = fs::remove_file(&db_path);
         MemoryEngine::new(&db_path).expect("Failed to initialize test DB")
+    }
+
+    #[test]
+    fn a_shared_evidence_database_leaves_wal_behind() {
+        assert_eq!(MemoryEngine::db_journal_mode(None), "WAL");
+        assert_eq!(MemoryEngine::db_journal_mode(Some(OsStr::new("0"))), "WAL");
+        assert_eq!(
+            MemoryEngine::db_journal_mode(Some(OsStr::new("1"))),
+            "DELETE",
+            "WAL's -shm commit index is invisible across the containment boundary"
+        );
     }
 
     #[test]

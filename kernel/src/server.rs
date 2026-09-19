@@ -1190,9 +1190,10 @@ async fn relay_anthropic(
 }
 
 /// Claude Code retries a broken Messages SSE connection once with a normal JSON
-/// response. Preserve that retry shape exactly for ordinary text responses.
-/// A non-streaming tool action cannot be paused for an approval, so it fails
-/// closed rather than ever reaching the agent client.
+/// response. Preserve that retry shape exactly for ordinary text responses, and
+/// govern a tool action in it with the same digest-bound receipt gate as the
+/// streaming path: the response completes only after the approval decision, and
+/// an action that is denied, expired, or unresolved never reaches the client.
 async fn relay_anthropic_json(
     upstream: reqwest::Response,
     relay: AnthropicRelayContext,
@@ -1232,61 +1233,24 @@ async fn relay_anthropic_json(
         }
     };
     let mut body = body.to_vec();
-    let mut contains_tool_use = false;
-    let mut denied_tool_use = false;
-    let mut held_tool_use = false;
+    let mut summary = BufferedGateSummary::default();
     if let Ok(mut payload) = serde_json::from_slice::<Value>(&body) {
         if let Some(blocks) = payload.get_mut("content").and_then(Value::as_array_mut) {
-            let mut rewritten = Vec::with_capacity(blocks.len());
-            for block in blocks.iter() {
-                if block.get("type").and_then(Value::as_str) != Some("tool_use") {
-                    rewritten.push(block.clone());
-                    continue;
-                }
-                contains_tool_use = true;
-                let action = crate::guard_protocol::ActionCandidate {
-                    protocol: crate::guard_protocol::Protocol::AnthropicMessages,
-                    id: block
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown-tool-call")
-                        .to_owned(),
-                    raw_tool_name: block
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_owned(),
-                    arguments: block.get("input").cloned().unwrap_or_else(|| json!({})),
-                };
-                match stream_policy_decision_with_receipt(&policy, &memory, &context, &action) {
-                    crate::guard_protocol::GateDecision::Allow => rewritten.push(block.clone()),
-                    crate::guard_protocol::GateDecision::Deny { reason } => {
-                        denied_tool_use = true;
-                        rewritten.push(json!({
-                            "type": "text",
-                            "text": format!(
-                                "[blocked by Kerna policy] {} was not released: {}",
-                                action.raw_tool_name, reason
-                            )
-                        }));
-                    }
-                    crate::guard_protocol::GateDecision::Hold => {
-                        held_tool_use = true;
-                        rewritten.push(block.clone());
-                    }
-                }
-            }
-            if denied_tool_use && !held_tool_use {
-                *blocks = rewritten;
+            let (rewritten, gate) =
+                gate_buffered_tool_actions(std::mem::take(blocks), &policy, &memory, &context)
+                    .await;
+            *blocks = rewritten;
+            if gate.blocked {
                 payload["stop_reason"] = Value::String("end_turn".to_owned());
                 if let Ok(rewritten_body) = serde_json::to_vec(&payload) {
                     body = rewritten_body;
                 }
             }
+            summary = gate;
         }
     }
     let output_sha256 = format!("{:x}", Sha256::digest(&body));
-    let runtime_status = if status.is_success() && (!contains_tool_use || denied_tool_use) {
+    let runtime_status = if status.is_success() && !summary.undecided {
         "completed"
     } else {
         "failed"
@@ -1302,12 +1266,6 @@ async fn relay_anthropic_json(
         body.len(),
     );
     let _ = memory.finish_gateway_session(&context.session_id);
-    if contains_tool_use && !denied_tool_use {
-        return error_response(
-            StatusCode::CONFLICT,
-            "Kerna requires streaming for a tool-capable Anthropic response; the action was not released.",
-        );
-    }
     let mut response = axum::response::Response::new(Body::from(body));
     *response.status_mut() =
         StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -1320,6 +1278,81 @@ async fn relay_anthropic_json(
             .insert(HeaderName::from_static("request-id"), request_id);
     }
     response
+}
+
+/// Outcome of gating a buffered Messages response.
+#[derive(Debug, Default)]
+struct BufferedGateSummary {
+    /// An action reached a terminal decision without being released.
+    blocked: bool,
+    /// An action's approval never resolved, so its outcome is unknown.
+    undecided: bool,
+}
+
+/// Applies the receipt-bound gate to every action in a buffered Messages
+/// response. A held action waits for its decision exactly as the streaming
+/// relay does, so the provider's turn only completes once the approval is
+/// recorded, and an action that is denied, expired, or unresolved is replaced
+/// by its notice instead of reaching the agent client.
+async fn gate_buffered_tool_actions(
+    blocks: Vec<Value>,
+    policy: &GuardPolicy,
+    memory: &MemoryEngine,
+    context: &GuardStreamContext,
+) -> (Vec<Value>, BufferedGateSummary) {
+    let mut summary = BufferedGateSummary::default();
+    let mut rewritten = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+            rewritten.push(block);
+            continue;
+        }
+        let action = crate::guard_protocol::ActionCandidate {
+            protocol: crate::guard_protocol::Protocol::AnthropicMessages,
+            id: block
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown-tool-call")
+                .to_owned(),
+            raw_tool_name: block
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned(),
+            arguments: block.get("input").cloned().unwrap_or_else(|| json!({})),
+        };
+        let gate = match stream_policy_decision_with_receipt(policy, memory, context, &action) {
+            crate::guard_protocol::GateDecision::Hold => {
+                wait_for_stream_approval(memory, policy, context, &action).await
+            }
+            decided => decided,
+        };
+        match gate {
+            crate::guard_protocol::GateDecision::Allow => rewritten.push(block),
+            crate::guard_protocol::GateDecision::Deny { reason } => {
+                summary.blocked = true;
+                rewritten.push(json!({
+                    "type": "text",
+                    "text": format!(
+                        "[blocked by Kerna policy] {} was not released: {}",
+                        action.raw_tool_name, reason
+                    )
+                }));
+            }
+            crate::guard_protocol::GateDecision::Hold => {
+                summary.blocked = true;
+                summary.undecided = true;
+                rewritten.push(json!({
+                    "type": "text",
+                    "text": format!(
+                        "[blocked by Kerna policy] {} was not released: the approval did not resolve",
+                        action.raw_tool_name
+                    )
+                }));
+            }
+        }
+    }
+    (rewritten, summary)
 }
 
 fn relay_openai(
@@ -1514,13 +1547,30 @@ fn stream_policy_decision_with_receipt(
                 reason: "denied by Kerna policy".to_owned(),
             }
         }
-        Ok(_) => crate::guard_protocol::GateDecision::Deny {
-            reason: "approval persistence is unavailable".to_owned(),
-        },
-        Err(_) => crate::guard_protocol::GateDecision::Deny {
-            reason: "approval persistence is unavailable".to_owned(),
-        },
+        Ok(outcome) => {
+            log_persistence_failure(
+                "create",
+                &binding.call_id,
+                format!("unexpected outcome {outcome:?}"),
+            );
+            crate::guard_protocol::GateDecision::Deny {
+                reason: "approval persistence is unavailable".to_owned(),
+            }
+        }
+        Err(error) => {
+            log_persistence_failure("create", &binding.call_id, error);
+            crate::guard_protocol::GateDecision::Deny {
+                reason: "approval persistence is unavailable".to_owned(),
+            }
+        }
     }
+}
+
+/// A gate that fails closed must still explain itself on the trusted side. The
+/// client keeps receiving the generic refusal, because a storage error is not a
+/// reason to leak a path or driver detail into agent-visible prose.
+fn log_persistence_failure(stage: &str, call_id: &str, detail: impl std::fmt::Display) {
+    eprintln!("[!] Kerna receipt {stage} failed for action {call_id}: {detail}");
 }
 
 fn wp0_smoke_command(action: &crate::guard_protocol::ActionCandidate) -> Option<&str> {
@@ -1546,10 +1596,21 @@ async fn wait_for_stream_approval(
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
     let approval_id = match memory.guard_approval_for_call(&binding.session_id, &binding.call_id) {
         Ok(Some(id)) => id,
-        Ok(None) | Err(_) => {
+        Ok(None) => {
+            log_persistence_failure(
+                "lookup",
+                &binding.call_id,
+                "no approval row for a held action",
+            );
             return crate::guard_protocol::GateDecision::Deny {
                 reason: "approval persistence is unavailable".to_owned(),
-            }
+            };
+        }
+        Err(error) => {
+            log_persistence_failure("lookup", &binding.call_id, error);
+            return crate::guard_protocol::GateDecision::Deny {
+                reason: "approval persistence is unavailable".to_owned(),
+            };
         }
     };
     loop {
@@ -1566,20 +1627,39 @@ async fn wait_for_stream_approval(
             Ok(Some(true)) => {
                 return match memory.release_guard_action(&binding) {
                     Ok(true) => crate::guard_protocol::GateDecision::Allow,
-                    Ok(false) | Err(_) => crate::guard_protocol::GateDecision::Deny {
+                    Ok(false) => crate::guard_protocol::GateDecision::Deny {
                         reason: "approval was not valid for this Claude action".to_owned(),
                     },
+                    Err(error) => {
+                        log_persistence_failure("release", &binding.call_id, error);
+                        crate::guard_protocol::GateDecision::Deny {
+                            reason: "approval was not valid for this Claude action".to_owned(),
+                        }
+                    }
                 }
             }
             Ok(Some(false)) => {
-                let receipt_ok = memory.deny_guard_action(&binding).unwrap_or(false);
-                return crate::guard_protocol::GateDecision::Deny {
-                    reason: if receipt_ok {
-                        "denied by local approval".to_owned()
-                    } else {
-                        "approval receipt persistence is unavailable".to_owned()
+                return match memory.deny_guard_action(&binding) {
+                    Ok(true) => crate::guard_protocol::GateDecision::Deny {
+                        reason: "denied by local approval".to_owned(),
                     },
-                };
+                    Ok(false) => {
+                        log_persistence_failure(
+                            "denial",
+                            &binding.call_id,
+                            "the denial receipt did not commit",
+                        );
+                        crate::guard_protocol::GateDecision::Deny {
+                            reason: "approval receipt persistence is unavailable".to_owned(),
+                        }
+                    }
+                    Err(error) => {
+                        log_persistence_failure("denial", &binding.call_id, error);
+                        crate::guard_protocol::GateDecision::Deny {
+                            reason: "approval receipt persistence is unavailable".to_owned(),
+                        }
+                    }
+                }
             }
             Ok(None) if tokio::time::Instant::now() >= deadline => {
                 let _ = memory.expire_guard_approval(&binding);
@@ -1589,10 +1669,11 @@ async fn wait_for_stream_approval(
                 };
             }
             Ok(None) => tokio::time::sleep(Duration::from_millis(250)).await,
-            Err(_) => {
+            Err(error) => {
+                log_persistence_failure("decision", &binding.call_id, error);
                 return crate::guard_protocol::GateDecision::Deny {
                     reason: "approval persistence is unavailable".to_owned(),
-                }
+                };
             }
         }
     }
@@ -2820,6 +2901,116 @@ mod tests {
             stream_policy_decision(&policy, &action),
             crate::guard_protocol::GateDecision::Hold
         );
+    }
+
+    #[tokio::test]
+    async fn a_held_buffered_action_survives_only_after_its_approval_lands() {
+        let path = std::env::temp_dir().join(format!("kerna-buffered-gate-{}.db", Uuid::new_v4()));
+        let memory = Arc::new(MemoryEngine::new(&path).unwrap());
+        let task_id = Uuid::new_v4();
+        memory
+            .create_task(task_id, None, "buffered gate test")
+            .unwrap();
+        let context = GuardStreamContext {
+            session_id: "guard-buffered-test".to_owned(),
+            task_id: task_id.to_string(),
+            agent: AgentKind::ClaudeCode,
+            agent_version: "test".to_owned(),
+            worktree_baseline: "sha256:test".to_owned(),
+        };
+        let policy = GuardPolicy::from_legacy_permissions(
+            &[crate::config::PermissionRule {
+                tool: "Bash".to_owned(),
+                action: "require_confirmation".to_owned(),
+            }],
+            PolicyEffect::Deny,
+        );
+        let blocks = vec![json!({
+            "type": "tool_use",
+            "id": "toolu_buffered_test",
+            "name": "Bash",
+            "input": { "command": "printf KernaRehearsalMarker" }
+        })];
+
+        let deciding = memory.clone();
+        let decider = tokio::spawn(async move {
+            for _ in 0..200 {
+                if let Ok(Some(id)) =
+                    deciding.guard_approval_for_call("guard-buffered-test", "toolu_buffered_test")
+                {
+                    deciding.decide_guard_approval(&id, true).unwrap();
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("the buffered gate never recorded the held action");
+        });
+
+        let (released, summary) = tokio::time::timeout(
+            Duration::from_secs(5),
+            gate_buffered_tool_actions(blocks, &policy, &memory, &context),
+        )
+        .await
+        .expect("an approved action must complete the buffered response");
+        decider.await.unwrap();
+
+        assert!(!summary.blocked, "an approved action is not blocked");
+        assert_eq!(released[0]["name"], "Bash");
+        let released_receipt = memory
+            .recent_tool_call_receipts(50)
+            .unwrap()
+            .into_iter()
+            .find(|receipt| {
+                receipt.session_id == "guard-buffered-test"
+                    && receipt.call_id == "toolu_buffered_test"
+            })
+            .expect("the held action must have a receipt");
+        assert_eq!(
+            released_receipt.result_class.as_deref(),
+            Some("released"),
+            "the response only completes once the release receipt commits"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn a_denied_buffered_action_is_replaced_by_its_notice() {
+        let path = std::env::temp_dir().join(format!("kerna-buffered-deny-{}.db", Uuid::new_v4()));
+        let memory = Arc::new(MemoryEngine::new(&path).unwrap());
+        let task_id = Uuid::new_v4();
+        memory
+            .create_task(task_id, None, "buffered deny test")
+            .unwrap();
+        let context = GuardStreamContext {
+            session_id: "guard-buffered-deny".to_owned(),
+            task_id: task_id.to_string(),
+            agent: AgentKind::ClaudeCode,
+            agent_version: "test".to_owned(),
+            worktree_baseline: "sha256:test".to_owned(),
+        };
+        let policy = GuardPolicy::from_legacy_permissions(&[], PolicyEffect::Deny);
+
+        let (rewritten, summary) = gate_buffered_tool_actions(
+            vec![json!({
+                "type": "tool_use",
+                "id": "toolu_buffered_deny",
+                "name": "Bash",
+                "input": { "command": "curl http://example.invalid" }
+            })],
+            &policy,
+            &memory,
+            &context,
+        )
+        .await;
+
+        assert!(summary.blocked);
+        assert!(!summary.undecided, "a policy denial is a terminal decision");
+        assert_eq!(rewritten[0]["type"], "text");
+        assert!(rewritten[0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("[blocked by Kerna policy]"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

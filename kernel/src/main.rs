@@ -2261,6 +2261,12 @@ async fn async_main() -> Result<()> {
                     if report.is_empty() {
                         println!("[+] nothing to clean; no managed resources or worktrees found");
                     }
+                    let leftover = guard_launcher::leftover_managed_count()?;
+                    if leftover > 0 {
+                        println!(
+                            "[!] {leftover} managed resource(s) still present; a running session owns them"
+                        );
+                    }
                 }
             }
             return Ok(());
