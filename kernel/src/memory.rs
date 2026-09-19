@@ -122,12 +122,25 @@ impl MemoryEngine {
         conn.execute(&format!("PRAGMA busy_timeout = {busy_timeout};"), [])
             .ok();
         let journal_mode = Self::db_journal_mode(shared_flag.as_deref());
-        let _ = conn.query_row(
-            &format!("PRAGMA journal_mode = {journal_mode};"),
-            [],
-            |_row| Ok(()),
-        );
-        if journal_mode == "DELETE" {
+        // `PRAGMA journal_mode = <mode>` answers with the mode it settled on, so
+        // the same call sets it and proves it. Journal mode is not persistent
+        // across connections the way WAL is, so reading it back from a *second*
+        // handle would prove nothing about this one.
+        let applied = conn
+            .query_row(
+                &format!("PRAGMA journal_mode = {journal_mode};"),
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_default();
+        if !applied.eq_ignore_ascii_case(journal_mode) {
+            eprintln!(
+                "[!] Kerna evidence database reports journal mode '{applied}', not \
+                 '{journal_mode}'. Across the containment boundary that means the reviewer's \
+                 dashboard may not see receipts this process commits."
+            );
+        }
+        if journal_mode == "DELETE" || journal_mode == "TRUNCATE" {
             // A reader on the other side of the mount must never see a commit
             // that only lives in this process's page cache.
             conn.execute("PRAGMA synchronous = FULL;", []).ok();
@@ -145,9 +158,19 @@ impl MemoryEngine {
     /// valid for readers that share one kernel's mapping; the host dashboard
     /// polling the broker's WAL database sees an empty file, so an approval
     /// could never reach the waiting gate.
+    ///
+    /// DELETE is not enough either. Every DELETE commit ends by unlinking the
+    /// journal, and through Docker Desktop's Windows file sharing that unlink can
+    /// fail: a contained run died with `Error code 2570: I/O error within
+    /// xDelete of a VFS object` (SQLITE_IOERR_DELETE) on the journal, which took
+    /// the broker down with it and left the agent unable to reach its own
+    /// gateway. TRUNCATE ends each transaction by shrinking the journal to zero
+    /// bytes instead of deleting it, so no cross-boundary unlink sits on the
+    /// release path, and a zero-length journal is not a hot journal, so the
+    /// reader on the other side still sees a plain committed database file.
     fn db_journal_mode(shared: Option<&std::ffi::OsStr>) -> &'static str {
         if shared == Some(std::ffi::OsStr::new("1")) {
-            "DELETE"
+            "TRUNCATE"
         } else {
             "WAL"
         }
@@ -2205,8 +2228,10 @@ mod tests {
         assert_eq!(MemoryEngine::db_journal_mode(Some(OsStr::new("0"))), "WAL");
         assert_eq!(
             MemoryEngine::db_journal_mode(Some(OsStr::new("1"))),
-            "DELETE",
-            "WAL's -shm commit index is invisible across the containment boundary"
+            "TRUNCATE",
+            "WAL's -shm commit index is invisible across the containment boundary, \
+             and DELETE's per-commit journal unlink has failed there with \
+             SQLITE_IOERR_DELETE"
         );
     }
 

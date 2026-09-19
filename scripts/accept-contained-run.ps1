@@ -409,9 +409,9 @@ function Complete-SessionReview {
 # a rehearsal must stop rather than report an empty approval queue.
 function Assert-NoPersistenceFault {
     param([Parameter(Mandatory)][string]$Text, [Parameter(Mandatory)][string]$Name)
-    $match = [regex]::Match($Text, "Kerna receipt \w+ failed for action \S+: .+|persistence is unavailable")
+    $match = [regex]::Match($Text, "Kerna receipt \w+ failed for action \S+: .+|persistence is unavailable|reports journal mode '[^']*', not|disk I/O error|I/O error within xDelete of a VFS object")
     if ($match.Success) {
-        throw "$Name could not persist a receipt: $($match.Value.Trim())"
+        throw "$Name hit a trusted-side storage fault: $($match.Value.Trim())"
     }
 }
 
