@@ -13,11 +13,11 @@ release decision from them, so a claim cannot be made by editing prose.
 
 | Work package | Status | Artifact that proves it | Say this |
 |---|---|---|---|
-| WP0 client protocol feasibility | Implemented; live proof pending one operator run | `scripts/accept-contained-run.ps1` → `reports/contained-run-proof.json`; byte-boundary parser tests over `kernel/tests/fixtures/anthropic` | "Pinned Claude Code 2.1.270, allow and ask exercised on real client actions" |
+| WP0 client protocol feasibility | Proven with a real Anthropic key | `reports/contained-run-proof.json` (approve, reject, and interrupt passes); byte-boundary parser tests over `kernel/tests/fixtures/anthropic` | "Pinned Claude Code 2.1.270, allow and ask exercised on real client actions" |
 | WP1 canonical policy core | Green | `cargo test --locked` (policy conformance + `kernel/src/guard_policy.rs` rules); RG-005 passes | "One typed decision engine; every adapter returns the same decision" |
-| WP2 contained supervisor | Containment proven; crash sweep now in code | `scripts/test-claude-container-boundary.ps1` (filesystem, credential, Docker, network probes); `guard_launcher::sweep_stale_sessions` behind `kerna guard cleanup` | "Docker is the boundary. A crashed session's containers and networks are found by label, never by name" |
-| WP3 mandatory evidence and approval | Implemented | hash-chained store in `kernel/src/memory.rs`; `wait_for_stream_approval` 300 s one-time binding; interruption pass of the rehearsal records an unreleased action | "Nothing is released until its decision receipt commits, and a released action is never called executed without a result" |
-| WP4 local browser workflow | Routes proven over HTTP; UI usable | `/api/v1/dashboard/approvals/:id/approve`, `/workspace`, `/workspace/apply`, `/evidence` driven by the rehearsal; loopback + per-launch CSRF | "Review the diff, apply it into your own clone, export signed evidence, from one browser tab" |
+| WP2 contained supervisor | Proven, sweep exercised in the interrupt pass | `scripts/test-claude-container-boundary.ps1` (filesystem, credential, Docker, network probes); `guard_launcher::sweep_stale_sessions` behind `kerna guard cleanup`, driven by the rehearsal's "orphan containers then zero after cleanup" checks | "Docker is the boundary. A crashed session's containers and networks are found by label, never by name" |
+| WP3 mandatory evidence and approval | Proven | hash-chained store in `kernel/src/memory.rs`; `wait_for_stream_approval` 300 s one-time binding; the rehearsal's interrupted action is recorded `pending` and never released | "Nothing is released until its decision receipt commits, and a released action is never called executed without a result" |
+| WP4 local browser workflow | Proven over HTTP, including a bounded reviewer | `/api/v1/dashboard/approvals/:id/approve`, `/workspace`, `/workspace/apply`, `/evidence` driven by the rehearsal; loopback + per-launch CSRF; signed bundle re-verified by `kerna replay` | "Review the diff, apply it into your own clone, export signed evidence, from one browser tab" |
 | WP5 packaging (doctor half) | Works on this machine | `kerna guard doctor`, pinned image digest provenance in `guard_launcher` | "Doctor rejects anything that is not the reviewed pinned image" |
 
 ## What is not claimed
@@ -70,22 +70,31 @@ database to write. Two storage rules follow, and both are enforced in
   session-bound checks it uses for a native click. This keeps the release of a
   held action strictly conditional on a receipt the broker itself committed.
 - **the reviewer reads what the broker pushes.** The same lock gap cuts the
-  other way: a long-lived read-only handle caches pages and is never told to
-  discard them, and even reopening the handle per request still served pages
-  the mount translation had refreshed not at all — a contained rehearsal once
-  showed a real, unexpired held action as an empty approval queue for 240
-  seconds. The reviewer's approval queue therefore comes from
-  `evidence_view.json`, a small file the broker (the only writer) rewrites with
-  a fresh nonce so its size changes and even a caching mount must refetch it,
-  timestamped so the reviewer rejects a stale view as the fault it is instead of
-  mistaking silence for an empty queue. Publication is not tied to a held
-  action: the broker publishes on every hold tick, again the moment it applies a
-  decision the reviewer left, once more when an approval expires, and on a
-  two-second heartbeat for the life of the server. Without that last one an
-  idle broker's view ages past the 15-second freshness window and the dashboard
-  answers "no fresh view" while nothing is waiting — which is true but useless,
-  because a rehearsal polling the queue reads ten of those as a dead control
-  plane and stops.
+  other way: a reader on the far side of the mount can open the database while
+  the broker holds a hot journal, and nothing it can do — not even reopening the
+  handle per request — tells it which bytes are the committed ones. So the
+  reviewer's approval queue comes from `evidence_view.json`, a small file the
+  broker (the only writer) rewrites with a fresh nonce so its size changes and
+  even a caching mount must refetch it, timestamped so the reviewer rejects a
+  stale view as the fault it is instead of mistaking silence for an empty queue.
+  Publication is not tied to a held action: the broker publishes on every hold
+  tick, again the moment it applies a decision the reviewer left, once more when
+  an approval expires, and on a two-second heartbeat for the life of the server.
+  Without that last one an idle broker's view ages past the 15-second freshness
+  window and the dashboard answers "no fresh view" while nothing is waiting —
+  which is true but useless, because a rehearsal polling the queue reads ten of
+  those as a dead control plane and stops.
+- **what the 240-second empty queue actually was.** Two contained rehearsals
+  reported a live, unexpired held action as an approval queue with nothing in
+  it, and the first diagnosis written into this file blamed cached pages across
+  the mount. That was wrong: `@(Invoke-DashboardGet …).approvals` binds a bare
+  object when exactly one action is held, a bare object has no `.Count`, and
+  `-gt 0` on nothing is false — so the harness read a real approval as an empty
+  queue every time the answer contained one item. Fixed in commit `2db6799`,
+  and the interrupt leg has since passed on the same build. Worth keeping in the
+  record, because a control plane that reports an empty queue is indistinguishable
+  from a review surface nobody is using, and the plausible-sounding storage
+  theory was chasing a bug in the test.
 
 Kerna reads the mode back from the same `PRAGMA` that sets it and warns on the
 trusted side if it did not settle, because journal mode is not recorded in the

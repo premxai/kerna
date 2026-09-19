@@ -292,16 +292,29 @@ impl MemoryEngine {
         shared.as_deref() == Some(std::ffi::OsStr::new("1")) && !self.reader
     }
 
-    /// The broker is the only process entitled to describe its committed
-    /// queue. A reviewer across the containment mount can reopen a read-only
-    /// handle on every read and still be served pages the filesystem
-    /// translation never refreshed; two rehearsals showed a live, unexpired
-    /// approval as an empty queue for 240 seconds. So the broker also
-    /// describes the queue outside the database, as a wholly rewritten file
-    /// on every hold tick and decision. A fresh nonce changes its size on
-    /// every write — the one signal a caching mount must honor — and
-    /// `written_at_unix` lets the reviewer reject a stale view instead of
-    /// mistaking silence for an empty queue.
+    /// The broker is the only process entitled to describe its committed queue.
+    /// SQLite's advisory locks do not cross the containment mount, so a reader
+    /// on the far side can open the file while this one holds a hot journal and
+    /// get either a refusal or a page set that was never the committed state;
+    /// no amount of reopening fixes that, because the reader cannot be told
+    /// which bytes are current. So the broker also describes the queue outside
+    /// the database, as a wholly rewritten file, and the reviewer's approval
+    /// list comes from that description rather than from its own handle. A
+    /// fresh nonce changes the size on every write and `written_at_unix` lets
+    /// the reviewer reject a stale view instead of mistaking silence for an
+    /// empty queue.
+    ///
+    /// Recorded so the next reader does not repeat the mistake: an earlier
+    /// version of this comment blamed a 240-second empty queue on cached pages.
+    /// That incident was a PowerShell binding bug in `accept-contained-run.ps1`
+    /// — `@($response).approvals` yields a bare object for a single held action,
+    /// and a bare object's `.Count` is nothing at all — and was fixed in commit
+    /// `2db6799`. The pushed view is soundness engineering, not the fix for
+    /// that failure.
+    ///
+    /// Publication therefore cannot be tied to holding an action: an idle
+    /// broker whose view aged past the freshness window would answer "no fresh
+    /// view" precisely when the truth is "nothing is waiting".
     pub fn write_pending_snapshot(&self) -> Result<()> {
         if self.reader {
             return Ok(());
