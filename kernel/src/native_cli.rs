@@ -179,9 +179,15 @@ impl EventRenderer {
             } => {
                 eprintln!("[{status}] {kind} - {detail}");
             }
-            NativeEvent::SessionCompleted { tokens, .. } => {
+            NativeEvent::SessionCompleted { session_id, tokens } => {
                 println!();
-                eprintln!("[i] tool-less response - {tokens} tokens - prompt not persisted");
+                if session_id.starts_with("code-") {
+                    eprintln!(
+                        "[i] governed run complete - {tokens} tokens - prompts and model prose are not persisted"
+                    );
+                } else {
+                    eprintln!("[i] tool-less response - {tokens} tokens - prompt not persisted");
+                }
             }
             NativeEvent::SessionInterrupted { .. } => {
                 eprintln!("\n[-] model request interrupted; broker cleanup is running");
