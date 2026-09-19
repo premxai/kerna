@@ -1823,6 +1823,20 @@ fn approval_summary(action: &crate::guard_protocol::ActionCandidate) -> String {
     .to_string()
 }
 
+/// A reviewer across the containment boundary reads the evidence database
+/// through a handle whose cached pages are never invalidated by the broker's
+/// commits, because SQLite's advisory locks do not cross the mount
+/// translation. Reopen that handle before every dashboard request so each
+/// read starts from the file the OS can actually show up to date.
+async fn refresh_reviewer_evidence_view(
+    State(state): State<DashboardState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    state.app.memory.refresh_reviewer_handle();
+    next.run(request).await
+}
+
 /// Start the local-only observability surface. It reads durable SQLite records
 /// written by every gateway process, so opening the dashboard does not require
 /// a separate daemon or a client-specific integration.
@@ -1870,7 +1884,11 @@ pub async fn start_dashboard_server(
             "/api/v1/dashboard/approvals/:id/reject",
             post(reject_dashboard_approval),
         )
-        .with_state(dashboard.clone());
+        .with_state(dashboard.clone())
+        .layer(axum::middleware::from_fn_with_state(
+            dashboard.clone(),
+            refresh_reviewer_evidence_view,
+        ));
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     println!("[+] Kerna dashboard listening on http://{}/", addr);
     println!("[i] Local dashboard CSRF token: {}", dashboard.csrf_token);
@@ -2293,6 +2311,7 @@ async fn dashboard_approvals(State(state): State<DashboardState>) -> axum::respo
                         "the approval queue could not be read",
                     );
                 }
+                state.app.memory.refresh_reviewer_handle();
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }

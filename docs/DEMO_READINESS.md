@@ -69,6 +69,13 @@ database to write. Two storage rules follow, and both are enforced in
   broker — the only writer — applies it through the same expiry-, digest-, and
   session-bound checks it uses for a native click. This keeps the release of a
   held action strictly conditional on a receipt the broker itself committed.
+- **the reviewer reopens on every request.** The same lock gap cuts the other
+  way: a long-lived read-only handle caches pages and is never told to
+  discard them, so a contained rehearsal once served a genuinely empty-looking
+  approval queue for 240 seconds while the broker held a real unexpired
+  action. `refresh_reviewer_handle` replaces the cached connection before
+  each dashboard read, and the approvals endpoint reopens between its own
+  retries.
 
 Kerna reads the mode back from the same `PRAGMA` that sets it and warns on the
 trusted side if it did not settle, because journal mode is not recorded in the

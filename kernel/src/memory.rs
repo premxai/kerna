@@ -165,6 +165,39 @@ impl MemoryEngine {
         Ok(engine)
     }
 
+    /// Open a fresh read-only handle on the evidence database.
+    fn open_reader_conn(db_path: &Path) -> rusqlite::Result<Connection> {
+        let conn = Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        conn.execute("PRAGMA foreign_keys = ON;", []).ok();
+        // A review poll must fail fast and retry rather than sit on a lock the
+        // broker is holding for a few milliseconds.
+        conn.execute("PRAGMA busy_timeout = 5000;", []).ok();
+        conn.execute("PRAGMA query_only = ON;", []).ok();
+        Ok(conn)
+    }
+
+    /// Replace a reviewer's cached handle with a fresh read-only one.
+    ///
+    /// A long-lived SQLite connection caches pages in memory and only discards
+    /// them when its advisory locking sees a competing writer. Those locks are
+    /// not honored across the Docker filesystem translation, so a reviewer's
+    /// connection can keep serving pages it cached before the broker committed
+    /// an approval — a queue that reads empty forever while a real action is
+    /// held, which one contained rehearsal demonstrated. Reopening per request
+    /// is the reviewer's equivalent of lock-based invalidation: a fresh handle
+    /// re-reads from the file, which the OS does show up to date.
+    pub fn refresh_reviewer_handle(&self) {
+        if !self.reader {
+            return;
+        }
+        if let Ok(conn) = Self::open_reader_conn(&self.db_path) {
+            *self.get_conn() = conn;
+        }
+    }
+
     /// Open the evidence database the way a reviewer across the containment
     /// boundary has to open it: read-only, and never as a writer.
     ///
@@ -192,15 +225,7 @@ impl MemoryEngine {
             // not a failure: the broker is still starting. Anything it does
             // manage to open is read-only, so a retry can no more damage the
             // evidence than the first attempt could.
-            if let Ok(conn) = Connection::open_with_flags(
-                db_path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-            ) {
-                conn.execute("PRAGMA foreign_keys = ON;", []).ok();
-                // A review poll must fail fast and retry rather than sit on a
-                // lock the broker is holding for a few milliseconds.
-                conn.execute("PRAGMA busy_timeout = 5000;", []).ok();
-                conn.execute("PRAGMA query_only = ON;", []).ok();
+            if let Ok(conn) = Self::open_reader_conn(db_path) {
                 let ready: i64 = conn
                     .query_row(
                         "SELECT count(*) FROM sqlite_master WHERE type = 'table' \
