@@ -623,8 +623,14 @@ function Invoke-InterruptPass {
     Write-Step "interrupt pass: '$($held.tool)' is held as approval $($held.id); killing the host tree"
 
     $killed = @()
-    foreach ($proc in @(Get-CimInstance Win32_Process -Filter "Name='kerna.exe'" |
-            Where-Object { $_.CommandLine -like "*source-interrupt-$tag*" })) {
+    # Select on the command line and accept any `kerna*` image name. A filter on
+    # the literal `kerna.exe` matches nothing when the run is pointed at a copied
+    # or renamed binary with -KernaBin, and the pass would then "interrupt" a
+    # session that kept running: the held action could still be decided after
+    # the window, so the proof would describe a live agent as a dead one.
+    foreach ($proc in @(Get-CimInstance Win32_Process |
+            Where-Object { $_.Name -like "kerna*" -and
+                $_.CommandLine -like "*source-interrupt-$tag*" })) {
         Invoke-SilentNative -FilePath "taskkill" -Arguments @("/T", "/F", "/PID", "$($proc.ProcessId)") | Out-Null
         $killed += $proc.ProcessId
     }
