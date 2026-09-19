@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -47,7 +48,8 @@ pub struct AppState {
     pub auth_token: Option<String>,
     pub route_mode: RouteMode,
     pub shadow_enabled: bool,
-    pub anthropic_api_key: Option<Arc<String>>,
+    pub anthropic_api_key: Option<Arc<Zeroizing<String>>>,
+    pub openai_api_key: Option<Arc<Zeroizing<String>>>,
     pub route_decisions: Arc<Mutex<HashMap<String, RouteDecision>>>,
 }
 
@@ -58,6 +60,15 @@ struct GuardStreamContext {
     agent: AgentKind,
     agent_version: String,
     worktree_baseline: String,
+}
+
+struct AnthropicRelayContext {
+    policy: Arc<GuardPolicy>,
+    memory: Arc<MemoryEngine>,
+    stream: GuardStreamContext,
+    decision: RouteDecision,
+    request_sha256: String,
+    started: std::time::Instant,
 }
 
 #[derive(Clone)]
@@ -144,9 +155,33 @@ fn error_response(status: StatusCode, message: impl Into<String>) -> axum::respo
 }
 
 pub async fn start_server(state: AppState, bind: &str, port: u16) -> anyhow::Result<()> {
+    // The bounded reviewer across the containment mount can only show the queue
+    // this process pushes for it, and the hold loop publishes while an action
+    // is actually held. An otherwise idle broker would therefore let the view
+    // age past its freshness window, and the reviewer would answer "no fresh
+    // view" at exactly the moment it should say "nothing is waiting". Keep it
+    // warm for the life of the server. The publisher is a no-op for a reviewer
+    // and for a run that shares nothing across a boundary.
+    let queue_publisher = state.memory.clone();
+    if queue_publisher.publishes_live_queue() {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let _ = queue_publisher.write_pending_snapshot();
+            }
+        });
+    }
     let app = Router::new()
         .route("/v1/chat/completions", post(handle_chat_completion))
         .route("/anthropic/v1/messages", post(handle_guard_anthropic))
+        .route(
+            "/native/anthropic/v1/messages",
+            post(handle_native_anthropic),
+        )
+        .route(
+            "/native/openai/v1/chat/completions",
+            post(handle_native_openai_chat),
+        )
         .route("/kerna/sandbox", post(handle_demo_sandbox))
         .route("/openai/v1/responses", post(handle_guard_openai))
         .with_state(state);
@@ -159,6 +194,132 @@ pub async fn start_server(state: AppState, bind: &str, port: u16) -> anyhow::Res
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn native_request_is_toolless(body: &Bytes) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .get("tools")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
+                && value.get("tool_choice").is_none()
+        })
+}
+
+async fn handle_native_anthropic(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    if !is_native_authorized(&state, &headers) {
+        return error_response(StatusCode::UNAUTHORIZED, "Invalid native session token");
+    }
+    if !native_request_is_toolless(&body) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Native ask broker accepts no tool authority",
+        );
+    }
+    let key = match state.anthropic_api_key.as_ref() {
+        Some(key) if !key.is_empty() => key.as_str(),
+        _ => return error_response(StatusCode::SERVICE_UNAVAILABLE, "Broker key unavailable"),
+    };
+    let target = "https://api.anthropic.com/v1/messages";
+    let validated = match crate::egress::cloud_client(
+        target,
+        &["api.anthropic.com"],
+        Duration::from_secs(10),
+        PROVIDER_REQUEST_TIMEOUT,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "Provider destination refused"),
+    };
+    let upstream = validated
+        .client
+        .post(validated.url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-api-key", key)
+        .header("anthropic-version", "2023-06-01")
+        .body(body)
+        .send()
+        .await;
+    native_upstream_response(upstream).await
+}
+
+async fn handle_native_openai_chat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    if !is_native_authorized(&state, &headers) {
+        return error_response(StatusCode::UNAUTHORIZED, "Invalid native session token");
+    }
+    if !native_request_is_toolless(&body) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Native ask broker accepts no tool authority",
+        );
+    }
+    let key = match state.openai_api_key.as_ref() {
+        Some(key) if !key.is_empty() => key.as_str(),
+        _ => return error_response(StatusCode::SERVICE_UNAVAILABLE, "Broker key unavailable"),
+    };
+    let target = "https://api.openai.com/v1/chat/completions";
+    let validated = match crate::egress::cloud_client(
+        target,
+        &["api.openai.com"],
+        Duration::from_secs(10),
+        PROVIDER_REQUEST_TIMEOUT,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "Provider destination refused"),
+    };
+    let upstream = validated
+        .client
+        .post(validated.url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .bearer_auth(key)
+        .body(body)
+        .send()
+        .await;
+    native_upstream_response(upstream).await
+}
+
+async fn native_upstream_response(
+    upstream: Result<reqwest::Response, reqwest::Error>,
+) -> axum::response::Response {
+    let upstream = match upstream {
+        Ok(value) if value.status().is_redirection() => {
+            return error_response(StatusCode::BAD_GATEWAY, "Provider redirect refused")
+        }
+        Ok(value) => value,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "Provider unavailable"),
+    };
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
+    let body = if status.is_success() {
+        Body::from_stream(upstream.bytes_stream())
+    } else {
+        match upstream.bytes().await {
+            Ok(body) => Body::from(body),
+            Err(_) => return error_response(StatusCode::BAD_GATEWAY, "Provider error unavailable"),
+        }
+    };
+    let mut response = axum::response::Response::new(body);
+    *response.status_mut() = status;
+    if let Some(content_type) = content_type {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, content_type);
+    }
+    response
 }
 
 async fn handle_demo_sandbox(
@@ -347,6 +508,10 @@ async fn handle_guard_anthropic(
             "Missing or invalid session token.",
         );
     }
+    // A reviewer across the containment boundary cannot write the evidence
+    // database, so a stop it requests arrives as a file. This is where such a
+    // request is noticed when no action happens to be held.
+    apply_incoming_decision_requests(&state.memory);
     let context = match start_guard_stream(&state, AgentKind::ClaudeCode, "anthropic_messages") {
         Ok(context) => context,
         Err(_) => {
@@ -433,15 +598,33 @@ async fn handle_guard_anthropic(
         .ok()
         .and_then(|payload| payload.get("stream").and_then(Value::as_bool))
         .unwrap_or(false);
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(PROVIDER_REQUEST_TIMEOUT)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-    let mut request = client
-        .post(provider_url(&base, "v1/messages"))
+    let target = provider_url(base, "v1/messages");
+    let validated = if decision.is_local() {
+        crate::egress::loopback_client(&target, Duration::from_secs(10), PROVIDER_REQUEST_TIMEOUT)
+            .await
+    } else {
+        crate::egress::cloud_client(
+            &target,
+            &["api.anthropic.com"],
+            Duration::from_secs(10),
+            PROVIDER_REQUEST_TIMEOUT,
+        )
+        .await
+    };
+    let validated = match validated {
+        Ok(validated) => validated,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "Anthropic destination was refused by Kerna egress policy.",
+            )
+        }
+    };
+    let mut request = validated
+        .client
+        .post(validated.url)
         .header(header::CONTENT_TYPE, "application/json")
-        .header("x-api-key", key)
+        .header("x-api-key", key.as_str())
         .header("anthropic-version", "2023-06-01")
         .body(routed_body);
     for name in ["anthropic-version", "anthropic-beta"] {
@@ -450,18 +633,20 @@ async fn handle_guard_anthropic(
         }
     }
     match request.send().await {
+        Ok(upstream) if upstream.status().is_redirection() => error_response(
+            StatusCode::BAD_GATEWAY,
+            "Anthropic redirect was refused by Kerna egress policy.",
+        ),
         Ok(upstream) => {
-            relay_anthropic(
-                upstream,
-                state.guard_policy,
-                state.memory,
-                context,
+            let relay = AnthropicRelayContext {
+                policy: state.guard_policy,
+                memory: state.memory,
+                stream: context,
                 decision,
                 request_sha256,
-                primary_started,
-                stream_requested,
-            )
-            .await
+                started: primary_started,
+            };
+            relay_anthropic(upstream, relay, stream_requested).await
         }
         Err(_) => {
             let _ = record_primary_runtime(
@@ -483,15 +668,14 @@ async fn handle_guard_anthropic(
 }
 
 async fn ollama_model_available(model: &str) -> bool {
-    let Ok(response) = reqwest::Client::new()
-        .get(format!(
-            "{}/api/tags",
-            crate::guard_routing::DEFAULT_LOCAL_BASE_URL
-        ))
-        .timeout(Duration::from_secs(2))
-        .send()
-        .await
+    let target = format!("{}/api/tags", crate::guard_routing::DEFAULT_LOCAL_BASE_URL);
+    let Ok(validated) =
+        crate::egress::loopback_client(&target, Duration::from_secs(2), Duration::from_secs(2))
+            .await
     else {
+        return false;
+    };
+    let Ok(response) = validated.client.get(validated.url).send().await else {
         return false;
     };
     let Ok(payload) = response.json::<Value>().await else {
@@ -547,20 +731,29 @@ fn spawn_local_shadow(
             Ok(body) => body,
             Err(_) => return,
         };
-        let result = reqwest::Client::new()
-            .post(provider_url(
-                crate::guard_routing::DEFAULT_LOCAL_BASE_URL,
-                "v1/messages",
-            ))
-            .header(header::CONTENT_TYPE, "application/json")
-            .header("x-api-key", "ollama")
-            .header("anthropic-version", "2023-06-01")
-            .body(shadow_body)
-            .timeout(Duration::from_secs(120))
-            .send()
-            .await;
+        let target = provider_url(crate::guard_routing::DEFAULT_LOCAL_BASE_URL, "v1/messages");
+        let validated = crate::egress::loopback_client(
+            &target,
+            Duration::from_secs(10),
+            Duration::from_secs(120),
+        )
+        .await;
+        let result = match validated {
+            Ok(validated) => Some(
+                validated
+                    .client
+                    .post(validated.url)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-api-key", "ollama")
+                    .header("anthropic-version", "2023-06-01")
+                    .body(shadow_body)
+                    .send()
+                    .await,
+            ),
+            Err(_) => None,
+        };
         let (status, digest, bytes) = match result {
-            Ok(response) => match response.bytes().await {
+            Some(Ok(response)) => match response.bytes().await {
                 Ok(output) => (
                     "completed",
                     format!("{:x}", Sha256::digest(&output)),
@@ -568,7 +761,7 @@ fn spawn_local_shadow(
                 ),
                 Err(_) => ("failed", String::new(), 0),
             },
-            Err(_) => ("failed", String::new(), 0),
+            Some(Err(_)) | None => ("failed", String::new(), 0),
         };
         let _ = memory.record(Event {
             event_id: Uuid::new_v4().to_string(),
@@ -666,8 +859,8 @@ async fn handle_guard_openai(
             "Missing or invalid session token.",
         );
     }
-    let key = match std::env::var("OPENAI_API_KEY") {
-        Ok(value) if !value.is_empty() => value,
+    let key = match state.openai_api_key.as_ref() {
+        Some(value) if !value.is_empty() => value.as_str().to_string(),
         _ => {
             return error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -677,12 +870,34 @@ async fn handle_guard_openai(
     };
     let base = std::env::var("KERNA_OPENAI_UPSTREAM")
         .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-    let request = reqwest::Client::new()
-        .post(provider_url(&base, "responses"))
+    let target = provider_url(&base, "responses");
+    let validated = match crate::egress::cloud_client(
+        &target,
+        &["api.openai.com"],
+        Duration::from_secs(10),
+        PROVIDER_REQUEST_TIMEOUT,
+    )
+    .await
+    {
+        Ok(validated) => validated,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "OpenAI destination was refused by Kerna egress policy.",
+            )
+        }
+    };
+    let request = validated
+        .client
+        .post(validated.url)
         .header(header::CONTENT_TYPE, "application/json")
         .bearer_auth(key)
         .body(body);
     match request.send().await {
+        Ok(upstream) if upstream.status().is_redirection() => error_response(
+            StatusCode::BAD_GATEWAY,
+            "OpenAI redirect was refused by Kerna egress policy.",
+        ),
         Ok(upstream) => relay_openai(upstream, state.guard_policy, state.memory),
         Err(_) => error_response(StatusCode::BAD_GATEWAY, "OpenAI upstream is unavailable."),
     }
@@ -789,6 +1004,7 @@ fn start_guard_stream(
     let agent_name = match agent {
         AgentKind::ClaudeCode => "claude_code",
         AgentKind::Codex => "codex",
+        AgentKind::KernaNative => "kerna_native",
     };
     let agent_version =
         std::env::var("KERNA_GUARD_AGENT_VERSION").unwrap_or_else(|_| "unknown".to_owned());
@@ -874,28 +1090,29 @@ fn upstream_response(
 
 async fn relay_anthropic(
     mut upstream: reqwest::Response,
-    policy: Arc<GuardPolicy>,
-    memory: Arc<MemoryEngine>,
-    context: GuardStreamContext,
-    decision: RouteDecision,
-    request_sha256: String,
-    started: std::time::Instant,
+    relay: AnthropicRelayContext,
     stream_requested: bool,
 ) -> axum::response::Response {
+    let AnthropicRelayContext {
+        policy,
+        memory,
+        stream: context,
+        decision,
+        request_sha256,
+        started,
+    } = relay;
     let status = upstream.status();
     let request_id = upstream.headers().get("request-id").cloned();
     if !stream_requested {
-        return relay_anthropic_json(
-            upstream,
+        let relay = AnthropicRelayContext {
             policy,
             memory,
-            context,
+            stream: context,
             decision,
             request_sha256,
             started,
-            request_id,
-        )
-        .await;
+        };
+        return relay_anthropic_json(upstream, relay, request_id).await;
     }
 
     // Do not open a successful-looking SSE response until the provider has
@@ -993,19 +1210,23 @@ async fn relay_anthropic(
 }
 
 /// Claude Code retries a broken Messages SSE connection once with a normal JSON
-/// response. Preserve that retry shape exactly for ordinary text responses.
-/// A non-streaming tool action cannot be paused for an approval, so it fails
-/// closed rather than ever reaching the agent client.
+/// response. Preserve that retry shape exactly for ordinary text responses, and
+/// govern a tool action in it with the same digest-bound receipt gate as the
+/// streaming path: the response completes only after the approval decision, and
+/// an action that is denied, expired, or unresolved never reaches the client.
 async fn relay_anthropic_json(
     upstream: reqwest::Response,
-    policy: Arc<GuardPolicy>,
-    memory: Arc<MemoryEngine>,
-    context: GuardStreamContext,
-    decision: RouteDecision,
-    request_sha256: String,
-    started: std::time::Instant,
+    relay: AnthropicRelayContext,
     request_id: Option<HeaderValue>,
 ) -> axum::response::Response {
+    let AnthropicRelayContext {
+        policy,
+        memory,
+        stream: context,
+        decision,
+        request_sha256,
+        started,
+    } = relay;
     let status = upstream.status();
     let content_type = upstream
         .headers()
@@ -1032,61 +1253,24 @@ async fn relay_anthropic_json(
         }
     };
     let mut body = body.to_vec();
-    let mut contains_tool_use = false;
-    let mut denied_tool_use = false;
-    let mut held_tool_use = false;
+    let mut summary = BufferedGateSummary::default();
     if let Ok(mut payload) = serde_json::from_slice::<Value>(&body) {
         if let Some(blocks) = payload.get_mut("content").and_then(Value::as_array_mut) {
-            let mut rewritten = Vec::with_capacity(blocks.len());
-            for block in blocks.iter() {
-                if block.get("type").and_then(Value::as_str) != Some("tool_use") {
-                    rewritten.push(block.clone());
-                    continue;
-                }
-                contains_tool_use = true;
-                let action = crate::guard_protocol::ActionCandidate {
-                    protocol: crate::guard_protocol::Protocol::AnthropicMessages,
-                    id: block
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown-tool-call")
-                        .to_owned(),
-                    raw_tool_name: block
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_owned(),
-                    arguments: block.get("input").cloned().unwrap_or_else(|| json!({})),
-                };
-                match stream_policy_decision_with_receipt(&policy, &memory, &context, &action) {
-                    crate::guard_protocol::GateDecision::Allow => rewritten.push(block.clone()),
-                    crate::guard_protocol::GateDecision::Deny { reason } => {
-                        denied_tool_use = true;
-                        rewritten.push(json!({
-                            "type": "text",
-                            "text": format!(
-                                "[blocked by Kerna policy] {} was not released: {}",
-                                action.raw_tool_name, reason
-                            )
-                        }));
-                    }
-                    crate::guard_protocol::GateDecision::Hold => {
-                        held_tool_use = true;
-                        rewritten.push(block.clone());
-                    }
-                }
-            }
-            if denied_tool_use && !held_tool_use {
-                *blocks = rewritten;
+            let (rewritten, gate) =
+                gate_buffered_tool_actions(std::mem::take(blocks), &policy, &memory, &context)
+                    .await;
+            *blocks = rewritten;
+            if gate.blocked {
                 payload["stop_reason"] = Value::String("end_turn".to_owned());
                 if let Ok(rewritten_body) = serde_json::to_vec(&payload) {
                     body = rewritten_body;
                 }
             }
+            summary = gate;
         }
     }
     let output_sha256 = format!("{:x}", Sha256::digest(&body));
-    let runtime_status = if status.is_success() && (!contains_tool_use || denied_tool_use) {
+    let runtime_status = if status.is_success() && !summary.undecided {
         "completed"
     } else {
         "failed"
@@ -1102,12 +1286,6 @@ async fn relay_anthropic_json(
         body.len(),
     );
     let _ = memory.finish_gateway_session(&context.session_id);
-    if contains_tool_use && !denied_tool_use {
-        return error_response(
-            StatusCode::CONFLICT,
-            "Kerna requires streaming for a tool-capable Anthropic response; the action was not released.",
-        );
-    }
     let mut response = axum::response::Response::new(Body::from(body));
     *response.status_mut() =
         StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -1120,6 +1298,81 @@ async fn relay_anthropic_json(
             .insert(HeaderName::from_static("request-id"), request_id);
     }
     response
+}
+
+/// Outcome of gating a buffered Messages response.
+#[derive(Debug, Default)]
+struct BufferedGateSummary {
+    /// An action reached a terminal decision without being released.
+    blocked: bool,
+    /// An action's approval never resolved, so its outcome is unknown.
+    undecided: bool,
+}
+
+/// Applies the receipt-bound gate to every action in a buffered Messages
+/// response. A held action waits for its decision exactly as the streaming
+/// relay does, so the provider's turn only completes once the approval is
+/// recorded, and an action that is denied, expired, or unresolved is replaced
+/// by its notice instead of reaching the agent client.
+async fn gate_buffered_tool_actions(
+    blocks: Vec<Value>,
+    policy: &GuardPolicy,
+    memory: &MemoryEngine,
+    context: &GuardStreamContext,
+) -> (Vec<Value>, BufferedGateSummary) {
+    let mut summary = BufferedGateSummary::default();
+    let mut rewritten = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+            rewritten.push(block);
+            continue;
+        }
+        let action = crate::guard_protocol::ActionCandidate {
+            protocol: crate::guard_protocol::Protocol::AnthropicMessages,
+            id: block
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown-tool-call")
+                .to_owned(),
+            raw_tool_name: block
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned(),
+            arguments: block.get("input").cloned().unwrap_or_else(|| json!({})),
+        };
+        let gate = match stream_policy_decision_with_receipt(policy, memory, context, &action) {
+            crate::guard_protocol::GateDecision::Hold => {
+                wait_for_stream_approval(memory, policy, context, &action).await
+            }
+            decided => decided,
+        };
+        match gate {
+            crate::guard_protocol::GateDecision::Allow => rewritten.push(block),
+            crate::guard_protocol::GateDecision::Deny { reason } => {
+                summary.blocked = true;
+                rewritten.push(json!({
+                    "type": "text",
+                    "text": format!(
+                        "[blocked by Kerna policy] {} was not released: {}",
+                        action.raw_tool_name, reason
+                    )
+                }));
+            }
+            crate::guard_protocol::GateDecision::Hold => {
+                summary.blocked = true;
+                summary.undecided = true;
+                rewritten.push(json!({
+                    "type": "text",
+                    "text": format!(
+                        "[blocked by Kerna policy] {} was not released: the approval did not resolve",
+                        action.raw_tool_name
+                    )
+                }));
+            }
+        }
+    }
+    (rewritten, summary)
 }
 
 fn relay_openai(
@@ -1219,6 +1472,7 @@ fn guard_binding(
     let agent = match context.agent {
         AgentKind::ClaudeCode => "claude_code",
         AgentKind::Codex => "codex",
+        AgentKind::KernaNative => "kerna_native",
     };
     let policy_digest = policy.digest();
     let canonical_action_digest = intent.canonical_digest();
@@ -1313,13 +1567,30 @@ fn stream_policy_decision_with_receipt(
                 reason: "denied by Kerna policy".to_owned(),
             }
         }
-        Ok(_) => crate::guard_protocol::GateDecision::Deny {
-            reason: "approval persistence is unavailable".to_owned(),
-        },
-        Err(_) => crate::guard_protocol::GateDecision::Deny {
-            reason: "approval persistence is unavailable".to_owned(),
-        },
+        Ok(outcome) => {
+            log_persistence_failure(
+                "create",
+                &binding.call_id,
+                format!("unexpected outcome {outcome:?}"),
+            );
+            crate::guard_protocol::GateDecision::Deny {
+                reason: "approval persistence is unavailable".to_owned(),
+            }
+        }
+        Err(error) => {
+            log_persistence_failure("create", &binding.call_id, error);
+            crate::guard_protocol::GateDecision::Deny {
+                reason: "approval persistence is unavailable".to_owned(),
+            }
+        }
     }
+}
+
+/// A gate that fails closed must still explain itself on the trusted side. The
+/// client keeps receiving the generic refusal, because a storage error is not a
+/// reason to leak a path or driver detail into agent-visible prose.
+fn log_persistence_failure(stage: &str, call_id: &str, detail: impl std::fmt::Display) {
+    eprintln!("[!] Kerna receipt {stage} failed for action {call_id}: {detail}");
 }
 
 fn wp0_smoke_command(action: &crate::guard_protocol::ActionCandidate) -> Option<&str> {
@@ -1335,6 +1606,89 @@ fn wp0_smoke_command(action: &crate::guard_protocol::ActionCandidate) -> Option<
     }
 }
 
+/// One reviewer's instruction to the process that actually owns the evidence
+/// database, left in the spool beside that database.
+///
+/// Only a reviewer on the far side of the containment boundary needs this. It
+/// opens the database read-only, because a second SQLite connection there could
+/// roll back the broker's in-flight journal and silently revert committed
+/// receipts; a read-only connection cannot write a decision, so the decision
+/// travels as a file instead, and the broker applies it through the same
+/// expiry-, digest- and session-bound checks it would use for a local click.
+#[derive(Serialize, Deserialize)]
+struct DecisionRequest {
+    kind: String,
+    id: String,
+    #[serde(default)]
+    approved: Option<bool>,
+    submitted_at: String,
+}
+
+/// Hand one decision to the broker. Written to a throwaway name and renamed
+/// into place so the broker never observes a half-written request.
+fn submit_decision_request(memory: &MemoryEngine, request: &DecisionRequest) -> anyhow::Result<()> {
+    let spool = memory.decision_spool();
+    std::fs::create_dir_all(&spool)?;
+    let token = Uuid::new_v4().to_string();
+    let staged = spool.join(format!("{token}.part"));
+    let final_path = spool.join(format!("{token}.json"));
+    std::fs::write(&staged, serde_json::to_vec(request)?)?;
+    std::fs::rename(&staged, &final_path)?;
+    Ok(())
+}
+
+/// Apply whatever decisions a read-only reviewer has left, from the writer's
+/// side of the boundary. Best effort by design: an unparseable or partially
+/// landed file is simply revisited on the next poll, and a file whose approval
+/// has already been decided or expired is rejected by `decide_guard_approval`
+/// itself, so replaying the spool cannot honour a decision twice.
+fn apply_incoming_decision_requests(memory: &MemoryEngine) {
+    let Ok(entries) = std::fs::read_dir(memory.decision_spool()) else {
+        return;
+    };
+    let mut applied = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|name| name.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(request) = serde_json::from_str::<DecisionRequest>(&text) else {
+            continue;
+        };
+        let outcome = match request.kind.as_str() {
+            "decide_approval" => match request.approved {
+                Some(approved) => memory.decide_guard_approval(&request.id, approved).or_else(
+                    |error| match memory.decide_pending_approval(&request.id, approved) {
+                        Ok(decided) => Ok(decided),
+                        Err(_) => Err(error),
+                    },
+                ),
+                None => Ok(false),
+            },
+            "stop_session" => memory.stop_gateway_session(&request.id),
+            _ => Ok(false),
+        };
+        if let Err(error) = outcome {
+            log_persistence_failure("decision", &request.id, error);
+        }
+        // The reviewer's files are inert once applied, so a failed unlink here
+        // cannot honour anything twice; the launcher removes the spool with the
+        // rest of the session state.
+        let _ = std::fs::remove_file(&path);
+        applied = true;
+    }
+    // A decision the reviewer left can land while no action is held for
+    // approval, so the hold-tick publication above would not push the queue
+    // again for a while. Republish here to stop the reviewer showing an
+    // approval this process has already honoured or refused.
+    if applied {
+        let _ = memory.write_pending_snapshot();
+    }
+}
+
 async fn wait_for_stream_approval(
     memory: &MemoryEngine,
     policy: &GuardPolicy,
@@ -1345,13 +1699,30 @@ async fn wait_for_stream_approval(
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
     let approval_id = match memory.guard_approval_for_call(&binding.session_id, &binding.call_id) {
         Ok(Some(id)) => id,
-        Ok(None) | Err(_) => {
+        Ok(None) => {
+            log_persistence_failure(
+                "lookup",
+                &binding.call_id,
+                "no approval row for a held action",
+            );
             return crate::guard_protocol::GateDecision::Deny {
                 reason: "approval persistence is unavailable".to_owned(),
-            }
+            };
+        }
+        Err(error) => {
+            log_persistence_failure("lookup", &binding.call_id, error);
+            return crate::guard_protocol::GateDecision::Deny {
+                reason: "approval persistence is unavailable".to_owned(),
+            };
         }
     };
     loop {
+        // A reviewer across the containment boundary decides by leaving a file
+        // for this process, because its own database handle is read-only.
+        apply_incoming_decision_requests(memory);
+        // And this process is the only one entitled to describe the queue, so
+        // it pushes a fresh view for the reviewer on every hold tick.
+        let _ = memory.write_pending_snapshot();
         if matches!(
             memory.gateway_session_state(&binding.session_id),
             Ok(Some(state)) if state == "stopped"
@@ -1365,33 +1736,57 @@ async fn wait_for_stream_approval(
             Ok(Some(true)) => {
                 return match memory.release_guard_action(&binding) {
                     Ok(true) => crate::guard_protocol::GateDecision::Allow,
-                    Ok(false) | Err(_) => crate::guard_protocol::GateDecision::Deny {
+                    Ok(false) => crate::guard_protocol::GateDecision::Deny {
                         reason: "approval was not valid for this Claude action".to_owned(),
                     },
+                    Err(error) => {
+                        log_persistence_failure("release", &binding.call_id, error);
+                        crate::guard_protocol::GateDecision::Deny {
+                            reason: "approval was not valid for this Claude action".to_owned(),
+                        }
+                    }
                 }
             }
             Ok(Some(false)) => {
-                let receipt_ok = memory.deny_guard_action(&binding).unwrap_or(false);
-                return crate::guard_protocol::GateDecision::Deny {
-                    reason: if receipt_ok {
-                        "denied by local approval".to_owned()
-                    } else {
-                        "approval receipt persistence is unavailable".to_owned()
+                return match memory.deny_guard_action(&binding) {
+                    Ok(true) => crate::guard_protocol::GateDecision::Deny {
+                        reason: "denied by local approval".to_owned(),
                     },
-                };
+                    Ok(false) => {
+                        log_persistence_failure(
+                            "denial",
+                            &binding.call_id,
+                            "the denial receipt did not commit",
+                        );
+                        crate::guard_protocol::GateDecision::Deny {
+                            reason: "approval receipt persistence is unavailable".to_owned(),
+                        }
+                    }
+                    Err(error) => {
+                        log_persistence_failure("denial", &binding.call_id, error);
+                        crate::guard_protocol::GateDecision::Deny {
+                            reason: "approval receipt persistence is unavailable".to_owned(),
+                        }
+                    }
+                }
             }
             Ok(None) if tokio::time::Instant::now() >= deadline => {
                 let _ = memory.expire_guard_approval(&binding);
                 let _ = memory.deny_guard_action(&binding);
+                // Nothing else will publish on this action's behalf now that the
+                // hold loop is leaving, so take the expired row out of the
+                // reviewer's view rather than offering a dead approval.
+                let _ = memory.write_pending_snapshot();
                 return crate::guard_protocol::GateDecision::Deny {
                     reason: "approval expired".to_owned(),
                 };
             }
             Ok(None) => tokio::time::sleep(Duration::from_millis(250)).await,
-            Err(_) => {
+            Err(error) => {
+                log_persistence_failure("decision", &binding.call_id, error);
                 return crate::guard_protocol::GateDecision::Deny {
                     reason: "approval persistence is unavailable".to_owned(),
-                }
+                };
             }
         }
     }
@@ -1460,6 +1855,20 @@ fn approval_summary(action: &crate::guard_protocol::ActionCandidate) -> String {
     .to_string()
 }
 
+/// A reviewer across the containment boundary reads the evidence database
+/// through a handle whose cached pages are never invalidated by the broker's
+/// commits, because SQLite's advisory locks do not cross the mount
+/// translation. Reopen that handle before every dashboard request so each
+/// read starts from the file the OS can actually show up to date.
+async fn refresh_reviewer_evidence_view(
+    State(state): State<DashboardState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    state.app.memory.refresh_reviewer_handle();
+    next.run(request).await
+}
+
 /// Start the local-only observability surface. It reads durable SQLite records
 /// written by every gateway process, so opening the dashboard does not require
 /// a separate daemon or a client-specific integration.
@@ -1507,7 +1916,11 @@ pub async fn start_dashboard_server(
             "/api/v1/dashboard/approvals/:id/reject",
             post(reject_dashboard_approval),
         )
-        .with_state(dashboard.clone());
+        .with_state(dashboard.clone())
+        .layer(axum::middleware::from_fn_with_state(
+            dashboard.clone(),
+            refresh_reviewer_evidence_view,
+        ));
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     println!("[+] Kerna dashboard listening on http://{}/", addr);
     println!("[i] Local dashboard CSRF token: {}", dashboard.csrf_token);
@@ -1633,6 +2046,21 @@ async fn stop_dashboard_session(
 ) -> axum::response::Response {
     if !dashboard_mutation_is_authorized(&state, &headers) {
         return error_response(StatusCode::FORBIDDEN, "Dashboard CSRF validation failed.");
+    }
+    if state.app.memory.is_reviewer() {
+        let request = DecisionRequest {
+            kind: "stop_session".to_owned(),
+            id: id.clone(),
+            approved: None,
+            submitted_at: chrono::Utc::now().to_rfc3339(),
+        };
+        return match submit_decision_request(&state.app.memory, &request) {
+            Ok(()) => Json(json!({"ok": true, "status": "submitted"})).into_response(),
+            Err(error) => error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("the stop request could not be handed to the contained broker: {error}"),
+            ),
+        };
     }
     match state.app.memory.stop_gateway_session(&id) {
         Ok(true) => Json(json!({"ok": true, "status": "stopped"})).into_response(),
@@ -1888,11 +2316,52 @@ async fn dashboard_receipts(State(state): State<DashboardState>) -> Json<Value> 
     Json(json!({"receipts": state.app.memory.recent_tool_call_receipts(100).unwrap_or_default()}))
 }
 
-async fn dashboard_approvals(State(state): State<DashboardState>) -> Json<Value> {
-    let approvals = state
-        .app
-        .memory
-        .list_pending_approvals()
+/// The approval queue is the one read whose empty answer must never be a guess.
+/// A storage fault rendered as `{"approvals": []}` tells a reviewer there is
+/// nothing waiting when a held action may exist, and it tells an automated
+/// rehearsal that the control plane is healthy while it proves nothing. So a
+/// failed read is reported as a fault, not as an empty queue.
+async fn dashboard_approvals(State(state): State<DashboardState>) -> axum::response::Response {
+    // Across the containment boundary this read is made on a handle that is
+    // deliberately read-only. While the broker has a transaction in flight,
+    // SQLite will not let such a connection roll back the journal it cannot
+    // touch, and that refusal arrives here as a read error. Retrying is the
+    // honest response; serving `{"approvals": []}` for a read that never
+    // happened would tell a reviewer that nothing is waiting.
+    let mut pending: Option<Vec<(String, String, String, String)>> = None;
+    if state.app.memory.is_reviewer() {
+        // The reviewer's own reads cannot be trusted across the mount (see
+        // `MemoryEngine::write_pending_snapshot`), so the queue it shows comes
+        // from a view the broker itself pushed. No fresh view is a fault, not
+        // an empty queue.
+        pending = read_broker_pending_view(&state.app.memory.evidence_view_path());
+        if pending.is_none() {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the contained broker has not published a fresh approval view; the queue cannot be shown",
+            );
+        }
+    } else {
+        for attempt in 0..10 {
+            match state.app.memory.list_pending_approvals() {
+                Ok(rows) => {
+                    pending = Some(rows);
+                    break;
+                }
+                Err(error) => {
+                    if attempt == 9 {
+                        log_persistence_failure("approval queue read", "-", &error);
+                        return error_response(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "the approval queue could not be read",
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
+    let approvals = pending
         .unwrap_or_default()
         .into_iter()
         .map(|(id, task_id, tool, args_json)| {
@@ -1901,7 +2370,41 @@ async fn dashboard_approvals(State(state): State<DashboardState>) -> Json<Value>
             json!({"id": id, "task_id": task_id, "tool": tool, "arguments": arguments})
         })
         .collect::<Vec<_>>();
-    Json(json!({"approvals": approvals}))
+    Json(json!({"approvals": approvals})).into_response()
+}
+
+/// Read the approval view the contained broker pushed beside the database.
+/// A missing, unparseable, or stale view is `None`, which the caller must
+/// surface as a fault rather than as an empty queue.
+fn read_broker_pending_view(
+    path: &std::path::Path,
+) -> Option<Vec<(String, String, String, String)>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc: Value = serde_json::from_str(&text).ok()?;
+    let written = doc.get("written_at_unix")?.as_u64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_micros()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    if now.saturating_sub(written) > 15_000_000 {
+        return None;
+    }
+    Some(
+        doc.get("approvals")?
+            .as_array()?
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    row.get("id")?.as_str()?.to_owned(),
+                    row.get("task_id")?.as_str()?.to_owned(),
+                    row.get("tool")?.as_str()?.to_owned(),
+                    row.get("args_json")?.as_str()?.to_owned(),
+                ))
+            })
+            .collect(),
+    )
 }
 
 async fn dashboard_containment(State(state): State<DashboardState>) -> Json<Value> {
@@ -2032,6 +2535,21 @@ fn decide_dashboard_approval(
 ) -> axum::response::Response {
     if !dashboard_mutation_is_authorized(&state, &headers) {
         return error_response(StatusCode::FORBIDDEN, "Dashboard CSRF validation failed.");
+    }
+    if state.app.memory.is_reviewer() {
+        let request = DecisionRequest {
+            kind: "decide_approval".to_owned(),
+            id: id.clone(),
+            approved: Some(approved),
+            submitted_at: chrono::Utc::now().to_rfc3339(),
+        };
+        return match submit_decision_request(&state.app.memory, &request) {
+            Ok(()) => Json(json!({"ok": true, "status": "submitted"})).into_response(),
+            Err(error) => error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("the decision could not be handed to the contained broker: {error}"),
+            ),
+        };
     }
     let decision = match state.app.memory.decide_guard_approval(&id, approved) {
         Ok(true) => Ok(true),
@@ -2284,6 +2802,19 @@ fn is_authorized(state: &AppState, headers: &HeaderMap) -> bool {
     !presented.is_empty() && presented == expected
 }
 
+fn is_native_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    if is_authorized(state, headers) {
+        return true;
+    }
+    let Some(expected) = &state.auth_token else {
+        return true;
+    };
+    headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|presented| !presented.is_empty() && presented == expected)
+}
+
 async fn handle_chat_completion(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2380,6 +2911,7 @@ mod tests {
                 route_mode: route,
                 shadow_enabled: true,
                 anthropic_api_key: None,
+                openai_api_key: None,
                 route_decisions: Arc::new(Mutex::new(HashMap::new())),
             };
             let args = json!({"backend":if route==RouteMode::Local{"wasmer"}else{"tenki"},"language":"python","code":"import os; print(os.environ)","timeout_ms":10000});
@@ -2461,6 +2993,7 @@ mod tests {
                 route_mode: RouteMode::Cloud,
                 shadow_enabled: false,
                 anthropic_api_key: None,
+                openai_api_key: None,
                 route_decisions: Arc::new(Mutex::new(HashMap::new())),
             },
             csrf_token: "csrf".to_string(),
@@ -2487,6 +3020,7 @@ mod tests {
                 route_mode: RouteMode::Cloud,
                 shadow_enabled: false,
                 anthropic_api_key: None,
+                openai_api_key: None,
                 route_decisions: Arc::new(Mutex::new(HashMap::new())),
             },
             csrf_token: "one-time-token".to_string(),
@@ -2545,6 +3079,23 @@ mod tests {
     }
 
     #[test]
+    fn native_model_plane_accepts_only_well_formed_toolless_requests() {
+        assert!(native_request_is_toolless(&Bytes::from_static(
+            br#"{"model":"claude-test","stream":true}"#
+        )));
+        assert!(native_request_is_toolless(&Bytes::from_static(
+            br#"{"model":"claude-test","tools":[]}"#
+        )));
+        assert!(!native_request_is_toolless(&Bytes::from_static(
+            br#"{"model":"claude-test","tools":[{"name":"shell"}]}"#
+        )));
+        assert!(!native_request_is_toolless(&Bytes::from_static(
+            br#"{"model":"claude-test","tool_choice":"none"}"#
+        )));
+        assert!(!native_request_is_toolless(&Bytes::from_static(b"{")));
+    }
+
+    #[test]
     fn worktree_baseline_digest_is_nonempty_and_state_bound() {
         let root = std::path::Path::new("C:/workspace");
         let baseline = worktree_baseline_digest(root, "C:/workspace", "abc123", "", "", "");
@@ -2586,6 +3137,116 @@ mod tests {
             stream_policy_decision(&policy, &action),
             crate::guard_protocol::GateDecision::Hold
         );
+    }
+
+    #[tokio::test]
+    async fn a_held_buffered_action_survives_only_after_its_approval_lands() {
+        let path = std::env::temp_dir().join(format!("kerna-buffered-gate-{}.db", Uuid::new_v4()));
+        let memory = Arc::new(MemoryEngine::new(&path).unwrap());
+        let task_id = Uuid::new_v4();
+        memory
+            .create_task(task_id, None, "buffered gate test")
+            .unwrap();
+        let context = GuardStreamContext {
+            session_id: "guard-buffered-test".to_owned(),
+            task_id: task_id.to_string(),
+            agent: AgentKind::ClaudeCode,
+            agent_version: "test".to_owned(),
+            worktree_baseline: "sha256:test".to_owned(),
+        };
+        let policy = GuardPolicy::from_legacy_permissions(
+            &[crate::config::PermissionRule {
+                tool: "Bash".to_owned(),
+                action: "require_confirmation".to_owned(),
+            }],
+            PolicyEffect::Deny,
+        );
+        let blocks = vec![json!({
+            "type": "tool_use",
+            "id": "toolu_buffered_test",
+            "name": "Bash",
+            "input": { "command": "printf KernaRehearsalMarker" }
+        })];
+
+        let deciding = memory.clone();
+        let decider = tokio::spawn(async move {
+            for _ in 0..200 {
+                if let Ok(Some(id)) =
+                    deciding.guard_approval_for_call("guard-buffered-test", "toolu_buffered_test")
+                {
+                    deciding.decide_guard_approval(&id, true).unwrap();
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("the buffered gate never recorded the held action");
+        });
+
+        let (released, summary) = tokio::time::timeout(
+            Duration::from_secs(5),
+            gate_buffered_tool_actions(blocks, &policy, &memory, &context),
+        )
+        .await
+        .expect("an approved action must complete the buffered response");
+        decider.await.unwrap();
+
+        assert!(!summary.blocked, "an approved action is not blocked");
+        assert_eq!(released[0]["name"], "Bash");
+        let released_receipt = memory
+            .recent_tool_call_receipts(50)
+            .unwrap()
+            .into_iter()
+            .find(|receipt| {
+                receipt.session_id == "guard-buffered-test"
+                    && receipt.call_id == "toolu_buffered_test"
+            })
+            .expect("the held action must have a receipt");
+        assert_eq!(
+            released_receipt.result_class.as_deref(),
+            Some("released"),
+            "the response only completes once the release receipt commits"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn a_denied_buffered_action_is_replaced_by_its_notice() {
+        let path = std::env::temp_dir().join(format!("kerna-buffered-deny-{}.db", Uuid::new_v4()));
+        let memory = Arc::new(MemoryEngine::new(&path).unwrap());
+        let task_id = Uuid::new_v4();
+        memory
+            .create_task(task_id, None, "buffered deny test")
+            .unwrap();
+        let context = GuardStreamContext {
+            session_id: "guard-buffered-deny".to_owned(),
+            task_id: task_id.to_string(),
+            agent: AgentKind::ClaudeCode,
+            agent_version: "test".to_owned(),
+            worktree_baseline: "sha256:test".to_owned(),
+        };
+        let policy = GuardPolicy::from_legacy_permissions(&[], PolicyEffect::Deny);
+
+        let (rewritten, summary) = gate_buffered_tool_actions(
+            vec![json!({
+                "type": "tool_use",
+                "id": "toolu_buffered_deny",
+                "name": "Bash",
+                "input": { "command": "curl http://example.invalid" }
+            })],
+            &policy,
+            &memory,
+            &context,
+        )
+        .await;
+
+        assert!(summary.blocked);
+        assert!(!summary.undecided, "a policy denial is a terminal decision");
+        assert_eq!(rewritten[0]["type"], "text");
+        assert!(rewritten[0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("[blocked by Kerna policy]"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
@@ -2643,6 +3304,98 @@ mod tests {
         ));
         drop(memory);
         std::fs::remove_file(path).unwrap();
+    }
+
+    /// The reviewer on the far side of the containment boundary is allowed to
+    /// read evidence and is never allowed to write it, because a second SQLite
+    /// connection there could roll back the broker's in-flight journal and
+    /// revert receipts that were already committed. This test pins both halves
+    /// of that contract: the reviewer's handle cannot decide an approval, and
+    /// the decision the reviewer leaves as a file still wakes the waiting
+    /// stream through the broker's own checks.
+    #[tokio::test]
+    async fn a_reviewer_decides_by_a_file_and_never_by_writing_evidence() {
+        let dir = std::env::temp_dir().join(format!("kerna-reviewer-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("evidence.db");
+        let writer = Arc::new(MemoryEngine::new(&path).unwrap());
+        let task_id = Uuid::new_v4();
+        writer
+            .create_task(task_id, None, "reviewer spool test")
+            .unwrap();
+        let context = GuardStreamContext {
+            session_id: "guard-reviewer-test".to_owned(),
+            task_id: task_id.to_string(),
+            agent: AgentKind::ClaudeCode,
+            agent_version: "test".to_owned(),
+            worktree_baseline: "sha256:test".to_owned(),
+        };
+        let action = crate::guard_protocol::ActionCandidate {
+            protocol: crate::guard_protocol::Protocol::AnthropicMessages,
+            id: "toolu_reviewer_test".to_owned(),
+            raw_tool_name: "secret_probe".to_owned(),
+            arguments: json!({}),
+        };
+        let policy = GuardPolicy::from_legacy_permissions(
+            &[crate::config::PermissionRule {
+                tool: "secret_probe".to_owned(),
+                action: "require_confirmation".to_owned(),
+            }],
+            PolicyEffect::Deny,
+        );
+        let (_, binding) = guard_binding(&policy, &context, &action);
+        let approval_id = writer
+            .create_guard_action(&binding, "ask", "{}", true)
+            .unwrap()
+            .unwrap();
+        writer.write_pending_snapshot().unwrap();
+        let view = read_broker_pending_view(&writer.evidence_view_path())
+            .expect("the broker must be able to publish its own queue view");
+        assert!(
+            view.iter().any(|row| row.0 == approval_id),
+            "the pushed view must contain the held approval"
+        );
+
+        std::env::set_var("KERNA_DB_READER", "1");
+        let reviewer = MemoryEngine::new(&path).unwrap();
+        std::env::remove_var("KERNA_DB_READER");
+        assert!(reviewer.is_reviewer());
+        let refused = reviewer.decide_guard_approval(&approval_id, true);
+        assert!(
+            refused.is_err(),
+            "a read-only reviewer handle must not mutate a receipt: {refused:?}"
+        );
+
+        let submitted = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            submit_decision_request(
+                &reviewer,
+                &DecisionRequest {
+                    kind: "decide_approval".to_owned(),
+                    id: approval_id,
+                    approved: Some(true),
+                    submitted_at: chrono::Utc::now().to_rfc3339(),
+                },
+            )
+            .unwrap();
+        });
+        let decision = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_stream_approval(&writer, &policy, &context, &action),
+        )
+        .await
+        .expect("a decision left by a reviewer must wake the stream");
+        submitted.await.unwrap();
+        assert!(
+            matches!(decision, crate::guard_protocol::GateDecision::Allow),
+            "the reviewer's approval must release the action, got {decision:?}"
+        );
+        let leftovers = std::fs::read_dir(writer.decision_spool())
+            .map(|entries| entries.flatten().count())
+            .unwrap_or(usize::MAX);
+        assert_eq!(leftovers, 0, "the broker must consume the reviewer's spool");
+        drop(writer);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

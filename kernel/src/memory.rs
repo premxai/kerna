@@ -7,8 +7,39 @@ use std::path::Path;
 use std::sync::Mutex;
 use uuid::Uuid;
 
+type GuardApprovalRow = (
+    Option<String>,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+);
+
+type ReleasedGuardReceiptRow = (
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    String,
+    Option<String>,
+);
+
 pub struct MemoryEngine {
     conn: Mutex<Connection>,
+    /// The file this handle was opened on. Reviewers that share the file across
+    /// the containment boundary need it to locate the decision spool beside it.
+    db_path: std::path::PathBuf,
+    /// True when this process may only read the evidence database.
+    reader: bool,
 }
 
 /// Durable lifecycle row for one stdio MCP connection. This is separate from
@@ -78,6 +109,13 @@ impl MemoryEngine {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
+        let shared_flag = std::env::var_os("KERNA_DB_SHARED");
+        let shared = shared_flag.as_deref() == Some(std::ffi::OsStr::new("1"));
+        let reader_flag = std::env::var_os("KERNA_DB_READER");
+        let reader = reader_flag.as_deref() == Some(std::ffi::OsStr::new("1"));
+        if reader {
+            return Self::new_reader(db_path.as_ref());
+        }
         let conn = match Connection::open(&db_path) {
             Ok(c) => c,
             Err(e) => {
@@ -88,15 +126,255 @@ impl MemoryEngine {
             }
         };
 
-        // Enable foreign keys and WAL mode for concurrency
+        // Foreign keys always; the journal mode depends on who else can see the file.
         conn.execute("PRAGMA foreign_keys = ON;", [])?;
-        let _ = conn.query_row("PRAGMA journal_mode = WAL;", [], |_row| Ok(()));
+        let busy_timeout = if shared { "30000" } else { "5000" };
+        conn.execute(&format!("PRAGMA busy_timeout = {busy_timeout};"), [])
+            .ok();
+        let journal_mode = Self::db_journal_mode(shared_flag.as_deref());
+        // `PRAGMA journal_mode = <mode>` answers with the mode it settled on, so
+        // the same call sets it and proves it. Journal mode is not persistent
+        // across connections the way WAL is, so reading it back from a *second*
+        // handle would prove nothing about this one.
+        let applied = conn
+            .query_row(
+                &format!("PRAGMA journal_mode = {journal_mode};"),
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_default();
+        if !applied.eq_ignore_ascii_case(journal_mode) {
+            eprintln!(
+                "[!] Kerna evidence database reports journal mode '{applied}', not \
+                 '{journal_mode}'. Across the containment boundary that means the reviewer's \
+                 dashboard may not see receipts this process commits."
+            );
+        }
+        if journal_mode == "DELETE" || journal_mode == "TRUNCATE" {
+            // A reader on the other side of the mount must never see a commit
+            // that only lives in this process's page cache.
+            conn.execute("PRAGMA synchronous = FULL;", []).ok();
+        }
 
         let engine = MemoryEngine {
             conn: Mutex::new(conn),
+            db_path: db_path.as_ref().to_path_buf(),
+            reader: false,
         };
         engine.bootstrap()?;
         Ok(engine)
+    }
+
+    /// Open a fresh read-only handle on the evidence database.
+    fn open_reader_conn(db_path: &Path) -> rusqlite::Result<Connection> {
+        let conn = Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        conn.execute("PRAGMA foreign_keys = ON;", []).ok();
+        // A review poll must fail fast and retry rather than sit on a lock the
+        // broker is holding for a few milliseconds.
+        conn.execute("PRAGMA busy_timeout = 5000;", []).ok();
+        conn.execute("PRAGMA query_only = ON;", []).ok();
+        Ok(conn)
+    }
+
+    /// Replace a reviewer's cached handle with a fresh read-only one.
+    ///
+    /// A long-lived SQLite connection caches pages in memory and only discards
+    /// them when its advisory locking sees a competing writer. Those locks are
+    /// not honored across the Docker filesystem translation, so a reviewer's
+    /// connection can keep serving pages it cached before the broker committed
+    /// an approval — a queue that reads empty forever while a real action is
+    /// held, which one contained rehearsal demonstrated. Reopening per request
+    /// is the reviewer's equivalent of lock-based invalidation: a fresh handle
+    /// re-reads from the file, which the OS does show up to date.
+    pub fn refresh_reviewer_handle(&self) {
+        if !self.reader {
+            return;
+        }
+        if let Ok(conn) = Self::open_reader_conn(&self.db_path) {
+            *self.get_conn() = conn;
+        }
+    }
+
+    /// Open the evidence database the way a reviewer across the containment
+    /// boundary has to open it: read-only, and never as a writer.
+    ///
+    /// A second SQLite user on the other side of a Docker Desktop bind mount is
+    /// not protected by the first user's locks, because the two sides are two
+    /// kernels talking to one file through a translation layer. So when the
+    /// broker has a transaction in flight, its rollback journal looks "hot", and
+    /// an ordinary reader on the host is entitled to conclude that the writer
+    /// died and roll that journal back. That is not a stalled read; it reverts
+    /// receipts the broker already committed. A contained run lost a held
+    /// action's entire `requested` + `approval_pending` transaction this way,
+    /// which is exactly the transaction the waiting gate reads back to decide.
+    ///
+    /// A read-only handle cannot roll a journal back: SQLite returns an error
+    /// instead, and the only cost is one retried poll while the broker is
+    /// mid-write. Reviews therefore see the queue a fraction of a second late
+    /// and never see a lie.
+    fn new_reader(db_path: &Path) -> Result<Self> {
+        // The broker creates the database during its own startup, so a reviewer
+        // that launches alongside it waits for the first schema instead of
+        // declaring the evidence missing.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            // A handle that cannot open yet, or cannot read the schema yet, is
+            // not a failure: the broker is still starting. Anything it does
+            // manage to open is read-only, so a retry can no more damage the
+            // evidence than the first attempt could.
+            if let Ok(conn) = Self::open_reader_conn(db_path) {
+                let ready: i64 = conn
+                    .query_row(
+                        "SELECT count(*) FROM sqlite_master WHERE type = 'table' \
+                         AND name = 'pending_approvals'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0);
+                if ready == 1 {
+                    println!("[+] Kerna evidence database open for review, read-only.");
+                    return Ok(MemoryEngine {
+                        conn: Mutex::new(conn),
+                        db_path: db_path.to_path_buf(),
+                        reader: true,
+                    });
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(anyhow::anyhow!(
+                    "the evidence database at {} never became readable. The contained broker \
+                     owns that file; check that the broker is still running.",
+                    db_path.display()
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+
+    /// True when this process may only read evidence, so a caller that wants to
+    /// change a receipt has to hand the decision to the writer instead.
+    pub fn is_reviewer(&self) -> bool {
+        self.reader
+    }
+
+    /// The directory beside the evidence database where a read-only reviewer
+    /// leaves a decision for the broker that owns the database to apply.
+    ///
+    /// Files here are created by the reviewer and never modified or deleted by
+    /// it; the broker only reads them. That keeps the boundary one-way for the
+    /// writer: nothing on the reviewer's side of the mount ever mutates a file
+    /// the broker owns, and no second SQLite connection can reach the journal.
+    pub fn decision_spool(&self) -> std::path::PathBuf {
+        self.db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("decisions")
+    }
+
+    /// Path of the small view file the broker pushes for the reviewer that
+    /// cannot see its own database's committed writes.
+    pub fn evidence_view_path(&self) -> std::path::PathBuf {
+        self.db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("evidence_view.json")
+    }
+
+    /// True for the process that owns a boundary-shared database and is
+    /// therefore the one that has to keep the reviewer's view fresh. A reviewer
+    /// publishes nothing; it only reads what the writer put there, and a plain
+    /// single-process run has no reviewer to feed.
+    pub fn publishes_live_queue(&self) -> bool {
+        let shared = std::env::var_os("KERNA_DB_SHARED");
+        shared.as_deref() == Some(std::ffi::OsStr::new("1")) && !self.reader
+    }
+
+    /// The broker is the only process entitled to describe its committed queue.
+    /// SQLite's advisory locks do not cross the containment mount, so a reader
+    /// on the far side can open the file while this one holds a hot journal and
+    /// get either a refusal or a page set that was never the committed state;
+    /// no amount of reopening fixes that, because the reader cannot be told
+    /// which bytes are current. So the broker also describes the queue outside
+    /// the database, as a wholly rewritten file, and the reviewer's approval
+    /// list comes from that description rather than from its own handle. A
+    /// fresh nonce changes the size on every write and `written_at_unix` lets
+    /// the reviewer reject a stale view instead of mistaking silence for an
+    /// empty queue.
+    ///
+    /// Recorded so the next reader does not repeat the mistake: an earlier
+    /// version of this comment blamed a 240-second empty queue on cached pages.
+    /// That incident was a PowerShell binding bug in `accept-contained-run.ps1`
+    /// — `@($response).approvals` yields a bare object for a single held action,
+    /// and a bare object's `.Count` is nothing at all — and was fixed in commit
+    /// `2db6799`. The pushed view is soundness engineering, not the fix for
+    /// that failure.
+    ///
+    /// Publication therefore cannot be tied to holding an action: an idle
+    /// broker whose view aged past the freshness window would answer "no fresh
+    /// view" precisely when the truth is "nothing is waiting".
+    pub fn write_pending_snapshot(&self) -> Result<()> {
+        if self.reader {
+            return Ok(());
+        }
+        let mut approvals = Vec::new();
+        for (id, task_id, tool, args_json) in self.list_pending_approvals()? {
+            let mut row = serde_json::Map::new();
+            row.insert("id".to_owned(), serde_json::Value::String(id));
+            row.insert("task_id".to_owned(), serde_json::Value::String(task_id));
+            row.insert("tool".to_owned(), serde_json::Value::String(tool));
+            row.insert("args_json".to_owned(), serde_json::Value::String(args_json));
+            approvals.push(serde_json::Value::Object(row));
+        }
+        let micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| anyhow::anyhow!("system clock moved backwards: {error}"))?
+            .as_micros()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let mut doc = serde_json::Map::new();
+        doc.insert(
+            "written_at_unix".to_owned(),
+            serde_json::Value::from(micros),
+        );
+        doc.insert(
+            "nonce".to_owned(),
+            serde_json::Value::String(Uuid::new_v4().to_string()),
+        );
+        doc.insert("approvals".to_owned(), serde_json::Value::Array(approvals));
+        let path = self.evidence_view_path();
+        let staged = path.with_extension("json.part");
+        std::fs::write(
+            &staged,
+            serde_json::to_vec(&serde_json::Value::Object(doc))?,
+        )?;
+        std::fs::rename(&staged, &path)?;
+        Ok(())
+    }
+
+    /// Rollback journal for a database shared across the containment boundary.
+    /// WAL keeps its committed-frame index in a `-shm` memory map, which is only
+    /// valid for readers that share one kernel's mapping; the host dashboard
+    /// polling the broker's WAL database sees an empty file, so an approval
+    /// could never reach the waiting gate.
+    ///
+    /// DELETE is not enough either. Every DELETE commit ends by unlinking the
+    /// journal, and through Docker Desktop's Windows file sharing that unlink can
+    /// fail: a contained run died with `Error code 2570: I/O error within
+    /// xDelete of a VFS object` (SQLITE_IOERR_DELETE) on the journal, which took
+    /// the broker down with it and left the agent unable to reach its own
+    /// gateway. TRUNCATE ends each transaction by shrinking the journal to zero
+    /// bytes instead of deleting it, so no cross-boundary unlink sits on the
+    /// release path, and a zero-length journal is not a hot journal, so the
+    /// reader on the other side still sees a plain committed database file.
+    fn db_journal_mode(shared: Option<&std::ffi::OsStr>) -> &'static str {
+        if shared == Some(std::ffi::OsStr::new("1")) {
+            "TRUNCATE"
+        } else {
+            "WAL"
+        }
     }
 
     fn get_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -788,19 +1066,7 @@ impl MemoryEngine {
     /// guard-only path.
     pub fn decide_guard_approval(&self, id: &str, approved: bool) -> Result<bool> {
         let conn = self.get_conn();
-        let row: Option<(
-            Option<String>,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-        )> = conn
+        let row: Option<GuardApprovalRow> = conn
             .query_row(
                 "SELECT call_id, session_id, task_id, agent, agent_version, protocol, tool,
                         canonical_action_digest, policy_digest, worktree_baseline, expires_at
@@ -1054,18 +1320,89 @@ impl MemoryEngine {
     /// Correlate a later Anthropic `tool_result` to the released action without storing its
     /// content. Only a released action can advance to result_observed.
     pub fn observe_guard_result(&self, session_id: &str, call_id: &str) -> Result<bool> {
+        self.observe_guard_result_with_details(session_id, call_id, r#"{"result":"observed"}"#)
+    }
+
+    /// Correlate a completed governed action to its released receipt without storing raw
+    /// content. `details_json` must carry digests and metadata only; callers validate that
+    /// before reaching this method.
+    pub fn observe_guard_result_with_details(
+        &self,
+        session_id: &str,
+        call_id: &str,
+        details_json: &str,
+    ) -> Result<bool> {
+        let Some((binding, approval_id)) = self.released_receipt_binding(session_id, call_id)?
+        else {
+            return Ok(false);
+        };
         let conn = self.get_conn();
-        let row: Option<(
-            String,
-            Option<String>,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-            String,
-            String,
-            Option<String>,
-        )> = conn
+        let tx = conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE tool_call_receipts SET result_class = 'result_observed',
+             completed_at = ?1 WHERE session_id = ?2 AND call_id = ?3 AND result_class = 'released'",
+            params![chrono::Utc::now().to_rfc3339(), session_id, call_id],
+        )?;
+        if changed != 1 {
+            tx.rollback()?;
+            return Ok(false);
+        }
+        append_guard_receipt_event(
+            &tx,
+            &binding,
+            "result_observed",
+            approval_id.as_deref(),
+            &chrono::Utc::now().to_rfc3339(),
+            details_json,
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// A released action whose outcome could not be recorded (for example a native inspection
+    /// read that failed after its release receipt committed) is explicitly downgraded to
+    /// outcome_unknown instead of being left claiming an observed or executed result.
+    pub fn mark_guard_outcome_unknown(
+        &self,
+        session_id: &str,
+        call_id: &str,
+        details_json: &str,
+    ) -> Result<bool> {
+        let Some((binding, approval_id)) = self.released_receipt_binding(session_id, call_id)?
+        else {
+            return Ok(false);
+        };
+        let conn = self.get_conn();
+        let tx = conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE tool_call_receipts SET result_class = 'outcome_unknown',
+             completed_at = ?1 WHERE session_id = ?2 AND call_id = ?3 AND result_class = 'released'",
+            params![chrono::Utc::now().to_rfc3339(), session_id, call_id],
+        )?;
+        if changed != 1 {
+            tx.rollback()?;
+            return Ok(false);
+        }
+        append_guard_receipt_event(
+            &tx,
+            &binding,
+            "outcome_unknown",
+            approval_id.as_deref(),
+            &chrono::Utc::now().to_rfc3339(),
+            details_json,
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Rebuild the binding of a still-released receipt row for terminal lifecycle updates.
+    fn released_receipt_binding(
+        &self,
+        session_id: &str,
+        call_id: &str,
+    ) -> Result<Option<(GuardActionBinding, Option<String>)>> {
+        let conn = self.get_conn();
+        let row: Option<ReleasedGuardReceiptRow> = conn
             .query_row(
                 "SELECT task_id, client_name, tool, agent_version, protocol,
                         canonical_action_digest, policy_digest, worktree_baseline, approval_id
@@ -1099,41 +1436,24 @@ impl MemoryEngine {
             approval_id,
         )) = row
         else {
-            return Ok(false);
+            return Ok(None);
         };
-        let tx = conn.unchecked_transaction()?;
-        let changed = tx.execute(
-            "UPDATE tool_call_receipts SET result_class = 'result_observed',
-             completed_at = ?1 WHERE session_id = ?2 AND call_id = ?3 AND result_class = 'released'",
-            params![chrono::Utc::now().to_rfc3339(), session_id, call_id],
-        )?;
-        if changed != 1 {
-            tx.rollback()?;
-            return Ok(false);
-        }
-        let binding = GuardActionBinding {
-            call_id: call_id.to_owned(),
-            session_id: session_id.to_owned(),
-            task_id,
-            agent: agent.unwrap_or_else(|| "claude_code".to_owned()),
-            agent_version: agent_version.unwrap_or_else(|| "unknown".to_owned()),
-            protocol: protocol.unwrap_or_else(|| "anthropic_messages".to_owned()),
-            tool,
-            canonical_action_digest,
-            policy_digest,
-            worktree_baseline,
-            binding_hash: "unknown".to_owned(),
-        };
-        append_guard_receipt_event(
-            &tx,
-            &binding,
-            "result_observed",
-            approval_id.as_deref(),
-            &chrono::Utc::now().to_rfc3339(),
-            r#"{"result":"observed"}"#,
-        )?;
-        tx.commit()?;
-        Ok(true)
+        Ok(Some((
+            GuardActionBinding {
+                call_id: call_id.to_owned(),
+                session_id: session_id.to_owned(),
+                task_id,
+                agent: agent.unwrap_or_else(|| "claude_code".to_owned()),
+                agent_version: agent_version.unwrap_or_else(|| "unknown".to_owned()),
+                protocol: protocol.unwrap_or_else(|| "anthropic_messages".to_owned()),
+                tool,
+                canonical_action_digest,
+                policy_digest,
+                worktree_baseline,
+                binding_hash: "unknown".to_owned(),
+            },
+            approval_id,
+        )))
     }
 
     pub fn start_gateway_session(
@@ -2092,6 +2412,7 @@ impl MemoryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
     use std::fs;
 
     use uuid::Uuid;
@@ -2100,6 +2421,19 @@ mod tests {
         let db_path = format!("{}.db", name);
         let _ = fs::remove_file(&db_path);
         MemoryEngine::new(&db_path).expect("Failed to initialize test DB")
+    }
+
+    #[test]
+    fn a_shared_evidence_database_leaves_wal_behind() {
+        assert_eq!(MemoryEngine::db_journal_mode(None), "WAL");
+        assert_eq!(MemoryEngine::db_journal_mode(Some(OsStr::new("0"))), "WAL");
+        assert_eq!(
+            MemoryEngine::db_journal_mode(Some(OsStr::new("1"))),
+            "TRUNCATE",
+            "WAL's -shm commit index is invisible across the containment boundary, \
+             and DELETE's per-commit journal unlink has failed there with \
+             SQLITE_IOERR_DELETE"
+        );
     }
 
     #[test]
@@ -2306,6 +2640,133 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result_class, "result_observed");
+    }
+
+    #[test]
+    fn native_inspection_receipt_lifecycle_is_digest_only() {
+        let mem = setup_test_db("test_native_inspection_receipts");
+        let binding = GuardActionBinding {
+            call_id: "code-session-1:proposal_1".to_owned(),
+            session_id: "code-session-1".to_owned(),
+            task_id: "code-session-1".to_owned(),
+            agent: "kerna_native".to_owned(),
+            agent_version: "0.2.9".to_owned(),
+            protocol: "anthropic_messages".to_owned(),
+            tool: "Read".to_owned(),
+            canonical_action_digest: "sha256:action".to_owned(),
+            policy_digest: "sha256:policy".to_owned(),
+            worktree_baseline: "sha256:baseline".to_owned(),
+            binding_hash: "sha256:binding".to_owned(),
+        };
+        let summary = r#"{"source":"native_code_proposal","resolved_path":"src/lib.rs","file_size_bytes":10}"#;
+        // An allow decision without an approval requirement commits the
+        // requested+released receipt atomically and returns no approval id.
+        assert_eq!(
+            mem.create_guard_action(&binding, "allow", summary, false)
+                .unwrap(),
+            None
+        );
+
+        let details =
+            r#"{"result":"observed","bytes_read":10,"content_sha256":"abc123","truncated":false}"#;
+        assert!(mem
+            .observe_guard_result_with_details(&binding.session_id, &binding.call_id, details)
+            .unwrap());
+        assert!(!mem
+            .observe_guard_result_with_details(&binding.session_id, &binding.call_id, details)
+            .unwrap());
+
+        let conn = mem.get_conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_type, payload_json FROM guard_receipt_events ORDER BY sequence ASC",
+            )
+            .unwrap();
+        let events: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["requested", "released", "result_observed"]
+        );
+        let raw_file_content = "fn main() { secret-customer-source }";
+        assert!(events
+            .iter()
+            .all(|event| !event.1.contains(raw_file_content)));
+        let result_class: String = conn
+            .query_row(
+                "SELECT result_class FROM tool_call_receipts WHERE call_id = ?1",
+                params![binding.call_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(result_class, "result_observed");
+    }
+
+    #[test]
+    fn released_guard_action_can_be_marked_outcome_unknown() {
+        let mem = setup_test_db("test_native_outcome_unknown");
+        let binding = GuardActionBinding {
+            call_id: "code-session-2:proposal_1".to_owned(),
+            session_id: "code-session-2".to_owned(),
+            task_id: "code-session-2".to_owned(),
+            agent: "kerna_native".to_owned(),
+            agent_version: "0.2.9".to_owned(),
+            protocol: "anthropic_messages".to_owned(),
+            tool: "Read".to_owned(),
+            canonical_action_digest: "sha256:action".to_owned(),
+            policy_digest: "sha256:policy".to_owned(),
+            worktree_baseline: "sha256:baseline".to_owned(),
+            binding_hash: "sha256:binding".to_owned(),
+        };
+        mem.create_guard_action(&binding, "allow", "{\"tool\":\"Read\"}", false)
+            .unwrap();
+        // The allow-without-approval path returns no approval id; the receipt
+        // row is already released and can be downgraded on a failed outcome.
+        assert!(mem
+            .mark_guard_outcome_unknown(
+                &binding.session_id,
+                &binding.call_id,
+                r#"{"result":"unknown","reason":"read_failed"}"#
+            )
+            .unwrap());
+        // A terminal outcome cannot be rewritten by a later attempt.
+        assert!(!mem
+            .mark_guard_outcome_unknown(
+                &binding.session_id,
+                &binding.call_id,
+                r#"{"result":"unknown","reason":"read_failed"}"#
+            )
+            .unwrap());
+        assert!(!mem
+            .observe_guard_result(&binding.session_id, &binding.call_id)
+            .unwrap());
+
+        let conn = mem.get_conn();
+        let result_class: String = conn
+            .query_row(
+                "SELECT result_class FROM tool_call_receipts WHERE call_id = ?1",
+                params![binding.call_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(result_class, "outcome_unknown");
+        let event_types: Vec<String> = conn
+            .prepare("SELECT event_type FROM guard_receipt_events ORDER BY sequence ASC")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            event_types,
+            vec!["requested", "released", "outcome_unknown"]
+        );
     }
 
     #[test]

@@ -1,9 +1,20 @@
+mod artifact;
 pub mod budget;
+mod cli_brand;
+mod cli_init;
+mod cli_logs;
+mod cli_models;
+mod cli_providers;
+mod cli_repl;
+mod cli_service;
+mod cli_system;
 mod client;
 mod config;
 mod contract;
+mod credentials;
 mod cron;
 mod demo_session;
+mod egress;
 pub mod embeddings;
 pub mod events;
 pub mod folders;
@@ -19,6 +30,10 @@ mod mcp_registry;
 mod memory;
 mod mockmcp;
 mod models;
+mod native_cli;
+mod native_code;
+mod native_exec;
+mod native_inspect;
 mod onboarding;
 mod packs;
 mod permissions;
@@ -89,6 +104,65 @@ struct QuickCli {
 
 #[derive(Subcommand, Debug)]
 enum QuickCommand {
+    /// Ask a model a tool-less question through Kerna's native provider path.
+    Ask {
+        /// Question to send. Prompts and model prose are not persisted.
+        question: String,
+        #[arg(long, default_value = "anthropic", value_parser = ["anthropic", "openai", "mock"])]
+        provider: String,
+        #[arg(long)]
+        model: Option<String>,
+        /// Emit stable JSON Lines events instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+        /// Show the full machinery (policy, receipts, phases) in the terminal.
+        #[arg(long)]
+        debug: bool,
+    },
+    /// Chat with a model through one tool-less native broker session.
+    Chat {
+        #[arg(long, default_value = "anthropic", value_parser = ["anthropic", "openai", "mock"])]
+        provider: String,
+        #[arg(long)]
+        model: Option<String>,
+        /// Emit stable JSON Lines events instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+        /// Show the full machinery in the terminal.
+        #[arg(long)]
+        debug: bool,
+    },
+    /// Governed native code session: the model proposes, Kerna executes under
+    /// policy in a disposable candidate clone; the repo changes only on an
+    /// explicit approved apply. No Docker and no wrapped agent CLI session.
+    /// With no goal (or a directory), opens the interactive coding environment.
+    Code {
+        /// A repository path (interactive) or a one-shot engineering goal.
+        target: Option<String>,
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value = "anthropic", value_parser = ["anthropic", "openai", "mock"])]
+        provider: String,
+        #[arg(long)]
+        model: Option<String>,
+        /// Emit stable JSON Lines events instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+        /// Planning-only dry run: produce the proposal preflight without any
+        /// execution (the previous behavior of this command).
+        #[arg(long)]
+        plan: bool,
+        /// Pre-authorize policy `ask` actions and the final apply for this
+        /// session. Each grant still records its own bound receipt.
+        #[arg(long)]
+        yes: bool,
+        /// Upper bound on model proposal turns; the session fails closed past it.
+        #[arg(long, default_value = "6")]
+        max_turns: u32,
+        /// Show the full machinery instead of the clean product view.
+        #[arg(long)]
+        debug: bool,
+    },
     /// Scan system, model, sandbox, and repository readiness.
     Doctor {
         #[arg(long, default_value = ".")]
@@ -108,6 +182,9 @@ enum QuickCommand {
         no_shadow: bool,
         #[arg(long)]
         prompt: Option<String>,
+        /// Use the legacy host-launched demo path. This is not production containment.
+        #[arg(long)]
+        host_demo: bool,
     },
     /// Run bounded Python in the governed Wasmer or Tenki sandbox.
     Sandbox {
@@ -141,6 +218,53 @@ enum QuickCommand {
     },
     /// Show the governance capabilities active in the Claude-first runtime.
     Skills,
+    /// First-run onboarding: system check, local model, cloud providers.
+    /// Onboarding only - detailed diagnostics live in `kerna doctor`.
+    Init,
+    /// Read the structured activity log: routing, tools, policy, results.
+    Logs {
+        #[arg(short = 'n', long, default_value_t = 50)]
+        lines: usize,
+        #[arg(short = 'f', long)]
+        follow: bool,
+    },
+    /// One-screen runtime summary: providers, model, service, logs, evidence.
+    Status,
+    /// Start the local Kerna service (the dashboard control room) detached.
+    Start {
+        #[arg(long, default_value_t = 8765)]
+        port: u16,
+    },
+    /// Local model management through the runtime that actually exists here.
+    Model {
+        #[command(subcommand)]
+        action: QuickModelCommands,
+    },
+    /// Cloud provider management with OS credential-store secrets.
+    Provider {
+        #[command(subcommand)]
+        action: QuickProviderCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum QuickModelCommands {
+    /// Show installed runtime models plus catalog recommendations.
+    List,
+    /// Download a model into the local runtime.
+    Pull { model: String },
+    /// Make an installed model the active local model.
+    Use { model: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum QuickProviderCommands {
+    /// Add or replace a provider key (hidden input; never stored in config).
+    Add { provider: Option<String> },
+    /// List providers and where each credential comes from.
+    List,
+    /// Remove a stored provider credential.
+    Remove { provider: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -222,6 +346,10 @@ enum Commands {
         /// Read the provider key from stdin into trusted broker memory.
         #[arg(long)]
         provider_key_stdin: bool,
+
+        /// Provider whose key is supplied on stdin.
+        #[arg(long, default_value = "anthropic", value_parser = ["anthropic", "openai"])]
+        provider_key_kind: String,
     },
 
     /// Open a local live dashboard for governed MCP sessions and model routing
@@ -834,7 +962,13 @@ pub enum GuardCommands {
         /// Optional non-interactive prompt for a repeatable demo run.
         #[arg(long)]
         prompt: Option<String>,
+        /// Use the legacy host-launched demo path. This is not production containment.
+        #[arg(long)]
+        host_demo: bool,
     },
+    /// Remove Kerna-managed containers and networks left by a crashed session.
+    /// Disposable worktrees are reported for review and never deleted.
+    Cleanup,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1356,15 +1490,31 @@ fn print_kerna_skills() {
 }
 
 fn print_quick_help() {
-    println!("Kerna — route, govern, and prove AI-agent work.\n");
+    cli_brand::banner("Agent Runtime");
+    println!();
     println!("Usage:");
-    println!("  kerna                         Start governed Claude (auto route + local shadow)");
-    println!("  kerna doctor                  Check hardware, models, keys, and sandboxes");
-    println!("  kerna claude --route local   Force private local inference");
-    println!("  kerna sandbox                Run bounded Python in Wasmer");
-    println!("  kerna replay <evidence.json> Open signed read-only evidence");
-    println!("  kerna skills                 Show active governance capabilities");
-    println!("  kerna dashboard              Open the local control room\n");
+    println!("  kerna init                       One-time setup: hardware check, model, cloud key");
+    println!("  kerna code                       Interactive build session in this repo");
+    println!("  kerna code \"<goal>\" --repo .     One-shot governed run");
+    println!("  kerna start [--port N]           Start the local Kerna service");
+    println!("  kerna status                     What is configured and running right now");
+    println!(
+        "  kerna doctor                     Full diagnostics (hardware, models, keys, sandboxes)"
+    );
+    println!("  kerna logs [-n N] [--follow]     Structured event log");
+    println!("  kerna model list | pull <m> | use <m>");
+    println!("  kerna provider add | list | remove <name>");
+    println!("  kerna ask \"<question>\"           Ask a model without granting tools");
+    println!("  kerna chat                       Chat with in-memory context and no tools");
+    println!("  kerna claude --repo . --route cloud --no-shadow");
+    println!("                                 Docker-contained, receipt-governed Claude session");
+    println!(
+        "  kerna guard doctor | cleanup     Verify the pinned agent image; sweep stale sessions"
+    );
+    println!("  kerna sandbox                    Run bounded Python in Wasmer");
+    println!("  kerna replay <evidence.json>     Open signed read-only evidence");
+    println!("  kerna skills | dashboard         Governance capabilities; local control room");
+    println!();
     println!("Run `kerna advanced --help` for the legacy runtime command reference.");
 }
 
@@ -1386,18 +1536,984 @@ fn main() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("Kerna runtime thread panicked"))?
 }
 
+/// Shared runtime pieces for the native `ask`, `chat`, and `code` commands.
+///
+/// `memory` and `evidence_db_path` exist for the `code` contained read-only
+/// inspection path (SB-022); `ask` and `chat` never persist prompts or model
+/// prose, so they simply drop those fields when destructuring.
+struct NativeRuntime {
+    scheduler: TaskScheduler,
+    broker: Option<guard_launcher::NativeAskBroker>,
+    broker_provider: Option<providers::ResolvedProvider>,
+    event_model: String,
+    memory: Arc<MemoryEngine>,
+    evidence_db_path: std::path::PathBuf,
+}
+
+fn build_native_toolless_runtime(
+    repo: &std::path::Path,
+    provider: &str,
+    model: Option<String>,
+    native_direct: bool,
+) -> Result<NativeRuntime> {
+    let mut config = Config::load();
+    config.llm_provider = provider.to_string();
+    if let Some(model) = model {
+        config.llm_model = model;
+    } else if provider == "mock" {
+        config.llm_model = "mock".to_string();
+    } else if let Some(preset) = providers::preset_info(provider) {
+        config.llm_model = preset.default_model;
+    }
+    let key_env = providers::api_key_env_for(&config, provider);
+    let provider_key = if provider == "mock" {
+        zeroize::Zeroizing::new(String::new())
+    } else if let Some(key) = credentials::resolve(provider, &key_env) {
+        // Environment variable first, then the OS credential store placed by
+        // `kerna provider add`; the key never lives in config files.
+        zeroize::Zeroizing::new(key)
+    } else {
+        zeroize::Zeroizing::new(
+            dialoguer::Password::new()
+                .with_prompt(format!(
+                    "{} API key (sent to the trusted broker over stdin)",
+                    provider
+                ))
+                .interact()?,
+        )
+    };
+    if provider != "mock" && provider_key.trim().is_empty() {
+        return Err(anyhow::anyhow!("{provider} API key cannot be empty"));
+    }
+    config.llm_api_key.clear();
+    let event_model = config.llm_model.clone();
+    let evidence_db_path = native_inspect::resolve_evidence_db_path(&config.db_path);
+    let memory = Arc::new(MemoryEngine::new(&config.db_path)?);
+    let scheduler = TaskScheduler::new(
+        config,
+        Arc::clone(&memory),
+        Arc::new(Mutex::new(McpRegistry::new())),
+        None,
+    )?;
+    let broker = if provider == "mock" {
+        None
+    } else if native_direct {
+        Some(guard_launcher::start_native_direct_broker(
+            repo,
+            provider,
+            provider_key.as_str(),
+        )?)
+    } else {
+        Some(guard_launcher::start_native_ask_broker(
+            repo,
+            provider,
+            provider_key.as_str(),
+        )?)
+    };
+    drop(provider_key);
+    let broker_provider = broker.as_ref().map(|broker| providers::ResolvedProvider {
+        name: provider.to_string(),
+        protocol: if provider == "anthropic" {
+            providers::WireProtocol::Anthropic
+        } else {
+            providers::WireProtocol::OpenAiCompat
+        },
+        base_url: broker.base_url.clone(),
+        api_key: broker.session_token.clone(),
+        model: event_model.clone(),
+    });
+    Ok(NativeRuntime {
+        scheduler,
+        broker,
+        broker_provider,
+        event_model,
+        memory,
+        evidence_db_path,
+    })
+}
+
+fn render_mode_for(json: bool, debug: bool, echo_deltas: bool) -> native_cli::RenderMode {
+    if json {
+        native_cli::RenderMode::Json
+    } else if debug {
+        native_cli::RenderMode::Verbose
+    } else {
+        native_cli::RenderMode::Quiet { echo_deltas }
+    }
+}
+
+fn emit_native_event(
+    renderer: &Arc<std::sync::Mutex<native_cli::EventRenderer>>,
+    event: &native_cli::NativeEvent,
+) -> Result<()> {
+    renderer
+        .lock()
+        .map_err(|_| anyhow::anyhow!("native event renderer lock poisoned"))?
+        .emit(event)
+}
+
+async fn run_native_ask(
+    question: String,
+    provider: String,
+    model: Option<String>,
+    json: bool,
+    debug: bool,
+) -> Result<()> {
+    let NativeRuntime {
+        scheduler,
+        broker,
+        broker_provider,
+        event_model,
+        ..
+    } = build_native_toolless_runtime(std::path::Path::new("."), &provider, model, false)?;
+    let session_id = format!("ask-{}", uuid::Uuid::new_v4());
+    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(
+        render_mode_for(json, debug, true),
+    )));
+    emit_native_event(
+        &renderer,
+        &native_cli::NativeEvent::SessionStarted {
+            session_id: session_id.clone(),
+            provider,
+            model: event_model,
+            tool_authority: "none",
+        },
+    )?;
+    let stream_session = session_id.clone();
+    let stream_renderer = Arc::clone(&renderer);
+    let stream = move |text: &str| {
+        emit_native_event(
+            &stream_renderer,
+            &native_cli::NativeEvent::AssistantDelta {
+                session_id: stream_session.clone(),
+                text: text.to_string(),
+            },
+        )
+    };
+    let request = async {
+        if let Some(resolved) = broker_provider.as_ref() {
+            scheduler
+                .ask_stream_resolved(&question, resolved, stream)
+                .await
+        } else {
+            scheduler.ask_stream(&question, stream).await
+        }
+    };
+    let result = tokio::select! {
+        result = request => result,
+        interrupt = tokio::signal::ctrl_c() => {
+            let _ = interrupt;
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::SessionInterrupted {
+                    session_id,
+                    reason: "ctrl_c",
+                },
+            )?;
+            drop(broker);
+            return Err(anyhow::anyhow!("native model request interrupted"));
+        }
+    };
+    let _broker_guard = broker.as_ref();
+    match result {
+        Ok(tokens) => emit_native_event(
+            &renderer,
+            &native_cli::NativeEvent::SessionCompleted { session_id, tokens },
+        )?,
+        Err(error) => {
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::SessionFailed {
+                    session_id,
+                    error_class: "provider_error",
+                },
+            )?;
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+async fn run_native_chat(
+    provider: String,
+    model: Option<String>,
+    json: bool,
+    debug: bool,
+) -> Result<()> {
+    use std::io::{self, Write};
+
+    let NativeRuntime {
+        scheduler,
+        broker,
+        broker_provider,
+        event_model,
+        ..
+    } = build_native_toolless_runtime(std::path::Path::new("."), &provider, model, false)?;
+    let session_id = format!("chat-{}", uuid::Uuid::new_v4());
+    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(
+        render_mode_for(json, debug, true),
+    )));
+    emit_native_event(
+        &renderer,
+        &native_cli::NativeEvent::SessionStarted {
+            session_id: session_id.clone(),
+            provider,
+            model: event_model,
+            tool_authority: "none",
+        },
+    )?;
+    if !json {
+        eprintln!("[i] /clear forgets in-memory context; /exit quits; transcripts are not stored");
+    }
+    let mut messages: Vec<scheduler::ChatMessage> = Vec::new();
+    let mut total_tokens = 0_u64;
+    loop {
+        if !json {
+            print!("kerna> ");
+            io::stdout().flush()?;
+        }
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input)? == 0 {
+            break;
+        }
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
+        if matches!(input, "/exit" | "/quit") {
+            break;
+        }
+        if input == "/clear" {
+            messages.clear();
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::ContextCleared {
+                    session_id: session_id.clone(),
+                },
+            )?;
+            continue;
+        }
+        if input == "/help" {
+            if !json {
+                eprintln!("/clear forgets context; /exit quits; no tools are available");
+            }
+            continue;
+        }
+        messages.push(scheduler::ChatMessage {
+            role: "user".to_string(),
+            content: Some(input.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+        let mut assistant_text = String::new();
+        let stream_session = session_id.clone();
+        let stream_renderer = Arc::clone(&renderer);
+        let stream = |text: &str| {
+            assistant_text.push_str(text);
+            emit_native_event(
+                &stream_renderer,
+                &native_cli::NativeEvent::AssistantDelta {
+                    session_id: stream_session.clone(),
+                    text: text.to_string(),
+                },
+            )
+        };
+        let request = async {
+            if let Some(resolved) = broker_provider.as_ref() {
+                scheduler
+                    .ask_messages_stream_resolved(&messages, resolved, stream)
+                    .await
+            } else {
+                let resolved = providers::ResolvedProvider {
+                    name: "mock".to_string(),
+                    protocol: providers::WireProtocol::Mock,
+                    base_url: "mock://local".to_string(),
+                    api_key: String::new(),
+                    model: "mock".to_string(),
+                };
+                scheduler
+                    .ask_messages_stream_resolved(&messages, &resolved, stream)
+                    .await
+            }
+        };
+        let result = tokio::select! {
+            result = request => result,
+            interrupt = tokio::signal::ctrl_c() => {
+                let _ = interrupt;
+                emit_native_event(
+                    &renderer,
+                    &native_cli::NativeEvent::SessionInterrupted {
+                        session_id,
+                        reason: "ctrl_c",
+                    },
+                )?;
+                drop(broker);
+                return Err(anyhow::anyhow!("native chat interrupted"));
+            }
+        };
+        let _broker_guard = broker.as_ref();
+        match result {
+            Ok(tokens) => {
+                total_tokens = total_tokens.saturating_add(tokens);
+                if !json {
+                    println!();
+                }
+                messages.push(scheduler::ChatMessage {
+                    role: "assistant".to_string(),
+                    content: Some(assistant_text),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+            Err(error) => {
+                messages.pop();
+                emit_native_event(
+                    &renderer,
+                    &native_cli::NativeEvent::SessionFailed {
+                        session_id: session_id.clone(),
+                        error_class: "provider_error",
+                    },
+                )?;
+                return Err(error);
+            }
+        }
+    }
+    emit_native_event(
+        &renderer,
+        &native_cli::NativeEvent::SessionCompleted {
+            session_id,
+            tokens: total_tokens,
+        },
+    )?;
+    drop(broker);
+    Ok(())
+}
+
+async fn run_native_code_plan(
+    goal: String,
+    repo: PathBuf,
+    provider: String,
+    model: Option<String>,
+    json: bool,
+    debug: bool,
+) -> Result<()> {
+    let context = native_code::build_code_dry_run_context(&repo, &goal)?;
+    let NativeRuntime {
+        scheduler,
+        broker,
+        broker_provider,
+        event_model,
+        memory,
+        evidence_db_path,
+    } = build_native_toolless_runtime(&context.repo_root, &provider, model, true)?;
+    let session_id = format!("code-{}", uuid::Uuid::new_v4());
+    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(
+        render_mode_for(json, debug, true),
+    )));
+    emit_native_event(
+        &renderer,
+        &native_cli::NativeEvent::SessionStarted {
+            session_id: session_id.clone(),
+            provider,
+            model: event_model,
+            tool_authority: "none",
+        },
+    )?;
+    if !json {
+        eprintln!(
+            "[i] code dry-run plus contained read-only inspection - no writes, shell, network, packages, or patches; HEAD {} status {} ({} status lines, {} tracked files)",
+            context.head,
+            context.status_digest,
+            context.status_line_count,
+            context.tracked_file_count
+        );
+    }
+    let messages = native_code::dry_run_messages(context.prompt);
+    let policy_path = context.repo_root.join("kerna.policy.toml");
+    let guard_policy = if policy_path.exists() {
+        GuardPolicy::load(&policy_path).map_err(anyhow::Error::from)?
+    } else {
+        GuardPolicy::balanced()
+    };
+    let mut assistant_text = String::new();
+    let stream_session = session_id.clone();
+    let stream_renderer = Arc::clone(&renderer);
+    let stream = |text: &str| {
+        assistant_text.push_str(text);
+        emit_native_event(
+            &stream_renderer,
+            &native_cli::NativeEvent::AssistantDelta {
+                session_id: stream_session.clone(),
+                text: text.to_string(),
+            },
+        )
+    };
+    let request = async {
+        if let Some(resolved) = broker_provider.as_ref() {
+            scheduler
+                .ask_messages_stream_resolved(&messages, resolved, stream)
+                .await
+        } else {
+            let resolved = providers::ResolvedProvider {
+                name: "mock".to_string(),
+                protocol: providers::WireProtocol::Mock,
+                base_url: "mock://local".to_string(),
+                api_key: String::new(),
+                model: "mock".to_string(),
+            };
+            scheduler
+                .ask_messages_stream_resolved(&messages, &resolved, stream)
+                .await
+        }
+    };
+    let result = tokio::select! {
+        result = request => result,
+        interrupt = tokio::signal::ctrl_c() => {
+            let _ = interrupt;
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::SessionInterrupted {
+                    session_id,
+                    reason: "ctrl_c",
+                },
+            )?;
+            drop(broker);
+            return Err(anyhow::anyhow!("native code dry-run interrupted"));
+        }
+    };
+    let _broker_guard = broker.as_ref();
+    match result {
+        Ok(tokens) => {
+            let parsed = match native_code::parse_proposal_preflight(
+                &assistant_text,
+                &guard_policy,
+                &session_id,
+            ) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    emit_native_event(
+                        &renderer,
+                        &native_cli::NativeEvent::SessionFailed {
+                            session_id,
+                            error_class: "proposal_parse_error",
+                        },
+                    )?;
+                    return Err(error);
+                }
+            };
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::ProposalPreflight {
+                    session_id: session_id.clone(),
+                    preflight: parsed.preflight.clone(),
+                },
+            )?;
+            let inspection_context = match native_inspect::InspectionContext::new(
+                &context.repo_root,
+                &context.head,
+                &context.status_digest,
+                &evidence_db_path,
+                &session_id,
+            ) {
+                Ok(inspection_context) => inspection_context,
+                Err(error) => {
+                    // Without a canonical worktree boundary no read may
+                    // execute; the whole session fails closed.
+                    emit_native_event(
+                        &renderer,
+                        &native_cli::NativeEvent::SessionFailed {
+                            session_id,
+                            error_class: "inspection_boundary_error",
+                        },
+                    )?;
+                    return Err(error);
+                }
+            };
+            for action in &parsed.actions {
+                if action.proposed_kind != "file_read" {
+                    // Writes, shell, network, and package proposals stay
+                    // preflight-only in this phase.
+                    continue;
+                }
+                let policy_effect = match action.decision.effect {
+                    PolicyEffect::Allow => "allow",
+                    PolicyEffect::Ask => "ask",
+                    PolicyEffect::Deny => "deny",
+                };
+                emit_native_event(
+                    &renderer,
+                    &native_cli::NativeEvent::InspectionRequested {
+                        session_id: session_id.clone(),
+                        action_id: action.intent.id.clone(),
+                        proposed_kind: "file_read".to_string(),
+                        path: action.intent.canonical_resource.clone().unwrap_or_default(),
+                        canonical_action_digest: action.intent.canonical_digest(),
+                        policy_effect: policy_effect.to_string(),
+                        policy_rule: action.decision.rule_id.clone(),
+                    },
+                )?;
+                let outcome = native_inspect::inspect_file_read(
+                    &memory,
+                    &guard_policy,
+                    &inspection_context,
+                    action,
+                );
+                match outcome {
+                    native_inspect::InspectionOutcome::Blocked {
+                        action_id,
+                        path,
+                        reason,
+                        policy_effect,
+                    } => {
+                        emit_native_event(
+                            &renderer,
+                            &native_cli::NativeEvent::InspectionBlocked {
+                                session_id: session_id.clone(),
+                                action_id,
+                                path,
+                                reason,
+                                policy_effect,
+                            },
+                        )?;
+                    }
+                    native_inspect::InspectionOutcome::Observed {
+                        action_id,
+                        call_id,
+                        canonical_path,
+                        bytes_read,
+                        content_sha256,
+                        truncated,
+                        content,
+                        ..
+                    } => {
+                        emit_native_event(
+                            &renderer,
+                            &native_cli::NativeEvent::InspectionReleased {
+                                session_id: session_id.clone(),
+                                action_id: action_id.clone(),
+                                call_id: call_id.clone(),
+                                path: canonical_path.clone(),
+                                containment: native_inspect::CONTAINMENT_LABEL,
+                            },
+                        )?;
+                        emit_native_event(
+                            &renderer,
+                            &native_cli::NativeEvent::InspectionResultObserved {
+                                session_id: session_id.clone(),
+                                action_id,
+                                call_id,
+                                path: canonical_path,
+                                bytes_read,
+                                content_sha256,
+                                truncated,
+                                content,
+                            },
+                        )?;
+                    }
+                    native_inspect::InspectionOutcome::OutcomeUnknown {
+                        action_id,
+                        call_id,
+                        canonical_path,
+                        reason,
+                    } => {
+                        emit_native_event(
+                            &renderer,
+                            &native_cli::NativeEvent::InspectionReleased {
+                                session_id: session_id.clone(),
+                                action_id: action_id.clone(),
+                                call_id: call_id.clone(),
+                                path: canonical_path.clone(),
+                                containment: native_inspect::CONTAINMENT_LABEL,
+                            },
+                        )?;
+                        emit_native_event(
+                            &renderer,
+                            &native_cli::NativeEvent::InspectionOutcomeUnknown {
+                                session_id: session_id.clone(),
+                                action_id,
+                                call_id: Some(call_id),
+                                path: canonical_path,
+                                reason,
+                            },
+                        )?;
+                    }
+                }
+            }
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::SessionCompleted { session_id, tokens },
+            )?;
+        }
+        Err(error) => {
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::SessionFailed {
+                    session_id,
+                    error_class: "provider_error",
+                },
+            )?;
+            return Err(error);
+        }
+    }
+    drop(broker);
+    Ok(())
+}
+
+/// Governed native execution for `kerna code`: Kerna itself talks to the
+/// model through the native-direct broker (no Docker, no wrapped agent CLI
+/// session). The model only proposes; every side effect runs in this trusted
+/// CLI process inside a disposable candidate clone, under policy, with a
+/// receipt committed before release. The original repository changes only
+/// through the explicit, digest-bound apply decision at the end.
+// The flag set mirrors the CLI surface one-to-one; grouping it
+// would only add indirection for clap.
+#[allow(clippy::too_many_arguments)]
+async fn run_native_code(
+    goal: String,
+    repo: PathBuf,
+    provider: String,
+    model: Option<String>,
+    json: bool,
+    plan: bool,
+    yes: bool,
+    max_turns: u32,
+    debug: bool,
+    history_note: Option<&str>,
+) -> Result<native_exec::TaskOutcome> {
+    if plan {
+        run_native_code_plan(goal, repo, provider, model, json, debug).await?;
+        return Ok(native_exec::TaskOutcome {
+            final_text: String::new(),
+            outcome: "planned".to_string(),
+            changed_files: Vec::new(),
+            diff_stat: String::new(),
+            evidence_path: PathBuf::new(),
+            tokens: 0,
+        });
+    }
+    let context = native_code::build_code_dry_run_context(&repo, &goal)?;
+    let NativeRuntime {
+        scheduler,
+        broker,
+        broker_provider,
+        event_model,
+        memory,
+        evidence_db_path,
+    } = build_native_toolless_runtime(&context.repo_root, &provider, model, true)?;
+    let session_id = format!("code-{}", uuid::Uuid::new_v4());
+    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(
+        render_mode_for(json, debug, false),
+    )));
+    emit_native_event(
+        &renderer,
+        &native_cli::NativeEvent::SessionStarted {
+            session_id: session_id.clone(),
+            provider: provider.clone(),
+            model: event_model.clone(),
+            tool_authority: "none",
+        },
+    )?;
+    let candidate_root = guard_launcher::create_disposable_clone(&context.repo_root, &session_id)
+        .map_err(|error| {
+        anyhow::anyhow!("could not create the disposable candidate clone: {error}")
+    })?;
+    let boundary = match native_exec::ExecBoundary::new(
+        &context.repo_root,
+        &candidate_root,
+        &context.head,
+        &context.status_digest,
+        &evidence_db_path,
+        &session_id,
+    ) {
+        Ok(boundary) => boundary,
+        Err(error) => {
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::SessionFailed {
+                    session_id,
+                    error_class: "exec_boundary_error",
+                },
+            )?;
+            return Err(error);
+        }
+    };
+    let approval = if yes {
+        native_exec::ApprovalMode::PreAuthorized
+    } else if json {
+        native_exec::ApprovalMode::Unavailable
+    } else {
+        native_exec::ApprovalMode::Interactive
+    };
+    if debug && !json {
+        eprintln!(
+            "[i] native governed exec - the model proposes only; writes and shell run in the candidate clone {} (native-direct broker, no OS containment; safety = policy + receipts + human approval). The original repo changes only if you approve the final apply.",
+            candidate_root.display()
+        );
+    }
+    let policy_path = context.repo_root.join("kerna.policy.toml");
+    let guard_policy = if policy_path.exists() {
+        GuardPolicy::load(&policy_path).map_err(anyhow::Error::from)?
+    } else {
+        GuardPolicy::balanced()
+    };
+    let mut prompt = native_code::render_exec_prompt(&goal, &context);
+    if let Some(note) = history_note {
+        prompt.push_str("\n\n");
+        prompt.push_str(note);
+    }
+    let mut messages = vec![scheduler::ChatMessage {
+        role: "user".to_string(),
+        content: Some(prompt),
+        tool_calls: None,
+        tool_call_id: None,
+    }];
+    let mut turn = 0u32;
+    let mut total_tokens = 0u64;
+    let final_text: String;
+    loop {
+        turn += 1;
+        if turn > max_turns {
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::SessionFailed {
+                    session_id,
+                    error_class: "max_turns_exceeded",
+                },
+            )?;
+            return Err(anyhow::anyhow!(
+                "the governed exec loop reached the {max_turns}-turn limit without a final answer"
+            ));
+        }
+        let mut assistant_text = String::new();
+        let stream_session = session_id.clone();
+        let stream_renderer = Arc::clone(&renderer);
+        let stream = |text: &str| {
+            assistant_text.push_str(text);
+            emit_native_event(
+                &stream_renderer,
+                &native_cli::NativeEvent::AssistantDelta {
+                    session_id: stream_session.clone(),
+                    text: text.to_string(),
+                },
+            )
+        };
+        let request = async {
+            if let Some(resolved) = broker_provider.as_ref() {
+                scheduler
+                    .ask_messages_stream_resolved(&messages, resolved, stream)
+                    .await
+            } else {
+                let resolved = providers::ResolvedProvider {
+                    name: "mock".to_string(),
+                    protocol: providers::WireProtocol::Mock,
+                    base_url: "mock://local".to_string(),
+                    api_key: String::new(),
+                    model: "mock".to_string(),
+                };
+                scheduler
+                    .ask_messages_stream_resolved(&messages, &resolved, stream)
+                    .await
+            }
+        };
+        let result = tokio::select! {
+            result = request => result,
+            interrupt = tokio::signal::ctrl_c() => {
+                let _ = interrupt;
+                emit_native_event(
+                    &renderer,
+                    &native_cli::NativeEvent::SessionInterrupted {
+                        session_id,
+                        reason: "ctrl_c",
+                    },
+                )?;
+                drop(broker);
+                return Err(anyhow::anyhow!("native code exec interrupted"));
+            }
+        };
+        match result {
+            Ok(tokens) => total_tokens += tokens,
+            Err(error) => {
+                emit_native_event(
+                    &renderer,
+                    &native_cli::NativeEvent::SessionFailed {
+                        session_id,
+                        error_class: "provider_error",
+                    },
+                )?;
+                return Err(error);
+            }
+        }
+        if native_exec::is_final_answer(&assistant_text) {
+            final_text = assistant_text.clone();
+            break;
+        }
+        let parsed = match native_code::parse_proposal_preflight(
+            &assistant_text,
+            &guard_policy,
+            &session_id,
+        ) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                emit_native_event(
+                    &renderer,
+                    &native_cli::NativeEvent::SessionFailed {
+                        session_id: session_id.clone(),
+                        error_class: "proposal_parse_error",
+                    },
+                )?;
+                return Err(error);
+            }
+        };
+        emit_native_event(
+            &renderer,
+            &native_cli::NativeEvent::ProposalPreflight {
+                session_id: session_id.clone(),
+                preflight: parsed.preflight.clone(),
+            },
+        )?;
+        let mut results = Vec::with_capacity(parsed.actions.len());
+        for action in &parsed.actions {
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::InspectionRequested {
+                    session_id: session_id.clone(),
+                    action_id: action.intent.id.clone(),
+                    proposed_kind: action.proposed_kind.clone(),
+                    path: action.intent.canonical_resource.clone().unwrap_or_default(),
+                    canonical_action_digest: action.intent.canonical_digest(),
+                    policy_effect: match action.decision.effect {
+                        PolicyEffect::Allow => "allow",
+                        PolicyEffect::Ask => "ask",
+                        PolicyEffect::Deny => "deny",
+                    }
+                    .to_string(),
+                    policy_rule: action.decision.rule_id.clone(),
+                },
+            )?;
+            let result =
+                native_exec::execute_action(&memory, &guard_policy, &boundary, action, approval);
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::ActionExecuted {
+                    session_id: session_id.clone(),
+                    action_id: result.action_id.clone(),
+                    kind: result.kind.clone(),
+                    status: result.status.clone(),
+                    detail: result.detail.clone(),
+                    canonical_action_digest: result.canonical_action_digest.clone(),
+                    policy_effect: result.policy_effect.clone(),
+                },
+            )?;
+            results.push(result);
+        }
+        messages.push(scheduler::ChatMessage {
+            role: "user".to_string(),
+            content: Some(native_exec::tool_results_message(&results)),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
+    let apply_report = native_exec::review_and_apply(&memory, &boundary, &guard_policy, approval)?;
+    let outcome = if apply_report["applied"].as_bool().unwrap_or(false) {
+        "applied"
+    } else if apply_report["patch_sha256"]
+        .as_str()
+        .unwrap_or("")
+        .is_empty()
+        || apply_report["diff_stat"]
+            .as_str()
+            .map(|stat| stat.is_empty())
+            .unwrap_or(true)
+    {
+        "no_changes"
+    } else {
+        "not_applied"
+    };
+    let diff_stat = apply_report["diff_stat"].as_str().unwrap_or("").to_string();
+    if debug && !json {
+        let diff_display = if diff_stat.is_empty() {
+            "(none)"
+        } else {
+            diff_stat.as_str()
+        };
+        eprintln!("[i] apply status: {outcome} - diff: {diff_display}");
+    }
+    let evidence_path = native_exec::write_signed_evidence(
+        &memory,
+        &boundary,
+        &provider,
+        &event_model,
+        &apply_report,
+        outcome,
+    )?;
+    if debug && !json {
+        eprintln!("[+] signed evidence: {}", evidence_path.display());
+    }
+    emit_native_event(
+        &renderer,
+        &native_cli::NativeEvent::SessionCompleted {
+            session_id,
+            tokens: total_tokens,
+        },
+    )?;
+    drop(broker);
+    let task = native_exec::TaskOutcome {
+        final_text,
+        outcome: outcome.to_string(),
+        changed_files: native_exec::changed_files_from_diff_stat(&diff_stat),
+        diff_stat,
+        evidence_path,
+        tokens: total_tokens,
+    };
+    if !json && !debug {
+        print_product_result(&task);
+    }
+    Ok(task)
+}
+
+/// The clean final view for a governed task: result, changed files, honest
+/// apply status, and where the signed evidence lives.
+fn print_product_result(task: &native_exec::TaskOutcome) {
+    let result = task.final_text.trim();
+    if result.is_empty() {
+        println!("✓ Done.");
+    } else {
+        println!("✓ {result}");
+    }
+    if task.changed_files.is_empty() {
+        println!("  Changed: nothing");
+    } else {
+        println!("  Changed: {}", task.changed_files.join(", "));
+    }
+    match task.outcome.as_str() {
+        "applied" => println!("  Applied to your repository."),
+        "not_applied" => println!("  Not applied - the review was declined."),
+        "no_changes" => {}
+        other => println!("  Status: {other}"),
+    }
+    println!("  Evidence: {}", task.evidence_path.display());
+}
+
 async fn async_main() -> Result<()> {
     // We rely on the local ctrl_c wait in Daemon instead of global exit(0)
     let arguments = std::env::args_os().collect::<Vec<_>>();
     let first = arguments.get(1).and_then(|arg| arg.to_str());
     if first.is_none() {
-        guard_launcher::launch_claude(
-            std::path::Path::new("."),
-            guard_routing::RouteMode::Auto,
-            true,
-            None,
-        )
-        .await?;
+        // The product front door is `kerna init` then `kerna code`; print the
+        // command map and point at the right next step instead of failing.
+        print_quick_help();
+        let has_key = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+            .iter()
+            .any(|var| std::env::var(var).is_ok_and(|key| !key.trim().is_empty()))
+            || cli_providers::source("anthropic") != credentials::CredentialSource::None
+            || cli_providers::source("openai") != credentials::CredentialSource::None;
+        if !guard_routing::demo_profile_path().is_file() {
+            println!("\n[i] First run? Set up in one pass:  kerna init");
+        } else if has_key || guard_routing::active_local_model().is_some() {
+            println!("\n[i] Ready. Open a build session:  kerna code .");
+        } else {
+            println!("\n[i] No model or cloud key configured yet. Run:  kerna init");
+        }
         return Ok(());
     }
     if matches!(first, Some("--help" | "-h" | "help")) {
@@ -1410,11 +2526,95 @@ async fn async_main() -> Result<()> {
     }
     let uses_quick_parser = matches!(
         first,
-        Some("claude" | "sandbox" | "replay" | "skills" | "dashboard")
+        Some(
+            "ask"
+                | "chat"
+                | "code"
+                | "claude"
+                | "sandbox"
+                | "replay"
+                | "skills"
+                | "dashboard"
+                | "init"
+                | "logs"
+                | "status"
+                | "start"
+                | "model"
+                | "provider",
+        )
     ) || (first == Some("doctor")
         && !arguments.iter().any(|arg| arg == "--gateway"));
     if uses_quick_parser {
         match QuickCli::parse().command {
+            QuickCommand::Ask {
+                question,
+                provider,
+                model,
+                json,
+                debug,
+            } => run_native_ask(question, provider, model, json, debug).await?,
+            QuickCommand::Chat {
+                provider,
+                model,
+                json,
+                debug,
+            } => run_native_chat(provider, model, json, debug).await?,
+            QuickCommand::Code {
+                target,
+                repo,
+                provider,
+                model,
+                json,
+                plan,
+                yes,
+                max_turns,
+                debug,
+            } => {
+                let directory = target
+                    .as_deref()
+                    .map(std::path::Path::new)
+                    .is_some_and(|path| path.is_dir());
+                if directory || (target.is_none() && !plan) {
+                    let root = match target {
+                        Some(ref path) if directory => PathBuf::from(path),
+                        _ => repo,
+                    };
+                    cli_repl::run(root, provider, model, debug, yes, max_turns).await?;
+                } else {
+                    let goal = target.ok_or_else(|| {
+                        anyhow::anyhow!("kerna code needs a goal, or a repository path to open the interactive environment")
+                    })?;
+                    run_native_code(
+                        goal, repo, provider, model, json, plan, yes, max_turns, debug, None,
+                    )
+                    .await?;
+                }
+            }
+            QuickCommand::Init => cli_init::run().await?,
+            QuickCommand::Logs { lines, follow } => cli_logs::run(lines, follow)?,
+            QuickCommand::Status => cli_service::run()?,
+            QuickCommand::Start { port } => cli_service::start(port)?,
+            QuickCommand::Model { action } => match action {
+                QuickModelCommands::List => cli_models::list().await?,
+                QuickModelCommands::Pull { model } => cli_models::pull(&model)?,
+                QuickModelCommands::Use { model } => cli_models::use_model(&model).await?,
+            },
+            QuickCommand::Provider { action } => match action {
+                QuickProviderCommands::Add { provider } => {
+                    let provider = match provider {
+                        Some(provider) => provider,
+                        None => dialoguer::Select::new()
+                            .with_prompt("Provider")
+                            .items(["anthropic", "openai"])
+                            .default(0)
+                            .interact()
+                            .map(|index| ["anthropic", "openai"][index].to_string())?,
+                    };
+                    cli_providers::connect_interactive(&provider).await?;
+                }
+                QuickProviderCommands::List => cli_providers::list()?,
+                QuickProviderCommands::Remove { provider } => cli_providers::remove(&provider)?,
+            },
             QuickCommand::Doctor { repo, brief } => {
                 if !(if brief {
                     guard_launcher::print_doctor_brief(true, Some(&repo)).await
@@ -1429,8 +2629,20 @@ async fn async_main() -> Result<()> {
                 route,
                 no_shadow,
                 prompt,
+                host_demo,
             } => {
-                guard_launcher::launch_claude(&repo, route, !no_shadow, prompt.as_deref()).await?;
+                if host_demo {
+                    guard_launcher::launch_claude_host_demo(
+                        &repo,
+                        route,
+                        !no_shadow,
+                        prompt.as_deref(),
+                    )
+                    .await?;
+                } else {
+                    guard_launcher::launch_claude(&repo, route, !no_shadow, prompt.as_deref())
+                        .await?;
+                }
             }
             QuickCommand::Sandbox {
                 backend,
@@ -1462,6 +2674,7 @@ async fn async_main() -> Result<()> {
                     route_mode: route,
                     shadow_enabled: shadow,
                     anthropic_api_key: None,
+                    openai_api_key: None,
                     route_decisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 };
                 server::start_dashboard_server(state, port, !no_open).await?;
@@ -1541,8 +2754,41 @@ async fn async_main() -> Result<()> {
                     route,
                     shadow,
                     prompt,
+                    host_demo,
                 } => {
-                    guard_launcher::launch_claude(repo, *route, *shadow, prompt.as_deref()).await?;
+                    if *host_demo {
+                        guard_launcher::launch_claude_host_demo(
+                            repo,
+                            *route,
+                            *shadow,
+                            prompt.as_deref(),
+                        )
+                        .await?;
+                    } else {
+                        guard_launcher::launch_claude(repo, *route, *shadow, prompt.as_deref())
+                            .await?;
+                    }
+                }
+                GuardCommands::Cleanup => {
+                    let report = guard_launcher::sweep_stale_sessions()?;
+                    for name in &report.containers {
+                        println!("[-] removed managed container {name}");
+                    }
+                    for name in &report.networks {
+                        println!("[-] removed managed network {name}");
+                    }
+                    for worktree in &report.retained_worktrees {
+                        println!("[i] retained disposable worktree {}", worktree.display());
+                    }
+                    if report.is_empty() {
+                        println!("[+] nothing to clean; no managed resources or worktrees found");
+                    }
+                    let leftover = guard_launcher::leftover_managed_count()?;
+                    if leftover > 0 {
+                        println!(
+                            "[!] {leftover} managed resource(s) still present; a running session owns them"
+                        );
+                    }
                 }
             }
             return Ok(());
@@ -1707,6 +2953,7 @@ async fn async_main() -> Result<()> {
             route,
             shadow,
             provider_key_stdin,
+            provider_key_kind,
         }) => {
             let is_loopback = bind == "127.0.0.1" || bind == "localhost" || bind == "::1";
             if !is_loopback && token.is_none() {
@@ -1719,13 +2966,25 @@ async fn async_main() -> Result<()> {
             if token.is_none() {
                 println!("[i] No --token set: this server is loopback-only and unauthenticated.");
             }
-            let anthropic_api_key = if provider_key_stdin {
-                let mut key = String::new();
+            let stdin_provider_key = if provider_key_stdin {
+                let mut key = zeroize::Zeroizing::new(String::new());
                 std::io::stdin().read_line(&mut key)?;
-                let key = key.trim_end().to_string();
+                let key = zeroize::Zeroizing::new(key.trim_end().to_string());
                 (!key.is_empty()).then(|| Arc::new(key))
             } else {
-                std::env::var("ANTHROPIC_API_KEY").ok().map(Arc::new)
+                std::env::var(if provider_key_kind == "openai" {
+                    "OPENAI_API_KEY"
+                } else {
+                    "ANTHROPIC_API_KEY"
+                })
+                .ok()
+                .map(zeroize::Zeroizing::new)
+                .map(Arc::new)
+            };
+            let (anthropic_api_key, openai_api_key) = if provider_key_kind == "openai" {
+                (None, stdin_provider_key)
+            } else {
+                (stdin_provider_key, None)
             };
             let state = server::AppState {
                 config: config.clone(),
@@ -1737,6 +2996,7 @@ async fn async_main() -> Result<()> {
                 route_mode: route,
                 shadow_enabled: shadow,
                 anthropic_api_key,
+                openai_api_key,
                 route_decisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             };
             if let Err(e) = server::start_server(state, &bind, port).await {
@@ -1761,6 +3021,7 @@ async fn async_main() -> Result<()> {
                 route_mode: route,
                 shadow_enabled: shadow,
                 anthropic_api_key: None,
+                openai_api_key: None,
                 route_decisions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             };
             if let Err(e) = server::start_dashboard_server(state, port, !no_open).await {

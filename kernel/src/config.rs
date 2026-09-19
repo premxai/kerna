@@ -120,20 +120,8 @@ impl McpServerConfig {
         if self.runtime_mode != "docker" {
             bail!("plugin '{}' must set runtime_mode = \"docker\"", self.name);
         }
-        if !self.image.contains("@sha256:") {
-            bail!(
-                "plugin '{}' must use an OCI image pinned by @sha256 digest",
-                self.name
-            );
-        }
-        let digest = self
-            .image
-            .rsplit_once("@sha256:")
-            .map(|(_, d)| d)
-            .unwrap_or_default();
-        if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
-            bail!("plugin '{}' has an invalid OCI sha256 digest", self.name);
-        }
+        crate::artifact::validate_oci_digest_reference(&self.image)
+            .with_context(|| format!("plugin '{}' has an invalid OCI reference", self.name))?;
         if self.manifest_sha256.len() != 64
             || !self.manifest_sha256.chars().all(|c| c.is_ascii_hexdigit())
         {
@@ -652,8 +640,10 @@ impl Config {
             });
         }
 
-        if config.db_path.is_empty() {
-            config.db_path = env::var("KERNA_DB_PATH").unwrap_or_else(|_| "kerna.db".to_string());
+        if let Ok(trusted_db_path) = env::var("KERNA_DB_PATH") {
+            config.db_path = trusted_db_path;
+        } else if config.db_path.is_empty() {
+            config.db_path = "kerna.db".to_string();
         }
 
         if config.sandbox_dir.is_empty() {

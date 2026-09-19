@@ -96,7 +96,7 @@ async fn test_declared_secret_reaches_plugin_undeclared_does_not() {
     std::env::set_var("KERNA_DECLARED_SECRET", "shhh-value");
     std::env::set_var("KERNA_UNDECLARED_SECRET", "should-not-leak");
 
-    let (_memory, mut config, db_path) = setup_test_env("test_secrets", None).await;
+    let (memory, mut config, db_path) = setup_test_env("test_secrets", None).await;
     // Declare only the one secret on the mockmcp server; allow all tools so the
     // capability filter doesn't block secret_probe (this test is about env, not policy).
     config.mcp_servers[0].secrets = vec!["KERNA_DECLARED_SECRET".to_string()];
@@ -120,6 +120,26 @@ async fn test_declared_secret_reaches_plugin_undeclared_does_not() {
         "undeclared secret must NOT leak into the plugin: {}",
         text
     );
+    assert!(
+        text.contains("shhh-value"),
+        "the intended plugin receives its secret"
+    );
+
+    config.permissions.push(PermissionRule {
+        tool: "secret_probe".to_string(),
+        action: "auto_approve".to_string(),
+    });
+    let registry = std::sync::Arc::new(tokio::sync::Mutex::new(registry));
+    let memory = std::sync::Arc::new(memory);
+    let mut gateway = crate::gateway::Gateway::new(config.clone(), registry, memory.clone());
+    let _ = memory.create_task(gateway.task_id, None, "secret egress boundary");
+    let agent_result = gateway
+        .handle_tool_call(serde_json::json!({"name": "secret_probe", "arguments": {}}))
+        .await;
+    let agent_text = agent_result.to_string();
+    assert!(agent_text.contains("KERNA_DECLARED_SECRET"));
+    assert!(!agent_text.contains("shhh-value"));
+    assert!(agent_text.contains(crate::events::REDACTED_VALUE));
 
     // And the value must never be written into the serialized config.
     let toml_str = toml::to_string(&config).unwrap_or_default();

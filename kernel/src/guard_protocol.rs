@@ -23,6 +23,9 @@ pub struct ActionCandidate {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+// The standalone parser is retained as the byte-preserving protocol fixture
+// oracle. Live traffic uses the approval-aware stream gates below.
+#[allow(dead_code)]
 pub enum StreamItem {
     Bytes(Vec<u8>),
     Action(ActionCandidate),
@@ -118,12 +121,14 @@ struct PendingAction {
     custom: bool,
 }
 
+#[allow(dead_code)]
 pub struct ActionStreamParser {
     protocol: Protocol,
     decoder: SseDecoder,
     pending: HashMap<u64, PendingAction>,
 }
 
+#[allow(dead_code)]
 impl ActionStreamParser {
     pub fn new(protocol: Protocol) -> Self {
         Self {
