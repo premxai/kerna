@@ -274,6 +274,64 @@ impl MemoryEngine {
             .join("decisions")
     }
 
+    /// Path of the small view file the broker pushes for the reviewer that
+    /// cannot see its own database's committed writes.
+    pub fn evidence_view_path(&self) -> std::path::PathBuf {
+        self.db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("evidence_view.json")
+    }
+
+    /// The broker is the only process entitled to describe its committed
+    /// queue. A reviewer across the containment mount can reopen a read-only
+    /// handle on every read and still be served pages the filesystem
+    /// translation never refreshed; two rehearsals showed a live, unexpired
+    /// approval as an empty queue for 240 seconds. So the broker also
+    /// describes the queue outside the database, as a wholly rewritten file
+    /// on every hold tick and decision. A fresh nonce changes its size on
+    /// every write — the one signal a caching mount must honor — and
+    /// `written_at_unix` lets the reviewer reject a stale view instead of
+    /// mistaking silence for an empty queue.
+    pub fn write_pending_snapshot(&self) -> Result<()> {
+        if self.reader {
+            return Ok(());
+        }
+        let mut approvals = Vec::new();
+        for (id, task_id, tool, args_json) in self.list_pending_approvals()? {
+            let mut row = serde_json::Map::new();
+            row.insert("id".to_owned(), serde_json::Value::String(id));
+            row.insert("task_id".to_owned(), serde_json::Value::String(task_id));
+            row.insert("tool".to_owned(), serde_json::Value::String(tool));
+            row.insert("args_json".to_owned(), serde_json::Value::String(args_json));
+            approvals.push(serde_json::Value::Object(row));
+        }
+        let micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| anyhow::anyhow!("system clock moved backwards: {error}"))?
+            .as_micros()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let mut doc = serde_json::Map::new();
+        doc.insert(
+            "written_at_unix".to_owned(),
+            serde_json::Value::from(micros),
+        );
+        doc.insert(
+            "nonce".to_owned(),
+            serde_json::Value::String(Uuid::new_v4().to_string()),
+        );
+        doc.insert("approvals".to_owned(), serde_json::Value::Array(approvals));
+        let path = self.evidence_view_path();
+        let staged = path.with_extension("json.part");
+        std::fs::write(
+            &staged,
+            serde_json::to_vec(&serde_json::Value::Object(doc))?,
+        )?;
+        std::fs::rename(&staged, &path)?;
+        Ok(())
+    }
+
     /// Rollback journal for a database shared across the containment boundary.
     /// WAL keeps its committed-frame index in a `-shm` memory map, which is only
     /// valid for readers that share one kernel's mapping; the host dashboard

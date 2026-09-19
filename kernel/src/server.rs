@@ -1695,6 +1695,9 @@ async fn wait_for_stream_approval(
         // A reviewer across the containment boundary decides by leaving a file
         // for this process, because its own database handle is read-only.
         apply_incoming_decision_requests(memory);
+        // And this process is the only one entitled to describe the queue, so
+        // it pushes a fresh view for the reviewer on every hold tick.
+        let _ = memory.write_pending_snapshot();
         if matches!(
             memory.gateway_session_state(&binding.session_id),
             Ok(Some(state)) if state == "stopped"
@@ -2296,23 +2299,36 @@ async fn dashboard_approvals(State(state): State<DashboardState>) -> axum::respo
     // touch, and that refusal arrives here as a read error. Retrying is the
     // honest response; serving `{"approvals": []}` for a read that never
     // happened would tell a reviewer that nothing is waiting.
-    let mut pending = None;
-    for attempt in 0..10 {
-        match state.app.memory.list_pending_approvals() {
-            Ok(rows) => {
-                pending = Some(rows);
-                break;
-            }
-            Err(error) => {
-                if attempt == 9 {
-                    log_persistence_failure("approval queue read", "-", &error);
-                    return error_response(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "the approval queue could not be read",
-                    );
+    let mut pending: Option<Vec<(String, String, String, String)>> = None;
+    if state.app.memory.is_reviewer() {
+        // The reviewer's own reads cannot be trusted across the mount (see
+        // `MemoryEngine::write_pending_snapshot`), so the queue it shows comes
+        // from a view the broker itself pushed. No fresh view is a fault, not
+        // an empty queue.
+        pending = read_broker_pending_view(&state.app.memory.evidence_view_path());
+        if pending.is_none() {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the contained broker has not published a fresh approval view; the queue cannot be shown",
+            );
+        }
+    } else {
+        for attempt in 0..10 {
+            match state.app.memory.list_pending_approvals() {
+                Ok(rows) => {
+                    pending = Some(rows);
+                    break;
                 }
-                state.app.memory.refresh_reviewer_handle();
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                Err(error) => {
+                    if attempt == 9 {
+                        log_persistence_failure("approval queue read", "-", &error);
+                        return error_response(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "the approval queue could not be read",
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
             }
         }
     }
@@ -2326,6 +2342,40 @@ async fn dashboard_approvals(State(state): State<DashboardState>) -> axum::respo
         })
         .collect::<Vec<_>>();
     Json(json!({"approvals": approvals})).into_response()
+}
+
+/// Read the approval view the contained broker pushed beside the database.
+/// A missing, unparseable, or stale view is `None`, which the caller must
+/// surface as a fault rather than as an empty queue.
+fn read_broker_pending_view(
+    path: &std::path::Path,
+) -> Option<Vec<(String, String, String, String)>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc: Value = serde_json::from_str(&text).ok()?;
+    let written = doc.get("written_at_unix")?.as_u64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_micros()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    if now.saturating_sub(written) > 15_000_000 {
+        return None;
+    }
+    Some(
+        doc.get("approvals")?
+            .as_array()?
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    row.get("id")?.as_str()?.to_owned(),
+                    row.get("task_id")?.as_str()?.to_owned(),
+                    row.get("tool")?.as_str()?.to_owned(),
+                    row.get("args_json")?.as_str()?.to_owned(),
+                ))
+            })
+            .collect(),
+    )
 }
 
 async fn dashboard_containment(State(state): State<DashboardState>) -> Json<Value> {
@@ -3269,6 +3319,13 @@ mod tests {
             .create_guard_action(&binding, "ask", "{}", true)
             .unwrap()
             .unwrap();
+        writer.write_pending_snapshot().unwrap();
+        let view = read_broker_pending_view(&writer.evidence_view_path())
+            .expect("the broker must be able to publish its own queue view");
+        assert!(
+            view.iter().any(|row| row.0 == approval_id),
+            "the pushed view must contain the held approval"
+        );
 
         std::env::set_var("KERNA_DB_READER", "1");
         let reviewer = MemoryEngine::new(&path).unwrap();
