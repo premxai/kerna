@@ -1919,6 +1919,35 @@ fn call_mock(messages: &[ChatMessage]) -> Result<(ChatMessage, u64)> {
         ));
     }
 
+    if last_user_msg.starts_with("You are Kerna's code agent running through a governed executor.")
+    {
+        // Deterministic zero-key proof of the governed exec loop: the first
+        // turn proposes one bounded write, and the mock completes as soon as
+        // Kerna's tool-results message comes back so review-and-apply can run.
+        return Ok((
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(
+                    "Mock governed proposal\nKERNA_PROPOSAL_JSON_BEGIN\n{\"actions\":[{\"kind\":\"file_write\",\"path\":\"KERNA_MOCK_NOTE.md\",\"content\":\"# governed exec proof\\n\",\"reason\":\"deterministic zero-key proof of the native exec loop\"}]}\nKERNA_PROPOSAL_JSON_END".to_string(),
+                ),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            10,
+        ));
+    }
+    if last_user_msg.starts_with("{\"kerna_action_results\"") {
+        return Ok((
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some("Mock finished".to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            10,
+        ));
+    }
+
     let (cmd, args) = if last_user_msg.contains("echo") {
         ("echo".to_string(), "{}".to_string())
     } else if last_user_msg.contains("hang") {
