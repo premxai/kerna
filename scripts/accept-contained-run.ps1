@@ -723,6 +723,23 @@ if ($SelfTest) {
     return
 }
 
+Write-Step "checking that no other contained session is live"
+# Two rehearsals on one machine cannot share the containment boundary. They
+# advertise the same dashboard port, they together exceed the 8 GiB the Docker
+# VM has for containers limited to 2 GiB each, and the crash sweep one launcher
+# runs reads the same label space the other launcher's live session depends on.
+# An earlier attempt had one rehearsal's Claude killed with SIGKILL (137) in the
+# middle of the other's pass, which is a lost run rather than a failed gate. So
+# a live managed container stops the harness before it can disturb anything.
+$live = Invoke-SilentNative -FilePath "docker" -Arguments @(
+    "ps", "--filter", "label=dev.kerna.managed=true", "--format", "{{.Names}}"
+)
+$liveContainers = @($live.Output | Where-Object { "$_".Trim().Length -gt 0 })
+if ($liveContainers.Count -gt 0) {
+    throw ("a Kerna container is already live ($($liveContainers -join ', ')); contained " +
+           "rehearsals cannot share this Docker session, so finish or stop the other one first")
+}
+
 Write-Step "sweeping resources left by an earlier session"
 (Invoke-SilentNative -FilePath $KernaBin -Arguments @("guard", "cleanup")).Output | ForEach-Object { Write-Host "    $_" }
 
