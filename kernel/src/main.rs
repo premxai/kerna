@@ -2672,7 +2672,7 @@ async fn async_main() -> Result<()> {
                 let memory = Arc::new(MemoryEngine::new(&config.db_path)?);
                 let state = server::AppState {
                     guard_policy: Arc::new(load_guard_policy(&config)?),
-                    worktree_baseline: server::capture_worktree_baseline()?,
+                    worktree_baseline: server::capture_worktree_baseline_lenient()?,
                     config,
                     memory,
                     mcp_registry: Arc::new(Mutex::new(McpRegistry::new())),
@@ -3022,7 +3022,7 @@ async fn async_main() -> Result<()> {
                 guard_policy: Arc::new(load_guard_policy(&config)?),
                 memory: memory.clone(),
                 mcp_registry: mcp_registry.clone(),
-                worktree_baseline: server::capture_worktree_baseline()?,
+                worktree_baseline: server::capture_worktree_baseline_lenient()?,
                 auth_token: None,
                 route_mode: route,
                 shadow_enabled: shadow,

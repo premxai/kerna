@@ -943,6 +943,29 @@ pub fn capture_worktree_baseline() -> anyhow::Result<String> {
     ))
 }
 
+/// Dashboard-only variant: when the working directory is not a Git repository
+/// the dashboard still needs to start (the detached service runs from the data
+/// directory), so bind the baseline to the workspace path alone. The workspace
+/// card shows this digest as unavailable context and apply stays blocked on
+/// non-git directories anyway; the guarded protocol server keeps the strict
+/// capture because approvals there must not carry an unbound baseline.
+pub fn capture_worktree_baseline_lenient() -> anyhow::Result<String> {
+    let workspace = std::env::current_dir()?.canonicalize()?;
+    if git_output(&workspace, &["rev-parse", "--show-toplevel"]).is_err() {
+        let material = json!({
+            "workspace": workspace.to_string_lossy(),
+            "baseline": "no-git-workspace",
+        });
+        return Ok(format!(
+            "sha256:{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&material).expect("baseline material is serializable")
+            )
+        ));
+    }
+    capture_worktree_baseline()
+}
+
 fn worktree_baseline_digest(
     workspace: &std::path::Path,
     repo_root: &str,
@@ -1994,7 +2017,7 @@ pub async fn start_replay_server(
 
 async fn replay_page() -> Html<String> {
     let watermark = r#"<div style="position:fixed;z-index:99;left:50%;top:10px;transform:translateX(-50%);padding:7px 14px;border:1px solid #e4b56e;border-radius:999px;background:#fff7e8;color:#9b6419;font:700 11px ui-monospace,monospace;box-shadow:0 4px 18px #0001">RECORDED REHEARSAL · SIGNATURE VERIFIED · READ ONLY</div>"#;
-    let script = r#"<script>document.addEventListener('DOMContentLoaded',()=>document.querySelectorAll('button').forEach(button=>{button.disabled=true;button.title='Disabled in signed replay mode';button.style.opacity='.45';button.style.cursor='not-allowed'}));</script>"#;
+    let script = r#"<script>const kernaLockReplay=()=>document.querySelectorAll('button').forEach(button=>{button.disabled=true;button.title='Disabled in signed replay mode';button.style.opacity='.45';button.style.cursor='not-allowed'});document.addEventListener('DOMContentLoaded',kernaLockReplay);new MutationObserver(kernaLockReplay).observe(document.documentElement,{childList:true,subtree:true});</script>"#;
     Html(
         include_str!("../assets/dashboard-premium.html")
             .replace("{csrf}", "replay-read-only")
@@ -3105,6 +3128,22 @@ mod tests {
         assert_eq!(baseline.len(), "sha256:".len() + 64);
         assert_ne!(baseline, "sha256:unbound");
         assert_ne!(baseline, changed);
+    }
+
+    #[test]
+    fn lenient_baseline_binds_the_workspace_when_git_is_absent() {
+        // The detached dashboard service starts from the data directory, which
+        // is deliberately not a Git repository; the baseline must still bind.
+        let keep = std::env::current_dir().expect("a working directory to restore");
+        let scratch =
+            std::env::temp_dir().join(format!("kerna-lenient-baseline-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::env::set_current_dir(&scratch).unwrap();
+        let baseline = capture_worktree_baseline_lenient().unwrap();
+        std::env::set_current_dir(&keep).unwrap();
+        let _ = std::fs::remove_dir(&scratch);
+        assert!(baseline.starts_with("sha256:"));
+        assert_eq!(baseline.len(), "sha256:".len() + 64);
     }
 
     #[test]
