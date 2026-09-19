@@ -39,6 +39,7 @@ param(
     [ValidateSet("all", "governed", "interrupt")]
     [string]$Passes = "all",
     [switch]$SelfTest,
+    [switch]$PollDiagnostics,
     [int]$ApprovalTimeoutSeconds = 240
 )
 
@@ -336,7 +337,8 @@ function Complete-SessionReview {
     $review = Open-ReviewDashboard -Worktree $Worktree -DatabasePath $DatabasePath `
         -LogPath (Join-Path $WorkRoot "dashboard-$Name.log")
     $workspace = Invoke-DashboardGet -Base $review.Base -Path "/api/v1/dashboard/workspace"
-    $receipts = @(Invoke-DashboardGet -Base $review.Base -Path "/api/v1/dashboard/receipts").receipts
+    $receiptResponse = Invoke-DashboardGet -Base $review.Base -Path "/api/v1/dashboard/receipts"
+    $receipts = @($receiptResponse.receipts)
 
     $hasUncommitted = "$($workspace.status)".Trim().Length -gt 0
     $selection = if ($hasUncommitted) {
@@ -355,7 +357,10 @@ function Complete-SessionReview {
         $applyStat = (Invoke-Git -Path $Target -Arguments @("diff", "--stat") -Failure "could not stat the applied diff").Output -join " / "
     }
     $addRs = Get-Content -LiteralPath (Join-Path $Target "src\add.rs") -Raw -ErrorAction SilentlyContinue
-    $editReachedTarget = [bool]($addRs -and $addRs -match "a\s*\+\s*b")
+    # Match the expression on its own line. The fixture's own doc comment says
+    # "changes it to `a + b`", so a loose search is true for an untouched
+    # repository and would have reported a denied edit as applied.
+    $editReachedTarget = [bool]($addRs -and ($addRs -match "(?m)^\s{4}a\s*\+\s*b\s*$"))
 
     $bundlePath = Join-Path $ReportDir "evidence-$Name.json"
     $bundleDigest = ""
@@ -457,7 +462,13 @@ function Invoke-GovernedPass {
         if ((Get-Date) -ge $nextPoll) {
             $nextPoll = (Get-Date).AddSeconds(2)
             try {
-                $pending = @(Invoke-DashboardGet -Base $dashboardBase -Path "/api/v1/dashboard/approvals").approvals
+                # `@($response.approvals)`, not `@($response).approvals`: with a
+                # single held action the second form binds a bare object, and a
+                # bare object's `.Count` is nothing at all, so one approval looks
+                # exactly like an empty queue. That is what made the interrupt
+                # pass report a healthy broker as unreadable.
+                $response = Invoke-DashboardGet -Base $dashboardBase -Path "/api/v1/dashboard/approvals"
+                $pending = @($response.approvals)
                 $pollFailures = 0
             } catch {
                 $pollFailures++
@@ -570,6 +581,10 @@ function Invoke-InterruptPass {
     $held = $null
     $pollFailures = 0
     $askReceipts = @()
+    $pollDiary = Join-Path $WorkRoot "interrupt-polls-$tag.txt"
+    if ($PollDiagnostics) {
+        Set-Content -LiteralPath $pollDiary -Value "diary of every approval-queue poll in the interrupt pass" -Encoding UTF8
+    }
     $deadline = (Get-Date).AddSeconds($ApprovalTimeoutSeconds)
     $nextReceiptProbe = [DateTime]::MinValue
     while (-not $held -and (Get-Date) -lt $deadline -and $session.Drained -notmatch "API Error: 401") {
@@ -583,10 +598,40 @@ function Invoke-InterruptPass {
                 "$($session.Drained.Substring([Math]::Max(0, $session.Drained.Length - 700)))")
         }
         try {
-            $pending = @(Invoke-DashboardGet -Base $dashboardBase -Path "/api/v1/dashboard/approvals").approvals
+            $response = Invoke-DashboardGet -Base $dashboardBase -Path "/api/v1/dashboard/approvals"
+            $pending = @($response.approvals)
             $pollFailures = 0
+            if ($PollDiagnostics) {
+                # The reason this pass keeps failing is a disagreement between two
+                # readers of the same endpoint, so record what this reader saw on
+                # every poll: the count, the shape PowerShell actually bound, and
+                # the raw body length. Off unless asked for, and never part of the
+                # proof artifact.
+                $raw = try { $response | ConvertTo-Json -Compress -Depth 5 } catch { "<unrenderable>" }
+                # Read the same file the dashboard reads, from this process, so a
+                # disagreement between the two is visible on one line rather than
+                # inferred from a timeout.
+                $seenByFile = "?"
+                try {
+                    $viewPath = Join-Path (Split-Path -Parent $evidenceDb) "evidence_view.json"
+                    $view = Get-Content -LiteralPath $viewPath -Raw | ConvertFrom-Json
+                    $seenByFile = "{0} age={1}s" -f @($view.approvals).Count,
+                        [Math]::Round(((Get-Date).ToUniversalTime() -
+                            [DateTimeOffset]::FromUnixTimeMilliseconds([Math]::Round($view.written_at_unix / 1000)).UtcDateTime).TotalSeconds, 1)
+                } catch { $seenByFile = "unreadable" }
+                Add-Content -LiteralPath $pollDiary -Encoding UTF8 -Value (
+                    (Get-Date).ToString("HH:mm:ss.fff") + " ok n=" + $pending.Count +
+                    " shape=" + $pending[0].id + " file=" + $seenByFile + " raw=" + $raw)
+            }
         } catch {
             $pollFailures++
+            if ($PollDiagnostics) {
+                # Concatenated, not formatted: a caught message can contain
+                # braces, which "-f" then reads as a format item and throws.
+                Add-Content -LiteralPath $pollDiary -Encoding UTF8 -Value (
+                    (Get-Date).ToString("HH:mm:ss.fff") + " ERR(sequential=" + $pollFailures + ") " +
+                    "$($_.Exception.Message) | $($_.ErrorDetails.Message)")
+            }
             if ($pollFailures -ge 10) {
                 Stop-Job -Job $session.Job -ErrorAction SilentlyContinue
                 throw "the control API refused $pollFailures consecutive polls during the interrupt pass: $_"
@@ -600,8 +645,14 @@ function Invoke-InterruptPass {
             if ((Get-Date) -ge $nextReceiptProbe) {
                 $nextReceiptProbe = (Get-Date).AddSeconds(5)
                 try {
-                    $askReceipts = @(Invoke-DashboardGet -Base $dashboardBase -Path "/api/v1/dashboard/receipts").receipts |
-                        Where-Object { $_.policy_decision -eq "ask" }
+                    # Wrapped in @() as a whole pipeline, not just the request: an
+                    # empty result otherwise binds $null, and `@($null).Count` is 1,
+                    # so the pass would announce "the broker held ask action(s)"
+                    # while naming no call at all.
+                    $askReceipts = @(
+                        (Invoke-DashboardGet -Base $dashboardBase -Path "/api/v1/dashboard/receipts").receipts |
+                            Where-Object { $_.policy_decision -eq "ask" }
+                    )
                 } catch { $askReceipts = @() }
             }
             Start-Sleep -Milliseconds 500
@@ -612,7 +663,7 @@ function Invoke-InterruptPass {
         if ($session.Drained -match "API Error: 401") { throw "the provider rejected the key; the interrupt pass has nothing to interrupt" }
         Assert-NoPersistenceFault -Text $session.Drained -Name "interrupt pass"
         if (@($askReceipts).Count -gt 0) {
-            throw ("the broker held $($askReceipts.Count) ask action(s) " +
+            throw ("the broker held $(@($askReceipts).Count) ask action(s) " +
                 "(call $(@($askReceipts)[0].call_id)) but $dashboardBase served an empty approval queue for " +
                 "$ApprovalTimeoutSeconds seconds, so a reviewer would see nothing to decide")
         }
@@ -650,8 +701,8 @@ function Invoke-InterruptPass {
     try {
         $review = Open-ReviewDashboard -Worktree $containerSession -DatabasePath $evidenceDb `
             -LogPath (Join-Path $WorkRoot "dashboard-interrupt-$tag.log")
-        $ask = @(Invoke-DashboardGet -Base $review.Base -Path "/api/v1/dashboard/receipts").receipts |
-            Where-Object { $_.policy_decision -eq "ask" }
+        $askResponse = Invoke-DashboardGet -Base $review.Base -Path "/api/v1/dashboard/receipts"
+        $ask = @(@($askResponse.receipts) | Where-Object { $_.policy_decision -eq "ask" })
         $askReceiptStates = @($ask | ForEach-Object { if ("$($_.result_class)") { "$($_.result_class)" } else { "pending" } })
         $anyAskReleased = [bool](@($ask | Where-Object { $_.result_class -in @("released", "result_observed") }).Count -gt 0)
         Stop-Job -Job $review.Session.Job -ErrorAction SilentlyContinue
@@ -799,7 +850,13 @@ if ($rejectPass) {
     Assert-Proof "reject pass held an action for a human decision" ($rejectPass.approvals_observed.Count -gt 0)
     Assert-Proof "reject pass recorded the rejected action as blocked" @(
         $rejectPass.receipts | Where-Object { $_.policy_decision -eq "ask" -and $_.result_class -eq "blocked" }).Count -gt 0
-    Assert-Proof "rejected work is still contained in the disposable worktree" ($rejectPass.workspace_status.Length -gt 0)
+    # What a rejection has to prove is that nothing escaped, not that the
+    # worktree stayed dirty: if the denied call was the only write the agent
+    # attempted, a clean worktree is the correct outcome and asking for a dirty
+    # one fails the run for the right reason.
+    Assert-Proof "reject pass left the applied target at its stub body" (-not $rejectPass.edit_reached_target)
+    Assert-Proof "reject pass had nothing approved to apply" ($rejectPass.apply_selection -ne "uncommitted" -or
+        $rejectPass.apply_error.Length -gt 0)
 }
 foreach ($pass in ($results | Where-Object { $_.decision -eq "interrupted" })) {
     Assert-Proof "interruption left labeled containers for the sweep to find" ($pass.orphan_containers.Count -gt 0)
