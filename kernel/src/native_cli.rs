@@ -178,6 +178,11 @@ impl EventRenderer {
                 NativeEvent::SessionFailed { error_class, .. } => {
                     crate::cli_brand::spinner_stop();
                     eprintln!("[!] Kerna could not complete this task ({error_class}).");
+                    if *error_class == "max_turns_exceeded" {
+                        eprintln!(
+                            "    The task needs more model turns; rerun with a larger --max-turns budget."
+                        );
+                    }
                     eprintln!("    Run `kerna doctor` or check `kerna logs` for details.");
                 }
                 NativeEvent::InspectionBlocked { path, .. } => {

@@ -157,7 +157,7 @@ enum QuickCommand {
         #[arg(long)]
         yes: bool,
         /// Upper bound on model proposal turns; the session fails closed past it.
-        #[arg(long, default_value = "6")]
+        #[arg(long, default_value = "12")]
         max_turns: u32,
         /// Show the full machinery instead of the clean product view.
         #[arg(long)]

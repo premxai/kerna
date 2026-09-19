@@ -422,6 +422,9 @@ pub fn render_exec_prompt(goal: &str, context: &CodeDryRunContext) -> String {
          policy (allow/ask/deny) to every action; `ask` actions pause for a human decision and \
          are refused if it is not given. Results of your previous actions arrive back as a \
          JSON user message named kerna_action_results.\n\
+         Host facts from the trusted host — today's date is {today}. Do not spend a turn \
+         running commands to discover the date or your own environment. When a step needs \
+         several independent actions, include them all in one proposal to save turns.\n\
          Work in small turns. Each turn, output exactly one strict JSON object between \
          {PROPOSAL_BEGIN} and {PROPOSAL_END} listing at most 6 actions:\n\
          {{\"actions\":[\
@@ -442,7 +445,8 @@ pub fn render_exec_prompt(goal: &str, context: &CodeDryRunContext) -> String {
         head = context.head,
         status_digest = context.status_digest,
         status_total = context.status_line_count,
-        tracked_total = context.tracked_file_count
+        tracked_total = context.tracked_file_count,
+        today = chrono::Utc::now().date_naive()
     )
 }
 
@@ -468,6 +472,7 @@ mod tests {
         assert!(prompt.contains("original repository"));
         assert!(prompt.contains(PROPOSAL_BEGIN));
         assert!(prompt.contains("plain prose with no envelope"));
+        assert!(prompt.contains("today's date is "));
         assert!(prompt.contains("content_sha256") || prompt.contains("\"content\""));
     }
 
