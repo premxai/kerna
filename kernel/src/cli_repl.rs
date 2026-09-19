@@ -19,13 +19,8 @@ pub async fn run(
     crate::native_exec::clear_session_grants();
     let display_root = repo.canonicalize().unwrap_or_else(|_| repo.clone());
     // Windows canonicalize() prepends the \\?\ verbatim prefix; show a path the user recognizes.
-    println!(
-        "{}",
-        display_root
-            .to_string_lossy()
-            .trim_start_matches(r"\\?\")
-            .to_string()
-    );
+    let display_root = display_root.to_string_lossy();
+    println!("{}", display_root.trim_start_matches(r"\\?\"));
     println!("{}", "─".repeat(44));
     println!();
     println!("What do you want to build?");

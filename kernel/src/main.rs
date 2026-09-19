@@ -1569,8 +1569,9 @@ fn build_native_toolless_runtime(
     let provider_key = if provider == "mock" {
         zeroize::Zeroizing::new(String::new())
     } else if let Some(key) = credentials::resolve(provider, &key_env) {
-        // Environment variable first, then the OS credential store placed by
-        // `kerna provider add`; the key never lives in config files.
+        // Environment variable, then an operator-placed key file
+        // (KERNA_ANTHROPIC_KEY_FILE etc.), then the OS credential store placed
+        // by `kerna provider add`; the key never lives in config files.
         zeroize::Zeroizing::new(key)
     } else {
         zeroize::Zeroizing::new(
@@ -1988,6 +1989,7 @@ async fn run_native_code_plan(
                 &assistant_text,
                 &guard_policy,
                 &session_id,
+                1,
             ) {
                 Ok(parsed) => parsed,
                 Err(error) => {
@@ -2351,6 +2353,7 @@ async fn run_native_code(
             &assistant_text,
             &guard_policy,
             &session_id,
+            turn,
         ) {
             Ok(parsed) => parsed,
             Err(error) => {

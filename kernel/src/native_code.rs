@@ -149,6 +149,7 @@ pub fn parse_proposal_preflight(
     assistant_text: &str,
     policy: &GuardPolicy,
     session_id: &str,
+    turn: u32,
 ) -> Result<ProposalPreflightParsed> {
     let raw = extract_proposal_json(assistant_text)?;
     let envelope: ProposalEnvelope =
@@ -164,7 +165,7 @@ pub fn parse_proposal_preflight(
     let mut preflight_actions = Vec::with_capacity(envelope.actions.len());
     let mut actions = Vec::with_capacity(envelope.actions.len());
     for (index, action) in envelope.actions.iter().enumerate() {
-        let (preflight_action, action) = preflight_action(index, action, policy, session_id)?;
+        let (preflight_action, action) = preflight_action(index, turn, action, policy, session_id)?;
         preflight_actions.push(preflight_action);
         actions.push(action);
     }
@@ -195,6 +196,7 @@ fn extract_proposal_json(text: &str) -> Result<&str> {
 
 fn preflight_action(
     index: usize,
+    turn: u32,
     action: &ProposalActionInput,
     policy: &GuardPolicy,
     session_id: &str,
@@ -245,7 +247,10 @@ fn preflight_action(
     };
     let candidate = ActionCandidate {
         protocol: Protocol::AnthropicMessages,
-        id: format!("proposal_{}", index + 1),
+        // Turn-scoped ids: the model restarts numbering each turn, and receipt
+        // call ids are session-unique, so turn-less ids collide from turn two
+        // on and every later action fails closed against its own receipt row.
+        id: format!("proposal_{}_{}", turn, index + 1),
         raw_tool_name,
         arguments,
     };
@@ -502,7 +507,8 @@ KERNA_PROPOSAL_JSON_BEGIN
   {"kind":"shell","command":"cargo test","reason":"verify"}
 ]}
 KERNA_PROPOSAL_JSON_END"#;
-        let parsed = parse_proposal_preflight(text, &GuardPolicy::balanced(), "session-1").unwrap();
+        let parsed =
+            parse_proposal_preflight(text, &GuardPolicy::balanced(), "session-1", 1).unwrap();
         let preflight = parsed.preflight;
         assert_eq!(preflight.mode, "preflight_only");
         assert_eq!(preflight.receipt_state, "preflight_only_not_requested");
@@ -523,7 +529,13 @@ KERNA_PROPOSAL_JSON_END"#;
         // The parsed actions keep the canonical intent and decision for governed phases
         // without exposing raw model text beyond the already-validated envelope fields.
         assert_eq!(parsed.actions[0].proposed_kind, "file_write");
-        assert_eq!(parsed.actions[0].intent.id, "proposal_1");
+        assert_eq!(parsed.actions[0].intent.id, "proposal_1_1");
+        // Turn-scoped ids: the same index in a later turn must carry a different
+        // receipt call id, or every post-first-turn action fails closed against
+        // the first turn's receipt row.
+        let later =
+            parse_proposal_preflight(text, &GuardPolicy::balanced(), "session-1", 2).unwrap();
+        assert_eq!(later.actions[0].intent.id, "proposal_2_1");
         assert_eq!(
             parsed.actions[0].intent.canonical_resource.as_deref(),
             Some("src/lib.rs")
@@ -534,15 +546,18 @@ KERNA_PROPOSAL_JSON_END"#;
     #[test]
     fn malformed_or_unknown_proposals_fail_closed() {
         assert!(
-            parse_proposal_preflight("no envelope", &GuardPolicy::balanced(), "session-1").is_err()
+            parse_proposal_preflight("no envelope", &GuardPolicy::balanced(), "session-1", 1)
+                .is_err()
         );
         let unknown = r#"KERNA_PROPOSAL_JSON_BEGIN
 {"actions":[{"kind":"docker","reason":"escape"}]}
 KERNA_PROPOSAL_JSON_END"#;
-        assert!(parse_proposal_preflight(unknown, &GuardPolicy::balanced(), "session-1").is_err());
+        assert!(
+            parse_proposal_preflight(unknown, &GuardPolicy::balanced(), "session-1", 1).is_err()
+        );
         let extra = r#"KERNA_PROPOSAL_JSON_BEGIN
 {"actions":[{"kind":"file_read","path":"src/lib.rs","reason":"inspect","extra":true}]}
 KERNA_PROPOSAL_JSON_END"#;
-        assert!(parse_proposal_preflight(extra, &GuardPolicy::balanced(), "session-1").is_err());
+        assert!(parse_proposal_preflight(extra, &GuardPolicy::balanced(), "session-1", 1).is_err());
     }
 }

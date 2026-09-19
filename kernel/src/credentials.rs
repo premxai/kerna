@@ -97,13 +97,33 @@ pub fn source_for(provider: &str, env_var: &str) -> CredentialSource {
     }
 }
 
-/// Environment first (harness compatibility), then the credential store.
+/// Operator handoff for unattended keyed runs, mirroring the contained
+/// launcher: the env var names a file *outside any repository* whose contents
+/// are the key. Only the path ever crosses chat, argv, or logs.
+fn key_file_env(provider: &str) -> Option<&'static str> {
+    match provider {
+        "anthropic" => Some("KERNA_ANTHROPIC_KEY_FILE"),
+        "openai" => Some("KERNA_OPENAI_KEY_FILE"),
+        _ => None,
+    }
+}
+
+/// Environment first (harness compatibility), then the operator key file,
+/// then the credential store.
 pub fn resolve(provider: &str, env_var: &str) -> Option<String> {
     if let Some(value) = std::env::var(env_var)
         .ok()
         .filter(|value| !value.trim().is_empty())
     {
         return Some(value);
+    }
+    if let Some(path) = key_file_env(provider).and_then(std::env::var_os) {
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            let key = raw.trim();
+            if !key.is_empty() {
+                return Some(key.to_string());
+            }
+        }
     }
     load(provider).ok().flatten()
 }
@@ -138,6 +158,43 @@ mod tests {
         );
         assert_eq!(resolve("anthropic", &unique).as_deref(), Some("value"));
         std::env::remove_var(&unique);
+    }
+
+    #[test]
+    fn operator_key_file_handoff_is_read_trimmed_and_bounded() {
+        // Serial test rule (--test-threads=1) makes the process-global env
+        // mutation safe; the file lives in a private temp dir and is removed.
+        let dir = std::env::temp_dir().join(format!("kerna-keyfile-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("key");
+        std::env::set_var("KERNA_ANTHROPIC_KEY_FILE", &file);
+
+        std::fs::write(&file, "  sk-operator-handoff\n").unwrap();
+        assert_eq!(
+            resolve("anthropic", "KERNA_TEST_ABSENT_ENV").as_deref(),
+            Some("sk-operator-handoff")
+        );
+
+        // An empty file must not masquerade as a key; resolution falls past
+        // it to the store (absent here, possibly configured on dev boxes).
+        std::fs::write(&file, "   \n").unwrap();
+        assert_ne!(
+            resolve("anthropic", "KERNA_TEST_ABSENT_ENV").as_deref(),
+            Some("sk-operator-handoff")
+        );
+
+        // The env variable still outranks the file handoff.
+        let unique = format!("KERNA_TEST_KEY_{}", uuid::Uuid::new_v4());
+        std::fs::write(&file, "sk-from-file").unwrap();
+        std::env::set_var(&unique, "sk-from-env");
+        assert_eq!(
+            resolve("anthropic", &unique).as_deref(),
+            Some("sk-from-env")
+        );
+        std::env::remove_var(&unique);
+
+        std::env::remove_var("KERNA_ANTHROPIC_KEY_FILE");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(windows)]
