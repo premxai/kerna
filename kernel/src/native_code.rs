@@ -11,8 +11,8 @@ use std::process::Command;
 const TRACKED_FILE_LIMIT: usize = 160;
 const STATUS_LINE_LIMIT: usize = 80;
 const PROPOSAL_ACTION_LIMIT: usize = 20;
-const PROPOSAL_BEGIN: &str = "KERNA_PROPOSAL_JSON_BEGIN";
-const PROPOSAL_END: &str = "KERNA_PROPOSAL_JSON_END";
+pub const PROPOSAL_BEGIN: &str = "KERNA_PROPOSAL_JSON_BEGIN";
+pub const PROPOSAL_END: &str = "KERNA_PROPOSAL_JSON_END";
 
 #[derive(Debug, Clone)]
 pub struct CodeDryRunContext {
@@ -22,6 +22,8 @@ pub struct CodeDryRunContext {
     pub tracked_file_count: usize,
     pub status_line_count: usize,
     pub prompt: String,
+    pub status_lines: Vec<String>,
+    pub tracked_lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -46,6 +48,11 @@ pub struct ProposalAction {
     pub proposed_kind: String,
     pub intent: ActionIntent,
     pub decision: PolicyDecision,
+    /// Full replacement content for a `file_write` proposal; never persisted
+    /// in receipts, only its digest is bound into the canonical action.
+    pub content: Option<String>,
+    /// Exact command line for a `shell` proposal.
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -87,6 +94,8 @@ struct ProposalActionInput {
     package: Option<String>,
     #[serde(default)]
     manager: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
 }
 
 pub fn build_code_dry_run_context(repo: &Path, goal: &str) -> Result<CodeDryRunContext> {
@@ -122,6 +131,8 @@ pub fn build_code_dry_run_context(repo: &Path, goal: &str) -> Result<CodeDryRunC
         tracked_file_count: tracked.lines().count(),
         status_line_count: status.lines().count(),
         prompt,
+        status_lines,
+        tracked_lines,
     })
 }
 
@@ -190,7 +201,7 @@ fn preflight_action(
 ) -> Result<(ProposalActionPreflight, ProposalAction)> {
     let proposed_kind = action.kind.trim().to_ascii_lowercase();
     let reason = bounded_text("reason", &action.reason)?;
-    let (raw_tool_name, arguments, required_containment) = match proposed_kind.as_str() {
+    let (raw_tool_name, mut arguments, required_containment) = match proposed_kind.as_str() {
         "file_read" => (
             "Read".to_string(),
             json!({"file_path": required_field("path", action.path.as_deref())?}),
@@ -217,6 +228,20 @@ fn preflight_action(
             "future contained package-manager execution plus receipt-bound approval",
         ),
         _ => return Err(anyhow!("unsupported proposal action kind: {proposed_kind}")),
+    };
+    if let Some(content) = action.content.as_deref() {
+        if proposed_kind != "file_write" {
+            return Err(anyhow!("content is only valid on file_write actions"));
+        }
+        if content.len() > 256 * 1024 {
+            return Err(anyhow!("file_write content exceeds the write bound"));
+        }
+        arguments["content_sha256"] = json!(format!("{:x}", Sha256::digest(content.as_bytes())));
+    }
+    let command = if proposed_kind == "shell" {
+        action.command.clone()
+    } else {
+        None
     };
     let candidate = ActionCandidate {
         protocol: Protocol::AnthropicMessages,
@@ -253,6 +278,8 @@ fn preflight_action(
             proposed_kind,
             intent,
             decision,
+            content: action.content.clone(),
+            command,
         },
     ))
 }
@@ -366,9 +393,78 @@ fn render_prompt(
     )
 }
 
+/// The executing counterpart of the dry-run prompt: the model plans, Kerna's
+/// governed executor runs, and every result is fed back for the next turn.
+/// File writes carry complete replacement content and are staged only in the
+/// disposable candidate clone; the original repository changes only through
+/// the human-approved apply at the end.
+pub fn render_exec_prompt(goal: &str, context: &CodeDryRunContext) -> String {
+    let status_block = if context.status_lines.is_empty() {
+        "(clean)".to_string()
+    } else {
+        context.status_lines.join("\n")
+    };
+    let tracked_block = if context.tracked_lines.is_empty() {
+        "(no tracked files reported)".to_string()
+    } else {
+        context.tracked_lines.join("\n")
+    };
+    format!(
+        "You are Kerna's code agent running through a governed executor.\n\
+         Your proposals are executed by Kerna inside a disposable candidate clone of the \
+         repository. You have NO direct authority over anything else: no original-repository \
+         write, no approval self-grant, no persistence outside the candidate. Kerna applies \
+         policy (allow/ask/deny) to every action; `ask` actions pause for a human decision and \
+         are refused if it is not given. Results of your previous actions arrive back as a \
+         JSON user message named kerna_action_results.\n\
+         Work in small turns. Each turn, output exactly one strict JSON object between \
+         {PROPOSAL_BEGIN} and {PROPOSAL_END} listing at most 6 actions:\n\
+         {{\"actions\":[\
+         {{\"kind\":\"file_read\",\"reason\":\"why\",\"path\":\"relative/path\"}},\
+         {{\"kind\":\"file_write\",\"reason\":\"why\",\"path\":\"relative/path\",\"content\":\"FULL replacement file content (max 256 KiB)\"}},\
+         {{\"kind\":\"shell\",\"reason\":\"why\",\"command\":\"exact command run in the candidate root\"}}]}}\n\
+         file_write always replaces the whole file with the exact content given. Never target \
+         .git, absolute paths, or .. paths. When the work is complete and verified by shell \
+         results, finish with a short plain-prose summary in plain prose with no envelope (no \
+         {PROPOSAL_BEGIN} marker at all) — that ends the session and Kerna shows the human the \
+         candidate diff for an explicit apply decision to the original repository.\n\n\
+         Goal:\n{goal}\n\n\
+         Repository snapshot (the candidate clone starts at this state):\n\
+         HEAD: {head}\n\
+         status_digest_sha256: {status_digest}\n\
+         status_lines: {status_total} total, showing up to {STATUS_LINE_LIMIT}\n{status_block}\n\n\
+         tracked_files: {tracked_total} total, showing up to {TRACKED_FILE_LIMIT}\n{tracked_block}",
+        head = context.head,
+        status_digest = context.status_digest,
+        status_total = context.status_line_count,
+        tracked_total = context.tracked_file_count
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exec_prompt_grants_candidate_authority_but_not_the_original_repo() {
+        let context = CodeDryRunContext {
+            repo_root: PathBuf::from("/repo"),
+            head: "abc123".to_string(),
+            status_digest: "d".repeat(64),
+            tracked_file_count: 2,
+            status_line_count: 1,
+            prompt: String::new(),
+            status_lines: vec![" M src/lib.rs".to_string()],
+            tracked_lines: vec!["src/lib.rs".to_string(), "Cargo.toml".to_string()],
+        };
+        let prompt = render_exec_prompt("add an answer function", &context);
+        assert!(prompt.contains("governed executor"));
+        assert!(prompt.contains("candidate clone"));
+        assert!(prompt.contains("original repository"));
+        assert!(prompt.contains(PROPOSAL_BEGIN));
+        assert!(prompt.contains("plain prose with no envelope"));
+        assert!(prompt.contains("content_sha256") || prompt.contains("\"content\""));
+    }
 
     #[test]
     fn dry_run_prompt_is_explicitly_non_executing() {

@@ -563,6 +563,8 @@ mod tests {
             proposed_kind: "file_read".to_owned(),
             intent,
             decision,
+            content: None,
+            command: None,
         }
     }
 
@@ -908,6 +910,8 @@ mod tests {
             proposed_kind: "shell".to_owned(),
             intent,
             decision,
+            content: None,
+            command: None,
         };
         match inspect_file_read(&memory, &policy, &context, &shell_action) {
             InspectionOutcome::Blocked { reason, .. } => {

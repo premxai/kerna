@@ -23,6 +23,7 @@ mod mockmcp;
 mod models;
 mod native_cli;
 mod native_code;
+mod native_exec;
 mod native_inspect;
 mod onboarding;
 mod packs;
@@ -116,9 +117,11 @@ enum QuickCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Produce a contained dry-run implementation proposal; no tools or patches.
+    /// Governed native code session: the model proposes, Kerna executes under
+    /// policy in a disposable candidate clone; the repo changes only on an
+    /// explicit approved apply. No Docker and no wrapped agent CLI session.
     Code {
-        /// Engineering goal to plan. Prompts and model prose are not persisted.
+        /// Engineering goal. Prompts and model prose are not persisted.
         goal: String,
         #[arg(long, default_value = ".")]
         repo: PathBuf,
@@ -129,6 +132,17 @@ enum QuickCommand {
         /// Emit stable JSON Lines events instead of human-readable text.
         #[arg(long)]
         json: bool,
+        /// Planning-only dry run: produce the proposal preflight without any
+        /// execution (the previous behavior of this command).
+        #[arg(long)]
+        plan: bool,
+        /// Pre-authorize policy `ask` actions and the final apply for this
+        /// session. Each grant still records its own bound receipt.
+        #[arg(long)]
+        yes: bool,
+        /// Upper bound on model proposal turns; the session fails closed past it.
+        #[arg(long, default_value = "6")]
+        max_turns: u32,
     },
     /// Scan system, model, sandbox, and repository readiness.
     Doctor {
@@ -1423,7 +1437,9 @@ fn print_quick_help() {
     );
     println!("  kerna ask \"<question>\"       Ask a model without granting tools");
     println!("  kerna chat                   Chat with in-memory context and no tools");
-    println!("  kerna code \"<goal>\"         Plan repo work without granting tools");
+    println!(
+        "  kerna code \"<goal>\" --repo .  Governed native run: model proposes, Kerna executes in a\n                                candidate clone; your repo changes only on an approved apply"
+    );
     println!(
         "  kerna claude --host-demo      Legacy host-launched demo; not production containment"
     );
@@ -1470,6 +1486,7 @@ fn build_native_toolless_runtime(
     repo: &std::path::Path,
     provider: &str,
     model: Option<String>,
+    native_direct: bool,
 ) -> Result<NativeRuntime> {
     let mut config = Config::load();
     config.llm_provider = provider.to_string();
@@ -1513,6 +1530,12 @@ fn build_native_toolless_runtime(
     )?;
     let broker = if provider == "mock" {
         None
+    } else if native_direct {
+        Some(guard_launcher::start_native_direct_broker(
+            repo,
+            provider,
+            provider_key.as_str(),
+        )?)
     } else {
         Some(guard_launcher::start_native_ask_broker(
             repo,
@@ -1564,7 +1587,7 @@ async fn run_native_ask(
         broker_provider,
         event_model,
         ..
-    } = build_native_toolless_runtime(std::path::Path::new("."), &provider, model)?;
+    } = build_native_toolless_runtime(std::path::Path::new("."), &provider, model, false)?;
     let session_id = format!("ask-{}", uuid::Uuid::new_v4());
     let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
     emit_native_event(
@@ -1640,7 +1663,7 @@ async fn run_native_chat(provider: String, model: Option<String>, json: bool) ->
         broker_provider,
         event_model,
         ..
-    } = build_native_toolless_runtime(std::path::Path::new("."), &provider, model)?;
+    } = build_native_toolless_runtime(std::path::Path::new("."), &provider, model, false)?;
     let session_id = format!("chat-{}", uuid::Uuid::new_v4());
     let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
     emit_native_event(
@@ -1779,7 +1802,7 @@ async fn run_native_chat(provider: String, model: Option<String>, json: bool) ->
     Ok(())
 }
 
-async fn run_native_code(
+async fn run_native_code_plan(
     goal: String,
     repo: PathBuf,
     provider: String,
@@ -1794,7 +1817,7 @@ async fn run_native_code(
         event_model,
         memory,
         evidence_db_path,
-    } = build_native_toolless_runtime(&context.repo_root, &provider, model)?;
+    } = build_native_toolless_runtime(&context.repo_root, &provider, model, true)?;
     let session_id = format!("code-{}", uuid::Uuid::new_v4());
     let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
     emit_native_event(
@@ -1932,7 +1955,7 @@ async fn run_native_code(
                     &native_cli::NativeEvent::InspectionRequested {
                         session_id: session_id.clone(),
                         action_id: action.intent.id.clone(),
-                        proposed_kind: "file_read",
+                        proposed_kind: "file_read".to_string(),
                         path: action.intent.canonical_resource.clone().unwrap_or_default(),
                         canonical_action_digest: action.intent.canonical_digest(),
                         policy_effect: policy_effect.to_string(),
@@ -2046,6 +2069,286 @@ async fn run_native_code(
     Ok(())
 }
 
+/// Governed native execution for `kerna code`: Kerna itself talks to the
+/// model through the native-direct broker (no Docker, no wrapped agent CLI
+/// session). The model only proposes; every side effect runs in this trusted
+/// CLI process inside a disposable candidate clone, under policy, with a
+/// receipt committed before release. The original repository changes only
+/// through the explicit, digest-bound apply decision at the end.
+// The flag set mirrors the CLI surface one-to-one; grouping it
+// would only add indirection for clap.
+#[allow(clippy::too_many_arguments)]
+async fn run_native_code(
+    goal: String,
+    repo: PathBuf,
+    provider: String,
+    model: Option<String>,
+    json: bool,
+    plan: bool,
+    yes: bool,
+    max_turns: u32,
+) -> Result<()> {
+    if plan {
+        return run_native_code_plan(goal, repo, provider, model, json).await;
+    }
+    let context = native_code::build_code_dry_run_context(&repo, &goal)?;
+    let NativeRuntime {
+        scheduler,
+        broker,
+        broker_provider,
+        event_model,
+        memory,
+        evidence_db_path,
+    } = build_native_toolless_runtime(&context.repo_root, &provider, model, true)?;
+    let session_id = format!("code-{}", uuid::Uuid::new_v4());
+    let renderer = Arc::new(std::sync::Mutex::new(native_cli::EventRenderer::new(json)));
+    emit_native_event(
+        &renderer,
+        &native_cli::NativeEvent::SessionStarted {
+            session_id: session_id.clone(),
+            provider: provider.clone(),
+            model: event_model.clone(),
+            tool_authority: "none",
+        },
+    )?;
+    let candidate_root = guard_launcher::create_disposable_clone(&context.repo_root, &session_id)
+        .map_err(|error| {
+        anyhow::anyhow!("could not create the disposable candidate clone: {error}")
+    })?;
+    let boundary = match native_exec::ExecBoundary::new(
+        &context.repo_root,
+        &candidate_root,
+        &context.head,
+        &context.status_digest,
+        &evidence_db_path,
+        &session_id,
+    ) {
+        Ok(boundary) => boundary,
+        Err(error) => {
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::SessionFailed {
+                    session_id,
+                    error_class: "exec_boundary_error",
+                },
+            )?;
+            return Err(error);
+        }
+    };
+    let approval = if yes {
+        native_exec::ApprovalMode::PreAuthorized
+    } else if json {
+        native_exec::ApprovalMode::Unavailable
+    } else {
+        native_exec::ApprovalMode::Interactive
+    };
+    if !json {
+        eprintln!(
+            "[i] native governed exec - the model proposes only; writes and shell run in the candidate clone {} (native-direct broker, no OS containment; safety = policy + receipts + human approval). The original repo changes only if you approve the final apply.",
+            candidate_root.display()
+        );
+    }
+    let policy_path = context.repo_root.join("kerna.policy.toml");
+    let guard_policy = if policy_path.exists() {
+        GuardPolicy::load(&policy_path).map_err(anyhow::Error::from)?
+    } else {
+        GuardPolicy::balanced()
+    };
+    let mut messages = vec![scheduler::ChatMessage {
+        role: "user".to_string(),
+        content: Some(native_code::render_exec_prompt(&goal, &context)),
+        tool_calls: None,
+        tool_call_id: None,
+    }];
+    let mut turn = 0u32;
+    let mut total_tokens = 0u64;
+    loop {
+        turn += 1;
+        if turn > max_turns {
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::SessionFailed {
+                    session_id,
+                    error_class: "max_turns_exceeded",
+                },
+            )?;
+            return Err(anyhow::anyhow!(
+                "the governed exec loop reached the {max_turns}-turn limit without a final answer"
+            ));
+        }
+        let mut assistant_text = String::new();
+        let stream_session = session_id.clone();
+        let stream_renderer = Arc::clone(&renderer);
+        let stream = |text: &str| {
+            assistant_text.push_str(text);
+            emit_native_event(
+                &stream_renderer,
+                &native_cli::NativeEvent::AssistantDelta {
+                    session_id: stream_session.clone(),
+                    text: text.to_string(),
+                },
+            )
+        };
+        let request = async {
+            if let Some(resolved) = broker_provider.as_ref() {
+                scheduler
+                    .ask_messages_stream_resolved(&messages, resolved, stream)
+                    .await
+            } else {
+                let resolved = providers::ResolvedProvider {
+                    name: "mock".to_string(),
+                    protocol: providers::WireProtocol::Mock,
+                    base_url: "mock://local".to_string(),
+                    api_key: String::new(),
+                    model: "mock".to_string(),
+                };
+                scheduler
+                    .ask_messages_stream_resolved(&messages, &resolved, stream)
+                    .await
+            }
+        };
+        let result = tokio::select! {
+            result = request => result,
+            interrupt = tokio::signal::ctrl_c() => {
+                let _ = interrupt;
+                emit_native_event(
+                    &renderer,
+                    &native_cli::NativeEvent::SessionInterrupted {
+                        session_id,
+                        reason: "ctrl_c",
+                    },
+                )?;
+                drop(broker);
+                return Err(anyhow::anyhow!("native code exec interrupted"));
+            }
+        };
+        match result {
+            Ok(tokens) => total_tokens += tokens,
+            Err(error) => {
+                emit_native_event(
+                    &renderer,
+                    &native_cli::NativeEvent::SessionFailed {
+                        session_id,
+                        error_class: "provider_error",
+                    },
+                )?;
+                return Err(error);
+            }
+        }
+        if native_exec::is_final_answer(&assistant_text) {
+            break;
+        }
+        let parsed = match native_code::parse_proposal_preflight(
+            &assistant_text,
+            &guard_policy,
+            &session_id,
+        ) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                emit_native_event(
+                    &renderer,
+                    &native_cli::NativeEvent::SessionFailed {
+                        session_id: session_id.clone(),
+                        error_class: "proposal_parse_error",
+                    },
+                )?;
+                return Err(error);
+            }
+        };
+        emit_native_event(
+            &renderer,
+            &native_cli::NativeEvent::ProposalPreflight {
+                session_id: session_id.clone(),
+                preflight: parsed.preflight.clone(),
+            },
+        )?;
+        let mut results = Vec::with_capacity(parsed.actions.len());
+        for action in &parsed.actions {
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::InspectionRequested {
+                    session_id: session_id.clone(),
+                    action_id: action.intent.id.clone(),
+                    proposed_kind: action.proposed_kind.clone(),
+                    path: action.intent.canonical_resource.clone().unwrap_or_default(),
+                    canonical_action_digest: action.intent.canonical_digest(),
+                    policy_effect: match action.decision.effect {
+                        PolicyEffect::Allow => "allow",
+                        PolicyEffect::Ask => "ask",
+                        PolicyEffect::Deny => "deny",
+                    }
+                    .to_string(),
+                    policy_rule: action.decision.rule_id.clone(),
+                },
+            )?;
+            let result =
+                native_exec::execute_action(&memory, &guard_policy, &boundary, action, approval);
+            emit_native_event(
+                &renderer,
+                &native_cli::NativeEvent::ActionExecuted {
+                    session_id: session_id.clone(),
+                    action_id: result.action_id.clone(),
+                    kind: result.kind.clone(),
+                    status: result.status.clone(),
+                    detail: result.detail.clone(),
+                    canonical_action_digest: result.canonical_action_digest.clone(),
+                    policy_effect: result.policy_effect.clone(),
+                },
+            )?;
+            results.push(result);
+        }
+        messages.push(scheduler::ChatMessage {
+            role: "user".to_string(),
+            content: Some(native_exec::tool_results_message(&results)),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
+    let apply_report = native_exec::review_and_apply(&memory, &boundary, &guard_policy, approval)?;
+    let outcome = if apply_report["applied"].as_bool().unwrap_or(false) {
+        "applied"
+    } else if apply_report["patch_sha256"]
+        .as_str()
+        .unwrap_or("")
+        .is_empty()
+        || apply_report["diff_stat"]
+            .as_str()
+            .map(|stat| stat.is_empty())
+            .unwrap_or(true)
+    {
+        "no_changes"
+    } else {
+        "not_applied"
+    };
+    if !json {
+        eprintln!(
+            "[i] apply status: {} - diff: {}",
+            outcome,
+            apply_report["diff_stat"].as_str().unwrap_or("(none)")
+        );
+    }
+    let evidence_path = native_exec::write_signed_evidence(
+        &memory,
+        &boundary,
+        &provider,
+        &event_model,
+        &apply_report,
+        outcome,
+    )?;
+    if !json {
+        eprintln!("[+] signed evidence: {}", evidence_path.display());
+    }
+    emit_native_event(
+        &renderer,
+        &native_cli::NativeEvent::SessionCompleted {
+            session_id,
+            tokens: total_tokens,
+        },
+    )?;
+    drop(broker);
+    Ok(())
+}
+
 async fn async_main() -> Result<()> {
     // We rely on the local ctrl_c wait in Daemon instead of global exit(0)
     let arguments = std::env::args_os().collect::<Vec<_>>();
@@ -2055,9 +2358,23 @@ async fn async_main() -> Result<()> {
         // bare `kerna` auto-route + shadow call always failed closed and read
         // as a crash. Print the working invocation instead.
         print_quick_help();
-        println!("\nStart a contained session:");
+        let has_key = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+            .iter()
+            .any(|var| std::env::var(var).is_ok_and(|key| !key.trim().is_empty()));
+        if has_key {
+            println!("\n[+] provider API key detected in the environment.");
+        } else {
+            println!("\n[i] no provider API key in the environment; Kerna will ask for it at run time (hidden input, never stored).");
+        }
+        let suggested = providers::preset_info("anthropic")
+            .map(|preset| preset.default_model.to_string())
+            .unwrap_or_else(|| "claude-sonnet-5".to_string());
+        println!("[i] suggested model: {suggested} (override any time with --model).");
+        println!("\nEnter your task directly - Kerna calls the model itself, no Docker and no agent CLI session:");
+        println!("  kerna code \"<your task>\" --repo .");
+        println!("\nFor the fully Docker-contained agent session instead:");
         println!("  kerna claude --repo . --route cloud --no-shadow");
-        println!("Check prerequisites first: kerna guard doctor");
+        println!("Check prerequisites first: kerna doctor");
         return Ok(());
     }
     if matches!(first, Some("--help" | "-h" | "help")) {
@@ -2092,7 +2409,10 @@ async fn async_main() -> Result<()> {
                 provider,
                 model,
                 json,
-            } => run_native_code(goal, repo, provider, model, json).await?,
+                plan,
+                yes,
+                max_turns,
+            } => run_native_code(goal, repo, provider, model, json, plan, yes, max_turns).await?,
             QuickCommand::Doctor { repo, brief } => {
                 if !(if brief {
                     guard_launcher::print_doctor_brief(true, Some(&repo)).await

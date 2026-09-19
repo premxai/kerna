@@ -25,7 +25,7 @@ pub enum NativeEvent {
     InspectionRequested {
         session_id: String,
         action_id: String,
-        proposed_kind: &'static str,
+        proposed_kind: String,
         path: String,
         canonical_action_digest: String,
         policy_effect: String,
@@ -65,6 +65,16 @@ pub enum NativeEvent {
         call_id: Option<String>,
         path: String,
         reason: &'static str,
+    },
+    #[serde(rename = "action.executed")]
+    ActionExecuted {
+        session_id: String,
+        action_id: String,
+        kind: String,
+        status: String,
+        detail: String,
+        canonical_action_digest: String,
+        policy_effect: String,
     },
     #[serde(rename = "session.completed")]
     SessionCompleted { session_id: String, tokens: u64 },
@@ -161,6 +171,14 @@ impl EventRenderer {
             NativeEvent::InspectionOutcomeUnknown { path, reason, .. } => {
                 eprintln!("[!] inspection outcome unknown - {path}: {reason}");
             }
+            NativeEvent::ActionExecuted {
+                kind,
+                status,
+                detail,
+                ..
+            } => {
+                eprintln!("[{status}] {kind} - {detail}");
+            }
             NativeEvent::SessionCompleted { tokens, .. } => {
                 println!();
                 eprintln!("[i] tool-less response - {tokens} tokens - prompt not persisted");
@@ -244,7 +262,7 @@ mod tests {
         let requested = serde_json::to_value(NativeEvent::InspectionRequested {
             session_id: "code-1".to_string(),
             action_id: "proposal_1".to_string(),
-            proposed_kind: "file_read",
+            proposed_kind: "file_read".to_string(),
             path: "src/lib.rs".to_string(),
             canonical_action_digest: "sha256:action".to_string(),
             policy_effect: "allow".to_string(),

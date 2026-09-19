@@ -578,6 +578,89 @@ pub fn start_native_ask_broker(
     Ok(broker)
 }
 
+/// Start the native-direct broker for `kerna code`: a child `kerna serve`
+/// process spawned from this same trusted executable, bound to loopback and
+/// protected by a one-time session token. No Docker and no agent container
+/// are involved; the provider key still crosses only stdin, so it never
+/// appears in command lines, environment, or persisted metadata.
+///
+/// This mode deliberately claims no OS containment. Its safety properties are
+/// policy evaluation, receipt-bound approvals, candidate-clone staging, and
+/// explicit human apply, and every surface using it must label the broker as
+/// `native-direct` rather than implying Docker isolation.
+pub fn start_native_direct_broker(
+    repo: &Path,
+    provider: &str,
+    provider_key: &str,
+) -> Result<NativeAskBroker> {
+    if !matches!(provider, "anthropic" | "openai") {
+        return Err(anyhow!(
+            "native broker currently supports anthropic and openai"
+        ));
+    }
+    let session_token = Uuid::new_v4().to_string();
+    let state_dir = prepare_broker_state(&session_token)?;
+    let host_port = available_loopback_port(BROKER_PORT)?;
+    let executable = std::env::current_exe()
+        .context("could not resolve the Kerna executable for the native-direct broker")?;
+    let provider_path = if provider == "anthropic" {
+        "native/anthropic"
+    } else {
+        "native/openai/v1"
+    };
+    let mut child = match Command::new(&executable)
+        .args([
+            "serve",
+            "--port",
+            &host_port.to_string(),
+            "--bind",
+            "127.0.0.1",
+            "--token",
+            &session_token,
+            "--route",
+            "cloud",
+            "--provider-key-stdin",
+            "--provider-key-kind",
+            provider,
+        ])
+        .current_dir(repo)
+        .env("KERNA_DB_PATH", state_dir.join("evidence.db"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            return Err(error).context("could not start the native-direct Kerna broker");
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(provider_key.as_bytes())?;
+        stdin.write_all(b"\n")?;
+    }
+    let address = format!("127.0.0.1:{host_port}");
+    for attempt in 0..100 {
+        if std::net::TcpStream::connect(&address).is_ok() {
+            break;
+        }
+        if attempt == 99 {
+            terminate_child(&mut child);
+            return Err(anyhow!(
+                "native-direct Kerna broker did not become reachable"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(NativeAskBroker {
+        base_url: format!("http://{address}/{provider_path}"),
+        session_token,
+        container_name: String::new(),
+        network_name: String::new(),
+        child: Some(child),
+    })
+}
+
 struct NativeBrokerContainerSpec<'a> {
     image_id: &'a str,
     session_dir: &'a Path,
