@@ -11,5 +11,8 @@ python -m http.server 4173 --directory website
 
 Then open `http://localhost:4173`.
 
+`index.html` is the homepage (styles in `home.css`, behavior in `home.js`).
+The earlier scroll-driven story page is kept at `story.html`.
+
 The site is intentionally explicit that the first Kerna release is local-first
 and does not require login. Download totals are not described as user counts.
