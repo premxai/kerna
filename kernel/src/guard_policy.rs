@@ -14,6 +14,7 @@ pub const POLICY_VERSION: u32 = 1;
 pub enum AgentKind {
     ClaudeCode,
     Codex,
+    KernaNative,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -412,6 +413,9 @@ pub struct PolicyDecision {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+// This vocabulary is part of the canonical cross-adapter contract. The
+// production persistence path currently stores its stable string form.
+#[allow(dead_code)]
 pub enum ApprovalDecision {
     Approved,
     Denied,
@@ -420,6 +424,9 @@ pub enum ApprovalDecision {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+// Keep the typed receipt vocabulary even while SQLite stores the serialized
+// event names; protocol conformance tests protect these values.
+#[allow(dead_code)]
 pub enum ReceiptEvent {
     Requested,
     ApprovalPending,
@@ -635,7 +642,10 @@ fn risk_tags(
     tags
 }
 
-fn secret_path(path: &str) -> bool {
+/// Canonical secret-path classifier shared by policy evaluation and the native
+/// inspection boundary. The resolved (post-symlink) form of a proposed read is
+/// re-checked against this list before any release.
+pub fn secret_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     [
         "/.ssh/",

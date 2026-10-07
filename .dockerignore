@@ -1,0 +1,9 @@
+.git
+target
+kernel/target
+ui
+observe
+reports
+node_modules
+*.db
+*.log

@@ -15,8 +15,9 @@ kerna          # start governed Claude with automatic routing and local shadow
 ```
 
 The longer `kerna guard ...` and `kerna demo ...` forms remain as compatibility aliases, but they
-are hidden from the primary help. Useful explicit overrides are `kerna claude --route local`,
-`kerna claude --route cloud`, `kerna sandbox`, and `kerna replay <evidence.json>`.
+are hidden from the primary help. The legacy stage path now requires the explicit degraded flag:
+`kerna claude --host-demo --route local` or `kerna claude --host-demo --route cloud`. Other useful
+commands are `kerna sandbox` and `kerna replay <evidence.json>`.
 
 ## Windows setup
 
@@ -56,7 +57,7 @@ known-good; otherwise keep the truthful amber readiness card and use recorded re
 2. Prove a local-only session with a read-only task:
 
    ```powershell
-   kerna claude --route local --prompt "Summarize the security invariants. Do not modify files."
+   kerna claude --host-demo --route local --prompt "Summarize the security invariants. Do not modify files."
    ```
 
    The dashboard prints the disposable clone path and its chosen loopback URL. Show the sticky

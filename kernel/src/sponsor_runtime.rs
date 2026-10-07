@@ -291,6 +291,7 @@ fn cache_root() -> PathBuf {
         })
 }
 
+#[allow(dead_code)]
 pub fn smoke_request() -> SandboxRequest {
     SandboxRequest {
         backend: ExecutionBackend::Wasmer,

@@ -43,6 +43,13 @@ pub struct McpClient {
     request_id: u64,
 }
 
+fn append_docker_secret_names(args: &mut Vec<String>, secrets: &[(String, String)]) {
+    for (name, _) in secrets {
+        args.push("--env".to_string());
+        args.push(name.clone());
+    }
+}
+
 impl McpClient {
     /// Start a reviewed production plugin in a hermetic Docker container. The
     /// image entrypoint is the MCP server; configuration arguments are passed
@@ -71,12 +78,13 @@ impl McpClient {
             docker_args.push("--mount".to_string());
             docker_args.push(mount_spec(&workspace, root, false)?);
         }
+        let mut resolved_secrets = Vec::new();
         for name in &server.secrets {
             let value = std::env::var(name)
                 .map_err(|_| anyhow!("declared secret '{}' is not set in the environment", name))?;
-            docker_args.push("-e".to_string());
-            docker_args.push(format!("{}={}", name, value));
+            resolved_secrets.push((name.clone(), value));
         }
+        append_docker_secret_names(&mut docker_args, &resolved_secrets);
         docker_args.push(server.image.clone());
         docker_args.extend(server.args.clone());
 
@@ -98,6 +106,9 @@ impl McpClient {
             if let Ok(value) = std::env::var(var) {
                 command.env(var, value);
             }
+        }
+        for (name, value) in resolved_secrets {
+            command.env(name, value);
         }
         let mut child = command.spawn()?;
         let stdin = child
@@ -169,11 +180,9 @@ impl McpClient {
                 docker_args.push(format!("https_proxy={}", proxy));
             }
 
-            // Pass declared secrets into the container explicitly.
-            for (name, val) in &resolved_secrets {
-                docker_args.push("-e".to_string());
-                docker_args.push(format!("{}={}", name, val));
-            }
+            // Docker copies only these named variables from its tightly scoped
+            // client environment. Values never appear in the host command line.
+            append_docker_secret_names(&mut docker_args, &resolved_secrets);
 
             docker_args.push(docker_image.to_string());
             docker_args.push(actual_cmd);
@@ -204,8 +213,14 @@ impl McpClient {
             }
         }
 
+        if runtime_mode == "docker" {
+            for (name, value) in &resolved_secrets {
+                command.env(name, value);
+            }
+        }
+
         // Inject declared secrets into the legacy developer child's environment.
-        // In docker mode they were already passed via `-e` above, so skip to
+        // In docker mode they were already passed by name above, so skip to
         // avoid leaking them to the `docker` CLI process env.
         if runtime_mode != "docker" {
             for (name, val) in &resolved_secrets {
@@ -438,7 +453,7 @@ impl Drop for McpClient {
 
 #[cfg(test)]
 mod containment_tests {
-    use super::mount_spec;
+    use super::{append_docker_secret_names, mount_spec};
     use std::fs;
 
     #[test]
@@ -449,5 +464,15 @@ mod containment_tests {
         assert!(spec.contains("target=/workspace/read,readonly"));
         assert!(mount_spec(&root, "..", true).is_err());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn docker_arguments_contain_secret_names_never_values() {
+        let secret = "must-not-appear-in-process-list".to_string();
+        let mut args = Vec::new();
+        append_docker_secret_names(&mut args, &[("PLUGIN_API_KEY".to_string(), secret.clone())]);
+
+        assert_eq!(args, ["--env", "PLUGIN_API_KEY"]);
+        assert!(!args.join(" ").contains(&secret));
     }
 }

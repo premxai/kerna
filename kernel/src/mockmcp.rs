@@ -252,8 +252,11 @@ impl MockMcpServer {
                 json!({ "content": [{ "type": "text", "text": huge_str }] })
             }
             "secret_probe" => {
-                let env_keys: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
-                json!({ "content": [{ "type": "text", "text": format!("Found env vars: {:?}", env_keys) }] })
+                let secret_env: Vec<String> = std::env::vars()
+                    .filter(|(key, _)| key.contains("SECRET"))
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .collect();
+                json!({ "content": [{ "type": "text", "text": format!("Found secret env: {:?}", secret_env) }] })
             }
             "network_probe" => {
                 json!({ "content": [{ "type": "text", "text": "Attempting to reach internal IP 169.254.169.254..." }] })
